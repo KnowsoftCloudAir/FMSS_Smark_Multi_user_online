@@ -1067,3 +1067,376 @@ document.getElementById("restore-file")?.addEventListener("change", async functi
   }
 })();
 
+
+/* ---- Payment detail view ---- */
+window.openPaymentDetail = async function (id) {
+  try {
+    const p = await api(`/api/payments/${id}`);
+    document.getElementById("pd-title").textContent = p.request_no + " — " + (p.status || "");
+    document.getElementById("pd-body").innerHTML = `
+      <p><strong>Payee:</strong> ${p.payee_name || "—"}</p>
+      <p><strong>Amount:</strong> ${Number(p.amount).toLocaleString()}</p>
+      <p><strong>Budget:</strong> ${p.budget_code || ""} — ${p.budget_description || ""}</p>
+      <p><strong>Expense:</strong> ${p.expense_code || ""} — ${p.expense_description || ""}</p>
+      <p><strong>Debit:</strong> ${p.debit_account || "—"}</p>
+      <p><strong>Credit:</strong> ${p.credit_account || "—"}</p>
+      <p><strong>Requester:</strong> ${p.requester || "—"}</p>
+      <p><strong>Approver:</strong> ${p.designated_approver || "—"}</p>
+      <p><strong>Narration:</strong> ${p.narration || "—"}</p>
+      ${p.rejection_reason ? `<p><strong>Rejection:</strong> ${p.rejection_reason}</p>` : ""}
+      <h4 style="margin-top:12px;">Attachments</h4>
+      <ul>${(p.attachments || []).map(a => `<li><a href="${a.url}" target="_blank">${a.filename}</a> (${a.size_bytes} bytes)</li>`).join("") || "<li>None</li>"}</ul>
+      <h4 style="margin-top:12px;">History</h4>
+      <ul>${(p.history || []).map(h => `<li>${h.action} — ${h.comment || ""} <small>${h.at || ""}</small></li>`).join("")}</ul>
+    `;
+    document.getElementById("payment-detail-modal").dataset.pid = id;
+    document.getElementById("payment-detail-modal").classList.add("open");
+  } catch (ex) { alert(ex.message); }
+};
+
+document.getElementById("pd-upload-btn")?.addEventListener("click", async () => {
+  const pid = document.getElementById("payment-detail-modal").dataset.pid;
+  const f = document.getElementById("pd-file");
+  if (!pid || !f.files.length) return alert("Select a file");
+  if (f.files[0].size > 100 * 1024) return alert("Max 100KB");
+  const form = new FormData();
+  form.append("file", f.files[0]);
+  try {
+    const res = await fetch(API + `/api/payments/${pid}/attachments`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Upload failed");
+    openPaymentDetail(pid);
+  } catch (ex) { alert(ex.message); }
+});
+
+// Enhance payments table with View button
+const _loadPayments = loadPayments;
+loadPayments = async function () {
+  try {
+    const rows = await api("/api/payments");
+    const tbody = document.querySelector("#payments-table tbody");
+    if (!tbody) return;
+    const role = currentUser.role;
+    tbody.innerHTML = rows.map(p => {
+      let actions = `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Open</button> `;
+      if (p.status === "submitted" && ["program", "project_manager", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-success" onclick="actPay(${p.id},'program-approve')">Program Approve</button> `;
+      }
+      if (p.status === "program_approved" && ["finance", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-primary" onclick="actPay(${p.id},'finance-approve')">Finance Approve</button> `;
+      }
+      if (p.status === "finance_approved" && ["finance", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-accent" onclick="actPay(${p.id},'pay')">Mark Paid</button> `;
+      }
+      if (["submitted", "program_approved"].includes(p.status) && ["finance", "program", "project_manager", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-danger" onclick="actPay(${p.id},'reject')">Reject</button>`;
+      }
+      return `<tr>
+        <td>${p.request_no}</td>
+        <td>${p.payee_name || "—"}</td>
+        <td>${Number(p.amount).toLocaleString()}</td>
+        <td>${p.expense_code || ""} — ${p.expense_description || ""}</td>
+        <td><span class="status-pill status-${p.status}">${p.status}</span></td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join("");
+  } catch (ex) { console.warn(ex); }
+};
+
+/* ---- Asset dashboard + form fields ---- */
+let chartIns, chartCond2, chartLife, chartCost;
+
+async function loadAssetDashboard() {
+  try {
+    const d = await api("/api/assets/dashboard");
+    const k = document.getElementById("asset-kpis");
+    if (k) {
+      k.innerHTML = `
+        <div class="kpi-card"><div class="kpi-value">${d.total}</div><div class="kpi-label">Active Assets</div></div>
+        <div class="kpi-card"><div class="kpi-value">${d.insured}</div><div class="kpi-label">Insured</div></div>
+        <div class="kpi-card"><div class="kpi-value">${d.uninsured}</div><div class="kpi-label">Uninsured</div></div>
+        <div class="kpi-card"><div class="kpi-value">${d.damaged}</div><div class="kpi-label">Damaged</div></div>
+        <div class="kpi-card"><div class="kpi-value">${d.under_repair}</div><div class="kpi-label">Under Repair</div></div>
+        <div class="kpi-card"><div class="kpi-value">${Number(d.total_nbv).toLocaleString()}</div><div class="kpi-label">Total NBV</div></div>`;
+    }
+    if (!window.Chart) return;
+    const mk = (id, type, labels, data, label) => {
+      const ctx = document.getElementById(id);
+      if (!ctx) return null;
+      return new Chart(ctx, {
+        type,
+        data: { labels, datasets: [{ label, data, backgroundColor: ["#27AE60","#E74C3C","#3498DB","#F39C12","#9B59B6"], borderRadius: 8, borderWidth: 0, hoverOffset: 10 }] },
+        options: { plugins: { legend: { position: "bottom" }, title: { display: true, text: label, font: { weight: "700" } } }, scales: type === "bar" ? { y: { beginAtZero: true } } : undefined },
+      });
+    };
+    if (chartIns) chartIns.destroy();
+    chartIns = mk("chart-asset-ins", "doughnut", ["Insured", "Uninsured"], [d.insured, d.uninsured], "Insurance");
+    if (chartCond2) chartCond2.destroy();
+    const bc = d.by_condition || {};
+    chartCond2 = mk("chart-asset-cond", "bar", Object.keys(bc), Object.values(bc), "Condition");
+    if (chartLife) chartLife.destroy();
+    const ul = d.useful_life_buckets || {};
+    chartLife = mk("chart-asset-life", "bar", Object.keys(ul), Object.values(ul), "Useful Life");
+    if (chartCost) chartCost.destroy();
+    chartCost = mk("chart-asset-cost", "bar", ["Cost", "NBV"], [d.total_cost, d.total_nbv], "Cost vs NBV");
+  } catch (ex) { console.warn(ex); }
+}
+
+const _loadAssets = loadAssets;
+loadAssets = async function () {
+  await loadAssetDashboard();
+  try {
+    const rows = await api("/api/assets");
+    const tbody = document.querySelector("#assets-table tbody");
+    if (!tbody) return;
+    const canEdit = currentUser.can_edit_assets || ["finance", "project_manager", "company_admin", "asset_editor"].includes(currentUser.role);
+    tbody.innerHTML = rows.map(a => `<tr>
+      <td>${a.image_path ? `<img class="asset-thumb" src="${a.image_path}" />` : "—"}</td>
+      <td>${a.asset_number}</td>
+      <td><a href="#" onclick="openAsset(${a.id});return false;">${a.asset_name}</a></td>
+      <td>${a.category || ""}</td>
+      <td>${Number(a.cost || 0).toLocaleString()}</td>
+      <td>${Number(a.nbv || 0).toLocaleString()}</td>
+      <td>${a.condition || ""} / ${a.status || ""}</td>
+      <td>${canEdit ? `<input type="file" accept="image/*" onchange="uploadAssetPhoto(${a.id}, this)" />
+        <button class="btn btn-sm btn-outline" onclick="disposeAsset(${a.id})">Dispose</button>` : "View"}</td>
+    </tr>`).join("");
+  } catch (ex) { console.warn(ex); }
+};
+
+window.openAsset = async function (id) {
+  try {
+    const a = await api(`/api/assets/${id}`);
+    const canFin = ["finance", "company_admin", "project_manager"].includes(currentUser.role);
+    let html = `<div class="card"><h3>${a.asset_name} (${a.asset_number})</h3>
+      <p>Assigned to: <strong>${a.assigned_to || "—"}</strong> · Status: ${a.status} · Condition: ${a.condition}</p>
+      <p>Cost: ${Number(a.cost||0).toLocaleString()} · NBV: ${Number(a.nbv||0).toLocaleString()} · Life: ${a.useful_life || "—"} yrs</p>
+      <p>Debit: ${a.debit_account_label || "—"} · Credit: ${a.credit_account_label || "—"}</p>
+      ${a.image_path ? `<img src="${a.image_path}" style="max-width:200px;border-radius:8px;" />` : ""}
+      <h4>Accounting entries</h4>
+      <ul>${(a.accounting_entries||[]).map(e => `<li>${e.date} ${e.description}: ${e.amount} (${e.journal_entry_no||""})</li>`).join("") || "<li>None yet</li>"}</ul>`;
+    if (canFin) {
+      html += `<h4>Post value adjustment</h4>
+        <div class="form-grid">
+          <div class="form-group"><label>Amount (+ increase / − decrease NBV)</label><input id="adj-amt" type="number" step="0.01" /></div>
+          <div class="form-group"><label>Description</label><input id="adj-desc" /></div>
+          <div class="form-group"><label>Narration</label><input id="adj-narr" /></div>
+          <div class="form-group"><label>Debit Account ID</label><input id="adj-debit" type="number" /></div>
+          <div class="form-group"><label>Credit Account ID</label><input id="adj-credit" type="number" /></div>
+          <div class="form-group"><button class="btn btn-primary" onclick="postAssetAdj(${id})">Post to Ledger</button></div>
+        </div>`;
+    }
+    html += `</div>`;
+    document.getElementById("pd-title").textContent = "Asset Detail";
+    document.getElementById("pd-body").innerHTML = html;
+    document.getElementById("payment-detail-modal").classList.add("open");
+  } catch (ex) { alert(ex.message); }
+};
+
+window.postAssetAdj = async function (id) {
+  const form = new FormData();
+  form.append("amount", document.getElementById("adj-amt").value);
+  form.append("description", document.getElementById("adj-desc").value);
+  form.append("narration", document.getElementById("adj-narr").value);
+  form.append("debit_account_id", document.getElementById("adj-debit").value);
+  form.append("credit_account_id", document.getElementById("adj-credit").value);
+  try {
+    const res = await fetch(API + `/api/assets/${id}/accounting`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message + " NBV: " + data.new_nbv);
+    openAsset(id);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.disposeAsset = async function (id) {
+  if (!confirm("Mark asset as disposed? It will be auto-deleted after 14 days.")) return;
+  try {
+    await api(`/api/assets/${id}/dispose`, { method: "POST" });
+    loadAssets();
+  } catch (ex) { alert(ex.message); }
+};
+
+// Patch asset form submit for new fields
+document.getElementById("asset-form")?.addEventListener("submit", async (e) => {
+  // already has listener - add second is ok for extra fields if first doesn't send them
+}, true);
+
+const origAssetSubmit = document.getElementById("asset-form");
+if (origAssetSubmit) {
+  origAssetSubmit.onsubmit = async (e) => {
+    e.preventDefault();
+    try {
+      await api("/api/assets", {
+        method: "POST",
+        body: JSON.stringify({
+          asset_number: document.getElementById("ast-number").value,
+          asset_name: document.getElementById("ast-name").value,
+          category: document.getElementById("ast-cat").value,
+          location: document.getElementById("ast-loc").value,
+          cost: parseFloat(document.getElementById("ast-cost").value || 0),
+          nbv: parseFloat(document.getElementById("ast-nbv").value || 0),
+          condition: document.getElementById("ast-cond").value,
+          insurance: document.getElementById("ast-ins").value,
+          assigned_to: document.getElementById("ast-assigned")?.value || "",
+          useful_life: parseFloat(document.getElementById("ast-life")?.value || 0),
+          status: document.getElementById("ast-status")?.value || "active",
+          debit_account_id: document.getElementById("ast-debit")?.value ? parseInt(document.getElementById("ast-debit").value) : null,
+          credit_account_id: document.getElementById("ast-credit")?.value ? parseInt(document.getElementById("ast-credit").value) : null,
+        }),
+      });
+      e.target.reset();
+      document.getElementById("asset-form").style.display = "none";
+      loadAssets();
+    } catch (ex) { alert(ex.message); }
+  };
+}
+
+/* ---- Inventory ---- */
+document.getElementById("btn-add-inv")?.addEventListener("click", () => {
+  document.getElementById("inv-form").style.display = "grid";
+});
+document.getElementById("inv-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData();
+  form.append("item_code", document.getElementById("inv-code").value);
+  form.append("item_name", document.getElementById("inv-name").value);
+  form.append("category", document.getElementById("inv-cat").value);
+  form.append("department", document.getElementById("inv-dept").value);
+  form.append("cost_price", document.getElementById("inv-cost").value || 0);
+  form.append("qty_received", document.getElementById("inv-qty").value || 0);
+  if (document.getElementById("inv-debit").value) form.append("debit_account_id", document.getElementById("inv-debit").value);
+  if (document.getElementById("inv-credit").value) form.append("credit_account_id", document.getElementById("inv-credit").value);
+  try {
+    const res = await fetch(API + "/api/inventory", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    e.target.reset();
+    document.getElementById("inv-form").style.display = "none";
+    loadInventory();
+  } catch (ex) { alert(ex.message); }
+});
+
+async function loadInventory() {
+  try {
+    const rows = await api("/api/inventory");
+    const tbody = document.querySelector("#inv-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = rows.map(i => `<tr>
+      <td>${i.item_code}</td><td>${i.item_name}</td><td>${i.category||""}</td>
+      <td>${Number(i.cost_price||0).toLocaleString()}</td>
+      <td>${i.balance_qty}</td><td>${Number(i.total_value||0).toLocaleString()}</td>
+      <td>
+        <button class="btn btn-sm btn-success" onclick="invMove(${i.id},'receive')">Receive</button>
+        <button class="btn btn-sm btn-outline" onclick="invMove(${i.id},'issue')">Issue</button>
+      </td>
+    </tr>`).join("");
+  } catch (ex) { console.warn(ex); }
+}
+
+window.invMove = async function (id, type) {
+  const qty = prompt("Quantity:");
+  if (!qty) return;
+  const form = new FormData();
+  form.append("movement_type", type);
+  form.append("quantity", qty);
+  form.append("narration", type + " stock");
+  try {
+    const res = await fetch(API + `/api/inventory/${id}/move`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    loadInventory();
+  } catch (ex) { alert(ex.message); }
+};
+
+/* ---- Vendors ---- */
+document.getElementById("btn-add-vendor")?.addEventListener("click", () => {
+  document.getElementById("vendor-form").style.display = "grid";
+});
+document.getElementById("vendor-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData();
+  ["ven-no","ven-name","ven-addr","ven-cac","ven-tax","ven-reg","ven-audit","ven-bank","ven-amt","ven-desc","ven-debit","ven-credit"].forEach(() => {});
+  form.append("vendor_number", document.getElementById("ven-no").value);
+  form.append("name", document.getElementById("ven-name").value);
+  form.append("address", document.getElementById("ven-addr").value);
+  form.append("cac_number", document.getElementById("ven-cac").value);
+  form.append("tax_clearance", document.getElementById("ven-tax").value);
+  form.append("reg_with_govt", document.getElementById("ven-reg").value);
+  form.append("audit_3yrs", document.getElementById("ven-audit").value);
+  form.append("bank", document.getElementById("ven-bank").value);
+  form.append("amount", document.getElementById("ven-amt").value || 0);
+  form.append("description", document.getElementById("ven-desc").value);
+  if (document.getElementById("ven-debit").value) form.append("debit_account_id", document.getElementById("ven-debit").value);
+  if (document.getElementById("ven-credit").value) form.append("credit_account_id", document.getElementById("ven-credit").value);
+  try {
+    const res = await fetch(API + "/api/vendors", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    e.target.reset();
+    document.getElementById("vendor-form").style.display = "none";
+    loadVendors();
+  } catch (ex) { alert(ex.message); }
+});
+
+async function loadVendors() {
+  try {
+    const rows = await api("/api/vendors");
+    const tbody = document.querySelector("#vendor-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = rows.map(v => `<tr>
+      <td>${v.vendor_number}</td><td>${v.name}</td><td>${v.tax_clearance||""}</td>
+      <td>${v.score||0}</td><td>${Number(v.amount||0).toLocaleString()}</td>
+      <td>${v.bank||""}</td><td>${v.description||""}</td>
+    </tr>`).join("");
+  } catch (ex) { console.warn(ex); }
+}
+
+/* ---- Reports ---- */
+document.getElementById("btn-load-tb")?.addEventListener("click", async () => {
+  try {
+    const d = await api("/api/reports/trial-balance");
+    let h = `<table class="data-table"><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Project</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead><tbody>`;
+    (d.rows || []).forEach(r => {
+      h += `<tr><td>${r.code}</td><td>${r.name}</td><td>${r.type}</td><td>${r.project_code||""}</td>
+        <td>${Number(r.debit).toLocaleString()}</td><td>${Number(r.credit).toLocaleString()}</td>
+        <td>${Number(r.balance).toLocaleString()}</td></tr>`;
+    });
+    h += `</tbody></table><p><strong>Total Debit:</strong> ${Number(d.total_debit).toLocaleString()} ·
+      <strong>Total Credit:</strong> ${Number(d.total_credit).toLocaleString()} ·
+      <strong>${d.balanced ? "✅ Balanced" : "⚠️ Out of balance"}</strong></p>`;
+    document.getElementById("report-output").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-load-ledger")?.addEventListener("click", async () => {
+  try {
+    const rows = await api("/api/reports/ledger");
+    let h = `<table class="data-table"><thead><tr><th>Entry</th><th>Date</th><th>Source</th><th>Account</th><th>Description</th><th>Debit</th><th>Credit</th></tr></thead><tbody>`;
+    rows.forEach(r => {
+      h += `<tr><td>${r.entry_no}</td><td>${r.date}</td><td>${r.source_type}</td><td>${r.account}</td>
+        <td>${r.description}</td><td>${Number(r.debit).toLocaleString()}</td><td>${Number(r.credit).toLocaleString()}</td></tr>`;
+    });
+    h += `</tbody></table>`;
+    document.getElementById("report-output").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+});
+
+// Wire showView for new pages
+const _sv = showView;
+showView = function (name) {
+  if (name === "inventory") name = "inventory-full";
+  if (name === "vendors") name = "vendors-full";
+  _sv(name);
+  if (name === "inventory-full") loadInventory();
+  if (name === "vendors-full") loadVendors();
+  if (name === "assets-reg") loadAssets();
+  if (name === "reports") { /* wait for button */ }
+};
+

@@ -108,6 +108,7 @@ class ChartOfAccount(Base):
     code = Column(String(50), nullable=False)
     name = Column(String(200), nullable=False)
     account_type = Column(String(50), default="Expense")  # Asset, Liability, Equity, Income, Expense, Cash
+    project_code = Column(String(50), default="")  # optional project code tag on account
     is_active = Column(Boolean, default=True)
 
 
@@ -201,6 +202,142 @@ class Asset(Base):
     nbv = Column(Float, default=0.0)
     image_path = Column(String(500), nullable=True)
     notes = Column(Text, default="")
+    assigned_to = Column(String(150), default="")
+    status = Column(String(30), default="active")  # active | under_repair | disposed
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    disposed_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
+class PaymentAttachment(Base):
+    __tablename__ = "payment_attachments"
+
+    id = Column(Integer, primary_key=True, index=True)
+    payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=False, index=True)
+    filename = Column(String(255), nullable=False)
+    stored_path = Column(String(500), nullable=False)
+    content_type = Column(String(100), default="application/octet-stream")
+    size_bytes = Column(Integer, default=0)
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProjectCode(Base):
+    __tablename__ = "project_codes"
+    __table_args__ = (UniqueConstraint("company_id", "code", name="uq_project_code"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    code = Column(String(50), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, default="")
+    is_active = Column(Boolean, default=True)
+
+
+class JournalEntry(Base):
+    """General ledger journal line — all modules post here."""
+    __tablename__ = "journal_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    entry_no = Column(String(50), nullable=False, index=True)
+    entry_date = Column(Date, default=date.today)
+    source_type = Column(String(40), default="")  # payment, asset, inventory, vendor, manual, asset_adjustment
+    source_id = Column(Integer, nullable=True)
+    account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=False)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    description = Column(String(300), default="")
+    narration = Column(Text, default="")
+    debit = Column(Float, default=0.0)
+    credit = Column(Float, default=0.0)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InventoryItem(Base):
+    __tablename__ = "inventory_items"
+    __table_args__ = (UniqueConstraint("company_id", "item_code", name="uq_inv_code"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    item_code = Column(String(50), nullable=False)
+    item_name = Column(String(200), nullable=False)
+    category = Column(String(100), default="")
+    note = Column(Text, default="")
+    department = Column(String(100), default="")
+    cost_price = Column(Float, default=0.0)
+    qty_received = Column(Float, default=0.0)
+    qty_issued = Column(Float, default=0.0)
+    balance_qty = Column(Float, default=0.0)
+    total_value = Column(Float, default=0.0)
+    receive_method = Column(String(100), default="")
+    funding_source = Column(String(100), default="")
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class InventoryMovement(Base):
+    __tablename__ = "inventory_movements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    item_id = Column(Integer, ForeignKey("inventory_items.id"), nullable=False)
+    movement_type = Column(String(20), default="receive")  # receive | issue | adjust
+    quantity = Column(Float, default=0.0)
+    unit_cost = Column(Float, default=0.0)
+    total = Column(Float, default=0.0)
+    narration = Column(Text, default="")
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class Vendor(Base):
+    __tablename__ = "vendors"
+    __table_args__ = (UniqueConstraint("company_id", "vendor_number", name="uq_vendor_no"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    vendor_number = Column(String(50), nullable=False)
+    name = Column(String(200), nullable=False)
+    address = Column(Text, default="")
+    cac_number = Column(String(100), default="")
+    experience = Column(String(100), default="")
+    tax_clearance = Column(String(50), default="")
+    bank = Column(String(150), default="")
+    reg_with_govt = Column(String(50), default="")
+    audit_3yrs = Column(String(50), default="")
+    description = Column(Text, default="")
+    amount = Column(Float, default=0.0)
+    score = Column(Float, default=0.0)
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class AssetAccountingEntry(Base):
+    """Finance posts value adjustments (add/reduce NBV) with debit/credit."""
+    __tablename__ = "asset_accounting_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    asset_id = Column(Integer, ForeignKey("assets.id"), nullable=False, index=True)
+    entry_date = Column(Date, default=date.today)
+    description = Column(String(300), default="")
+    narration = Column(Text, default="")
+    amount = Column(Float, default=0.0)  # positive = increase NBV, negative = decrease
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=False)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=False)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    journal_entry_no = Column(String(50), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

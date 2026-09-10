@@ -163,6 +163,7 @@ class COAIn(BaseModel):
     code: str
     name: str
     account_type: str = "Expense"
+    project_code: str = ""
 
 
 class BudgetCodeIn(BaseModel):
@@ -210,3 +211,8 @@ class AssetIn(BaseModel):
     condition: str = "Good"
     nbv: float = 0.0
     notes: str = ""
+    assigned_to: str = ""
+    status: str = "active"
+    debit_account_id: Optional[int] = None
+    credit_account_id: Optional[int] = None
+    project_code_id: Optional[int] = None

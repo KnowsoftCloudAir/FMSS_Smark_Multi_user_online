@@ -11,7 +11,9 @@ import os, shutil, re, json, zipfile, io, csv, secrets
 from database import engine, get_db, Base
 from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
-    ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset
+    ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
+    PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
+    Vendor, AssetAccountingEntry
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -283,6 +285,62 @@ def init_defaults(db: Session):
             paid_rent.spent = 850000 + 4200000  # rent + salary samples
 
         db.commit()
+        
+        # Inventory samples
+        inv_items = [
+            ("INV-001", "Paracetamol 500mg (box)", "Medical", "Health", 2500, 200),
+            ("INV-002", "Exercise books (carton)", "Education", "Education", 18000, 50),
+            ("INV-003", "Printer paper A4", "Stationery", "Admin", 4500, 80),
+            ("INV-004", "Mosquito nets", "Medical", "Health", 3200, 150),
+            ("INV-005", "USB flash drives 32GB", "IT", "ICT", 3500, 40),
+        ]
+        for code, name, cat, dept, cost, qty in inv_items:
+            total = cost * qty
+            item = InventoryItem(
+                company_id=demo.id, item_code=code, item_name=name, category=cat,
+                department=dept, cost_price=cost, qty_received=qty, qty_issued=0,
+                balance_qty=qty, total_value=total, receive_method="Purchase",
+                funding_source="Grant", debit_account_id=coa_map.get("5500"),
+                credit_account_id=coa_map.get("1000"),
+            )
+            db.add(item)
+            db.flush()
+            if total > 0:
+                eno = f"JE-SEED-INV-{code}"
+                db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today(),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["5500"],
+                    description=f"Stock {code}", narration=name, debit=total, credit=0, created_by=admin.id))
+                db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today(),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["1000"],
+                    description=f"Stock {code}", narration=name, debit=0, credit=total, created_by=admin.id))
+
+        # Vendor samples
+        vendors = [
+            ("V-001", "MedSupply Co", "Lagos", "Yes", "Yes", "Yes", "Zenith Bank", 5000000, "Medical supplies"),
+            ("V-002", "TechMart Nigeria", "Abuja", "Yes", "Yes", "No", "GTBank", 2750000, "IT equipment"),
+            ("V-003", "Training Hub Ltd", "Abuja", "Yes", "No", "Yes", "Access Bank", 980000, "Training services"),
+            ("V-004", "Property Holdings Ltd", "Lagos", "Yes", "Yes", "Yes", "UBA", 850000, "Office rent"),
+        ]
+        for num, name, addr, tax, reg, audit, bank, amt, desc in vendors:
+            score = (25 if tax == "Yes" else 0) + (25 if reg == "Yes" else 0) + (25 if audit == "Yes" else 0) + 20
+            db.add(Vendor(
+                company_id=demo.id, vendor_number=num, name=name, address=addr,
+                tax_clearance=tax, reg_with_govt=reg, audit_3yrs=audit, bank=bank,
+                amount=amt, description=desc, score=score,
+                debit_account_id=coa_map.get("5600"), credit_account_id=coa_map.get("2000"),
+            ))
+
+        # Project codes
+        for code, name in [("PRJ-HLT", "Health Outreach"), ("PRJ-EDU", "Education Support"), ("PRJ-OPS", "Operations")]:
+            db.add(ProjectCode(company_id=demo.id, code=code, name=name))
+
+        # Update assets with assigned_to and accounts
+        for a in db.query(Asset).filter(Asset.company_id == demo.id).all():
+            a.assigned_to = a.assigned_to or "Head Office Pool"
+            a.debit_account_id = a.debit_account_id or coa_map.get("1510")
+            a.credit_account_id = a.credit_account_id or coa_map.get("1000")
+            a.useful_life = a.useful_life or 5.0
+
         print("✅ Demo company seeded with COA, budgets, expenses, assets, payment workflow samples")
 
         # Second company still pending approval (for superadmin demo)
@@ -324,6 +382,10 @@ def on_startup():
     db = next(get_db())
     try:
         init_defaults(db)
+        try:
+            cleanup_disposed_assets(db)
+        except Exception as e:
+            print("cleanup_disposed_assets:", e)
     finally:
         db.close()
 
@@ -872,7 +934,10 @@ def list_coa(current_user: User = Depends(get_current_active_user), db: Session 
 
 @app.post("/api/finance/coa")
 def create_coa(data: COAIn, current_user: User = Depends(require_roles("finance", "company_admin")), db: Session = Depends(get_db)):
-    row = ChartOfAccount(company_id=current_user.company_id, code=data.code, name=data.name, account_type=data.account_type)
+    row = ChartOfAccount(
+        company_id=current_user.company_id, code=data.code, name=data.name,
+        account_type=data.account_type, project_code=getattr(data, "project_code", "") or "",
+    )
     db.add(row)
     db.commit()
     db.refresh(row)
@@ -1052,14 +1117,21 @@ def mark_paid(pid: int, data: PaymentAction, current_user: User = Depends(requir
     pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
     if not pr or pr.status != "finance_approved":
         raise HTTPException(400, "Request not ready for payment")
+    if not pr.debit_account_id or not pr.credit_account_id:
+        raise HTTPException(400, "Debit and credit accounts required before payment")
     pr.status = "paid"
     pr.paid_at = datetime.utcnow()
     bud = db.query(BudgetCode).filter(BudgetCode.id == pr.budget_code_id).first()
     if bud:
         bud.spent = (bud.spent or 0) + pr.amount
     db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="pay", comment=data.comment))
+    post_double_entry(
+        db, current_user.company_id, current_user.id,
+        "payment", pr.id, f"Payment {pr.request_no}", pr.narration or pr.payee_name,
+        pr.debit_account_id, pr.credit_account_id, pr.amount,
+    )
     db.commit()
-    return {"message": "Marked as paid", "status": pr.status}
+    return {"message": "Marked as paid and posted to ledger", "status": pr.status}
 
 
 @app.post("/api/payments/{pid}/reject")
@@ -1206,6 +1278,482 @@ def dashboard_stats(current_user: User = Depends(get_current_active_user), db: S
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": "2.2.0", "multi_tenant": True, "licensing": True}
+
+
+
+# ===================== HELPERS: JOURNAL POSTING =====================
+def next_entry_no(db, company_id, prefix="JE"):
+    n = db.query(JournalEntry).filter(JournalEntry.company_id == company_id).count() + 1
+    return f"{prefix}-{datetime.utcnow().strftime('%Y%m')}-{n:05d}"
+
+
+def post_double_entry(db, company_id, user_id, source_type, source_id, description, narration,
+                      debit_account_id, credit_account_id, amount, project_code_id=None, entry_date=None):
+    """Post balanced debit/credit lines to the general ledger."""
+    if not debit_account_id or not credit_account_id:
+        raise HTTPException(400, "Debit and credit accounts are required")
+    if amount is None or float(amount) == 0:
+        raise HTTPException(400, "Amount must be non-zero")
+    amt = abs(float(amount))
+    entry_no = next_entry_no(db, company_id)
+    ed = entry_date or date.today()
+    db.add(JournalEntry(
+        company_id=company_id, entry_no=entry_no, entry_date=ed,
+        source_type=source_type, source_id=source_id,
+        account_id=debit_account_id, project_code_id=project_code_id,
+        description=description, narration=narration,
+        debit=amt, credit=0.0, created_by=user_id,
+    ))
+    db.add(JournalEntry(
+        company_id=company_id, entry_no=entry_no, entry_date=ed,
+        source_type=source_type, source_id=source_id,
+        account_id=credit_account_id, project_code_id=project_code_id,
+        description=description, narration=narration,
+        debit=0.0, credit=amt, created_by=user_id,
+    ))
+    return entry_no
+
+
+def cleanup_disposed_assets(db: Session):
+    """Delete assets disposed more than 14 days ago."""
+    cutoff = datetime.utcnow() - timedelta(days=14)
+    old = db.query(Asset).filter(
+        Asset.status == "disposed",
+        Asset.disposed_at != None,
+        Asset.disposed_at < cutoff,
+    ).all()
+    for a in old:
+        db.delete(a)
+    if old:
+        db.commit()
+        print(f"🧹 Removed {len(old)} disposed assets older than 14 days")
+
+
+# ===================== PAYMENT DETAIL + ATTACHMENTS (<=100KB) =====================
+MAX_ATTACH = 100 * 1024  # 100 KB
+
+
+@app.get("/api/payments/{pid}")
+def get_payment_detail(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404, "Payment request not found")
+    exp = db.query(ExpenseCode).filter(ExpenseCode.id == pr.expense_code_id).first()
+    bud = db.query(BudgetCode).filter(BudgetCode.id == pr.budget_code_id).first()
+    debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.debit_account_id).first() if pr.debit_account_id else None
+    credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
+    requester = db.query(User).filter(User.id == pr.requester_id).first()
+    approver = db.query(User).filter(User.id == pr.designated_approver_id).first()
+    atts = db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id == pr.id).all()
+    logs = db.query(PaymentApprovalLog).filter(PaymentApprovalLog.payment_request_id == pr.id).order_by(PaymentApprovalLog.created_at).all()
+    return {
+        "id": pr.id, "request_no": pr.request_no, "amount": pr.amount, "status": pr.status,
+        "payee_name": pr.payee_name, "narration": pr.narration, "currency": pr.currency,
+        "budget_code": bud.code if bud else None, "budget_description": bud.description if bud else None,
+        "expense_code": exp.code if exp else None, "expense_description": exp.description if exp else None,
+        "debit_account": f"{debit.code} - {debit.name}" if debit else None,
+        "credit_account": f"{credit.code} - {credit.name}" if credit else None,
+        "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id,
+        "requester": requester.full_name or requester.username if requester else None,
+        "designated_approver": approver.full_name or approver.username if approver else None,
+        "rejection_reason": pr.rejection_reason,
+        "created_at": pr.created_at.isoformat() if pr.created_at else None,
+        "program_approved_at": pr.program_approved_at.isoformat() if pr.program_approved_at else None,
+        "finance_approved_at": pr.finance_approved_at.isoformat() if pr.finance_approved_at else None,
+        "paid_at": pr.paid_at.isoformat() if pr.paid_at else None,
+        "attachments": [{"id": a.id, "filename": a.filename, "size_bytes": a.size_bytes, "url": a.stored_path} for a in atts],
+        "history": [{"action": l.action, "comment": l.comment, "at": l.created_at.isoformat() if l.created_at else None} for l in logs],
+    }
+
+
+@app.post("/api/payments/{pid}/attachments")
+async def upload_payment_attachment(
+    pid: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404, "Not found")
+    content = await file.read()
+    if len(content) > MAX_ATTACH:
+        raise HTTPException(400, f"Attachment must be ≤ 100KB (got {len(content)} bytes)")
+    ext = Path(file.filename or "file").suffix.lower()
+    if ext not in {".pdf", ".png", ".jpg", ".jpeg", ".csv", ".xlsx", ".doc", ".docx", ".txt"}:
+        raise HTTPException(400, "File type not allowed")
+    safe = f"pay_{current_user.company_id}_{pid}_{secrets.token_hex(4)}{ext}"
+    dest = UPLOADS_DIR / safe
+    dest.write_bytes(content)
+    att = PaymentAttachment(
+        payment_request_id=pr.id,
+        filename=file.filename or safe,
+        stored_path=f"/static/uploads/{safe}",
+        content_type=file.content_type or "application/octet-stream",
+        size_bytes=len(content),
+        uploaded_by=current_user.id,
+    )
+    db.add(att)
+    db.commit()
+    db.refresh(att)
+    return {"id": att.id, "filename": att.filename, "url": att.stored_path, "size_bytes": att.size_bytes}
+
+
+# When marking paid, post to ledger
+_orig_mark = None  # we patch mark_paid below by replacing function body via string if needed
+
+# ===================== PROJECT CODES =====================
+@app.get("/api/finance/projects")
+def list_projects(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(ProjectCode).filter(ProjectCode.company_id == current_user.company_id, ProjectCode.is_active == True).all()
+
+
+@app.post("/api/finance/projects")
+def create_project(
+    code: str = Form(...), name: str = Form(...), description: str = Form(""),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    row = ProjectCode(company_id=current_user.company_id, code=code, name=name, description=description)
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+# ===================== LEDGER / TRIAL BALANCE / REPORTS =====================
+@app.get("/api/reports/ledger")
+def general_ledger(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not (current_user.can_access_reports or current_user.role in ("finance", "company_admin", "superadmin")):
+        raise HTTPException(403, "No report access")
+    rows = db.query(JournalEntry).filter(JournalEntry.company_id == current_user.company_id).order_by(JournalEntry.entry_date, JournalEntry.id).all()
+    out = []
+    for j in rows:
+        acc = db.query(ChartOfAccount).filter(ChartOfAccount.id == j.account_id).first()
+        out.append({
+            "entry_no": j.entry_no, "date": str(j.entry_date), "source_type": j.source_type,
+            "account": f"{acc.code} - {acc.name}" if acc else str(j.account_id),
+            "description": j.description, "narration": j.narration,
+            "debit": j.debit, "credit": j.credit,
+        })
+    return out
+
+
+@app.get("/api/reports/trial-balance")
+def trial_balance(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not (current_user.can_access_reports or current_user.role in ("finance", "company_admin", "superadmin")):
+        raise HTTPException(403, "No report access")
+    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == current_user.company_id).all()
+    result = []
+    total_d = total_c = 0.0
+    for acc in accounts:
+        lines = db.query(JournalEntry).filter(JournalEntry.company_id == current_user.company_id, JournalEntry.account_id == acc.id).all()
+        d = sum(l.debit or 0 for l in lines)
+        c = sum(l.credit or 0 for l in lines)
+        if d == 0 and c == 0:
+            continue
+        total_d += d
+        total_c += c
+        result.append({
+            "code": acc.code, "name": acc.name, "type": acc.account_type,
+            "project_code": acc.project_code or "",
+            "debit": d, "credit": c, "balance": d - c,
+        })
+    return {"rows": result, "total_debit": total_d, "total_credit": total_c, "balanced": abs(total_d - total_c) < 0.01}
+
+
+@app.get("/api/reports/ledger/export")
+def export_ledger_csv(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = general_ledger(current_user, db)
+    si = io.StringIO()
+    w = csv.DictWriter(si, fieldnames=["entry_no", "date", "source_type", "account", "description", "narration", "debit", "credit"])
+    w.writeheader()
+    for r in data:
+        w.writerow(r)
+    si.seek(0)
+    return StreamingResponse(iter([si.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=general_ledger.csv"})
+
+
+@app.get("/api/reports/trial-balance/export")
+def export_tb_csv(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = trial_balance(current_user, db)
+    si = io.StringIO()
+    w = csv.writer(si)
+    w.writerow(["Code", "Name", "Type", "Project", "Debit", "Credit", "Balance"])
+    for r in data["rows"]:
+        w.writerow([r["code"], r["name"], r["type"], r["project_code"], r["debit"], r["credit"], r["balance"]])
+    w.writerow([])
+    w.writerow(["TOTAL", "", "", "", data["total_debit"], data["total_credit"], ""])
+    si.seek(0)
+    return StreamingResponse(iter([si.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=trial_balance.csv"})
+
+
+# ===================== ASSET DETAIL + ACCOUNTING + DISPOSE =====================
+@app.get("/api/assets/dashboard")
+def assets_dashboard(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not can_view_assets(current_user):
+        raise HTTPException(403, "No access")
+    assets = db.query(Asset).filter(Asset.company_id == current_user.company_id, Asset.status != "disposed").all()
+    # also include disposed for stats? exclude from main lists
+    all_a = db.query(Asset).filter(Asset.company_id == current_user.company_id).all()
+    insured = sum(1 for a in assets if (a.insurance or "").lower() in ("yes", "y", "true", "insured"))
+    return {
+        "total": len(assets),
+        "insured": insured,
+        "uninsured": len(assets) - insured,
+        "damaged": sum(1 for a in assets if (a.condition or "").lower() in ("bad", "damaged")),
+        "under_repair": sum(1 for a in assets if (a.status or "").lower() == "under_repair"),
+        "disposed": sum(1 for a in all_a if (a.status or "").lower() == "disposed"),
+        "total_cost": sum(a.cost or 0 for a in assets),
+        "total_nbv": sum(a.nbv or 0 for a in assets),
+        "by_condition": {
+            "Good": sum(1 for a in assets if (a.condition or "").lower() == "good"),
+            "Fair": sum(1 for a in assets if (a.condition or "").lower() == "fair"),
+            "Bad": sum(1 for a in assets if (a.condition or "").lower() in ("bad", "damaged")),
+            "Lost": sum(1 for a in assets if (a.condition or "").lower() == "lost"),
+        },
+        "useful_life_buckets": {
+            "0-2 yrs": sum(1 for a in assets if (a.useful_life or 0) <= 2),
+            "3-5 yrs": sum(1 for a in assets if 2 < (a.useful_life or 0) <= 5),
+            "6-10 yrs": sum(1 for a in assets if 5 < (a.useful_life or 0) <= 10),
+            "10+ yrs": sum(1 for a in assets if (a.useful_life or 0) > 10),
+        },
+    }
+
+
+@app.get("/api/assets/{asset_id}")
+def get_asset(asset_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not can_view_assets(current_user):
+        raise HTTPException(403, "No access")
+    a = db.query(Asset).filter(Asset.id == asset_id, Asset.company_id == current_user.company_id).first()
+    if not a:
+        raise HTTPException(404, "Asset not found")
+    entries = db.query(AssetAccountingEntry).filter(AssetAccountingEntry.asset_id == a.id).order_by(AssetAccountingEntry.created_at.desc()).all()
+    debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == a.debit_account_id).first() if a.debit_account_id else None
+    credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == a.credit_account_id).first() if a.credit_account_id else None
+    return {
+        **{c.name: getattr(a, c.name) for c in a.__table__.columns},
+        "debit_account_label": f"{debit.code} - {debit.name}" if debit else None,
+        "credit_account_label": f"{credit.code} - {credit.name}" if credit else None,
+        "accounting_entries": [{
+            "id": e.id, "date": str(e.entry_date), "description": e.description,
+            "narration": e.narration, "amount": e.amount, "journal_entry_no": e.journal_entry_no,
+        } for e in entries],
+    }
+
+
+@app.post("/api/assets/{asset_id}/accounting")
+def post_asset_accounting(
+    asset_id: int,
+    amount: float = Form(...),
+    description: str = Form(...),
+    narration: str = Form(""),
+    debit_account_id: int = Form(...),
+    credit_account_id: int = Form(...),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin", "project_manager")),
+    db: Session = Depends(get_db),
+):
+    a = db.query(Asset).filter(Asset.id == asset_id, Asset.company_id == current_user.company_id).first()
+    if not a:
+        raise HTTPException(404, "Asset not found")
+    entry_no = post_double_entry(
+        db, current_user.company_id, current_user.id,
+        "asset_adjustment", a.id, description, narration,
+        debit_account_id, credit_account_id, amount, project_code_id,
+    )
+    a.nbv = (a.nbv or 0) + float(amount)
+    db.add(AssetAccountingEntry(
+        company_id=current_user.company_id, asset_id=a.id,
+        description=description, narration=narration, amount=float(amount),
+        debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+        project_code_id=project_code_id, journal_entry_no=entry_no, created_by=current_user.id,
+    ))
+    db.commit()
+    return {"message": "Accounting entry posted", "journal_entry_no": entry_no, "new_nbv": a.nbv}
+
+
+@app.post("/api/assets/{asset_id}/dispose")
+def dispose_asset(asset_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not can_edit_assets(current_user):
+        raise HTTPException(403, "Not allowed")
+    a = db.query(Asset).filter(Asset.id == asset_id, Asset.company_id == current_user.company_id).first()
+    if not a:
+        raise HTTPException(404, "Not found")
+    a.status = "disposed"
+    a.disposed_at = datetime.utcnow()
+    a.condition = "Disposed"
+    db.commit()
+    return {"message": "Asset marked disposed. It will be auto-deleted after 14 days."}
+
+
+# On asset create, optional initial capitalization journal if accounts provided
+# (handled in frontend + optional extend create_asset)
+
+# ===================== INVENTORY =====================
+@app.get("/api/inventory")
+def list_inventory(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not (current_user.can_access_inventory or current_user.role in ("finance", "company_admin", "superadmin")):
+        raise HTTPException(403, "No inventory access")
+    return db.query(InventoryItem).filter(InventoryItem.company_id == current_user.company_id).order_by(InventoryItem.id.desc()).all()
+
+
+@app.post("/api/inventory")
+def create_inventory(
+    item_code: str = Form(...), item_name: str = Form(...), category: str = Form(""),
+    department: str = Form(""), cost_price: float = Form(0), qty_received: float = Form(0),
+    note: str = Form(""), receive_method: str = Form(""), funding_source: str = Form(""),
+    debit_account_id: Optional[int] = Form(None), credit_account_id: Optional[int] = Form(None),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db),
+):
+    if not (current_user.can_access_inventory or current_user.role in ("finance", "company_admin")):
+        raise HTTPException(403, "No access")
+    bal = float(qty_received)
+    total = bal * float(cost_price)
+    item = InventoryItem(
+        company_id=current_user.company_id, item_code=item_code, item_name=item_name,
+        category=category, department=department, cost_price=cost_price,
+        qty_received=bal, qty_issued=0, balance_qty=bal, total_value=total,
+        note=note, receive_method=receive_method, funding_source=funding_source,
+        debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+        project_code_id=project_code_id,
+    )
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    if debit_account_id and credit_account_id and total > 0:
+        post_double_entry(
+            db, current_user.company_id, current_user.id,
+            "inventory", item.id, f"Stock receive {item_code}", note or item_name,
+            debit_account_id, credit_account_id, total, project_code_id,
+        )
+        db.commit()
+    return item
+
+
+@app.post("/api/inventory/{item_id}/move")
+def inventory_move(
+    item_id: int,
+    movement_type: str = Form(...),  # receive | issue
+    quantity: float = Form(...),
+    unit_cost: float = Form(0),
+    narration: str = Form(""),
+    debit_account_id: Optional[int] = Form(None),
+    credit_account_id: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db),
+):
+    item = db.query(InventoryItem).filter(InventoryItem.id == item_id, InventoryItem.company_id == current_user.company_id).first()
+    if not item:
+        raise HTTPException(404, "Item not found")
+    qty = float(quantity)
+    cost = float(unit_cost) or (item.cost_price or 0)
+    total = qty * cost
+    if movement_type == "receive":
+        item.qty_received = (item.qty_received or 0) + qty
+        item.balance_qty = (item.balance_qty or 0) + qty
+    elif movement_type == "issue":
+        if qty > (item.balance_qty or 0):
+            raise HTTPException(400, "Insufficient stock")
+        item.qty_issued = (item.qty_issued or 0) + qty
+        item.balance_qty = (item.balance_qty or 0) - qty
+    else:
+        raise HTTPException(400, "movement_type must be receive or issue")
+    item.total_value = (item.balance_qty or 0) * (item.cost_price or cost)
+    item.last_updated = datetime.utcnow()
+    debit = debit_account_id or item.debit_account_id
+    credit = credit_account_id or item.credit_account_id
+    db.add(InventoryMovement(
+        company_id=current_user.company_id, item_id=item.id, movement_type=movement_type,
+        quantity=qty, unit_cost=cost, total=total, narration=narration,
+        debit_account_id=debit, credit_account_id=credit, created_by=current_user.id,
+    ))
+    if debit and credit and total > 0:
+        # issue: expense/COGS debit, inventory credit; receive: inventory debit, cash/AP credit
+        if movement_type == "issue":
+            post_double_entry(db, current_user.company_id, current_user.id, "inventory", item.id,
+                              f"Issue {item.item_code}", narration, debit, credit, total)
+        else:
+            post_double_entry(db, current_user.company_id, current_user.id, "inventory", item.id,
+                              f"Receive {item.item_code}", narration, debit, credit, total)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.get("/api/inventory/export")
+def export_inventory(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(InventoryItem).filter(InventoryItem.company_id == current_user.company_id).all()
+    si = io.StringIO()
+    w = csv.writer(si)
+    w.writerow(["Item Code", "Name", "Category", "Department", "Cost", "Received", "Issued", "Balance", "Total Value"])
+    for i in rows:
+        w.writerow([i.item_code, i.item_name, i.category, i.department, i.cost_price, i.qty_received, i.qty_issued, i.balance_qty, i.total_value])
+    si.seek(0)
+    return StreamingResponse(iter([si.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=inventory.csv"})
+
+
+# ===================== VENDORS =====================
+@app.get("/api/vendors")
+def list_vendors(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not (current_user.can_access_vendors or current_user.role in ("finance", "company_admin", "superadmin")):
+        raise HTTPException(403, "No vendor access")
+    return db.query(Vendor).filter(Vendor.company_id == current_user.company_id).order_by(Vendor.id.desc()).all()
+
+
+@app.post("/api/vendors")
+def create_vendor(
+    vendor_number: str = Form(...), name: str = Form(...), address: str = Form(""),
+    cac_number: str = Form(""), experience: str = Form(""), tax_clearance: str = Form(""),
+    bank: str = Form(""), reg_with_govt: str = Form(""), audit_3yrs: str = Form(""),
+    description: str = Form(""), amount: float = Form(0),
+    debit_account_id: Optional[int] = Form(None), credit_account_id: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db),
+):
+    if not (current_user.can_access_vendors or current_user.role in ("finance", "company_admin")):
+        raise HTTPException(403, "No access")
+    # simple score like original analyze
+    score = 0
+    if tax_clearance.lower() in ("yes", "y"): score += 25
+    if reg_with_govt.lower() in ("yes", "y"): score += 25
+    if audit_3yrs.lower() in ("yes", "y"): score += 25
+    if experience: score += min(25, len(experience))
+    v = Vendor(
+        company_id=current_user.company_id, vendor_number=vendor_number, name=name,
+        address=address, cac_number=cac_number, experience=experience, tax_clearance=tax_clearance,
+        bank=bank, reg_with_govt=reg_with_govt, audit_3yrs=audit_3yrs, description=description,
+        amount=amount, score=score, debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+    )
+    db.add(v)
+    db.commit()
+    db.refresh(v)
+    if debit_account_id and credit_account_id and amount > 0:
+        post_double_entry(
+            db, current_user.company_id, current_user.id, "vendor", v.id,
+            f"Vendor commitment {name}", description or name,
+            debit_account_id, credit_account_id, amount,
+        )
+        db.commit()
+    return v
+
+
+@app.get("/api/vendors/export")
+def export_vendors(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(Vendor).filter(Vendor.company_id == current_user.company_id).all()
+    si = io.StringIO()
+    w = csv.writer(si)
+    w.writerow(["Vendor No", "Name", "CAC", "Tax Clearance", "Bank", "Amount", "Score", "Description"])
+    for v in rows:
+        w.writerow([v.vendor_number, v.name, v.cac_number, v.tax_clearance, v.bank, v.amount, v.score, v.description])
+    si.seek(0)
+    return StreamingResponse(iter([si.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=vendors.csv"})
+
+
+# Patch mark_paid to post journal
 
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"

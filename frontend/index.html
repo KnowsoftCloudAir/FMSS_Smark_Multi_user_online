@@ -138,9 +138,9 @@
       <nav class="sidebar-nav">
         <a href="#" class="nav-item active" data-view="dashboard"><span class="icon">📊</span> Dashboard</a>
         <a href="#" class="nav-item" data-view="finance" data-perm="finance"><span class="icon">💰</span> Finance</a>
-        <a href="#" class="nav-item" data-view="inventory" data-perm="inventory"><span class="icon">📦</span> Inventory</a>
+        <a href="#" class="nav-item" data-view="inventory-full" data-perm="inventory"><span class="icon">📦</span> Inventory</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
-        <a href="#" class="nav-item" data-view="vendors" data-perm="vendors"><span class="icon">🤝</span> Vendors</a>
+        <a href="#" class="nav-item" data-view="vendors-full" data-perm="vendors"><span class="icon">🤝</span> Vendors</a>
         <a href="#" class="nav-item" data-view="reports" data-perm="reports"><span class="icon">📄</span> Reports</a>
         <div class="nav-divider" id="admin-divider" style="display:none;"></div>
         
@@ -339,6 +339,16 @@
         </section>
 
         <section id="view-assets-reg" class="view">
+          <div class="card" id="asset-dash-charts">
+            <h3>Asset Dashboard</h3>
+            <div class="kpi-grid" id="asset-kpis"></div>
+            <div class="charts-grid">
+              <div class="chart-box"><canvas id="chart-asset-ins"></canvas></div>
+              <div class="chart-box"><canvas id="chart-asset-cond"></canvas></div>
+              <div class="chart-box"><canvas id="chart-asset-life"></canvas></div>
+              <div class="chart-box"><canvas id="chart-asset-cost"></canvas></div>
+            </div>
+          </div>
           <div class="card">
             <div class="card-header">
               <h3>Asset Register</h3>
@@ -358,6 +368,13 @@
                 <select id="ast-cond"><option>Good</option><option>Fair</option><option>Bad</option><option>Lost</option></select>
               </div>
               <div class="form-group"><label>Insurance</label><input id="ast-ins" /></div>
+              <div class="form-group"><label>Assigned To</label><input id="ast-assigned" /></div>
+              <div class="form-group"><label>Useful Life (yrs)</label><input id="ast-life" type="number" step="0.1" /></div>
+              <div class="form-group"><label>Status</label>
+                <select id="ast-status"><option value="active">Active</option><option value="under_repair">Under Repair</option></select>
+              </div>
+              <div class="form-group"><label>Debit Account ID</label><input id="ast-debit" type="number" /></div>
+              <div class="form-group"><label>Credit Account ID</label><input id="ast-credit" type="number" /></div>
               <div class="form-group full-width">
                 <button type="submit" class="btn btn-accent">Save Asset</button>
                 <button type="button" class="btn btn-outline" id="btn-cancel-asset">Cancel</button>
@@ -424,12 +441,105 @@
         </section>
 
         <section id="view-finance" class="view"><div class="card"><h3>Finance Module</h3><p>Coming soon — Vouchers, Journal, Bank Reconciliation…</p></div></section>
+        
+        <section id="view-inventory-full" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>Inventory</h3>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-success" id="btn-add-inv">+ Add Item</button>
+                <a class="btn btn-outline" href="/api/inventory/export">CSV</a>
+              </div>
+            </div>
+            <form id="inv-form" class="form-grid" style="display:none;margin-bottom:12px;">
+              <div class="form-group"><label>Item Code *</label><input id="inv-code" required /></div>
+              <div class="form-group"><label>Item Name *</label><input id="inv-name" required /></div>
+              <div class="form-group"><label>Category</label><input id="inv-cat" /></div>
+              <div class="form-group"><label>Department</label><input id="inv-dept" /></div>
+              <div class="form-group"><label>Cost Price</label><input id="inv-cost" type="number" step="0.01" /></div>
+              <div class="form-group"><label>Qty Received</label><input id="inv-qty" type="number" step="0.01" /></div>
+              <div class="form-group"><label>Debit Account ID</label><input id="inv-debit" type="number" /></div>
+              <div class="form-group"><label>Credit Account ID</label><input id="inv-credit" type="number" /></div>
+              <div class="form-group full-width"><button class="btn btn-accent" type="submit">Save Item</button></div>
+            </form>
+            <div class="table-responsive">
+              <table class="data-table" id="inv-table">
+                <thead><tr><th>Code</th><th>Name</th><th>Category</th><th>Cost</th><th>Balance</th><th>Value</th><th>Issue/Receive</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section id="view-vendors-full" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>Vendors / Procurement</h3>
+              <div style="display:flex;gap:8px;">
+                <button class="btn btn-success" id="btn-add-vendor">+ Add Vendor</button>
+                <a class="btn btn-outline" href="/api/vendors/export">CSV</a>
+              </div>
+            </div>
+            <form id="vendor-form" class="form-grid" style="display:none;margin-bottom:12px;">
+              <div class="form-group"><label>Vendor No *</label><input id="ven-no" required /></div>
+              <div class="form-group"><label>Name *</label><input id="ven-name" required /></div>
+              <div class="form-group"><label>Address</label><input id="ven-addr" /></div>
+              <div class="form-group"><label>CAC Number</label><input id="ven-cac" /></div>
+              <div class="form-group"><label>Tax Clearance</label><select id="ven-tax"><option>Yes</option><option>No</option></select></div>
+              <div class="form-group"><label>Reg with Govt</label><select id="ven-reg"><option>Yes</option><option>No</option></select></div>
+              <div class="form-group"><label>3 Yrs Audit</label><select id="ven-audit"><option>Yes</option><option>No</option></select></div>
+              <div class="form-group"><label>Bank</label><input id="ven-bank" /></div>
+              <div class="form-group"><label>Amount</label><input id="ven-amt" type="number" step="0.01" /></div>
+              <div class="form-group"><label>Description</label><input id="ven-desc" /></div>
+              <div class="form-group"><label>Debit Account ID</label><input id="ven-debit" type="number" /></div>
+              <div class="form-group"><label>Credit Account ID</label><input id="ven-credit" type="number" /></div>
+              <div class="form-group full-width"><button class="btn btn-accent" type="submit">Save Vendor</button></div>
+            </form>
+            <div class="table-responsive">
+              <table class="data-table" id="vendor-table">
+                <thead><tr><th>No</th><th>Name</th><th>Tax</th><th>Score</th><th>Amount</th><th>Bank</th><th>Description</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section id="view-inventory" class="view"><div class="card"><h3>Inventory</h3><p>Coming soon.</p></div></section>
         <section id="view-assets" class="view"><div class="card"><h3>Fixed Assets</h3><p>Coming soon.</p></div></section>
         <section id="view-vendors" class="view"><div class="card"><h3>Vendors</h3><p>Coming soon.</p></div></section>
-        <section id="view-reports" class="view"><div class="card"><h3>Reports</h3><p>Coming soon.</p></div></section>
+        <section id="view-reports" class="view">
+          <div class="card">
+            <h3>Financial Reports</h3>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
+              <button class="btn btn-primary" id="btn-load-tb">Trial Balance</button>
+              <button class="btn btn-secondary" id="btn-load-ledger">General Ledger</button>
+              <a class="btn btn-outline" href="/api/reports/trial-balance/export">TB Excel/CSV</a>
+              <a class="btn btn-outline" href="/api/reports/ledger/export">Ledger CSV</a>
+              <a class="btn btn-outline" href="/api/payments/export">Payments CSV</a>
+              <a class="btn btn-outline" href="/api/assets/export">Assets CSV</a>
+              <a class="btn btn-outline" href="/api/inventory/export">Inventory CSV</a>
+              <a class="btn btn-outline" href="/api/vendors/export">Vendors CSV</a>
+            </div>
+            <div id="report-output" class="table-responsive"></div>
+          </div>
+        </section>
       </div>
     </main>
+  </div>
+
+  <!-- PAYMENT DETAIL MODAL -->
+  <div id="payment-detail-modal" class="modal">
+    <div class="modal-content" style="max-width:640px;">
+      <div class="modal-header">
+        <h3 id="pd-title">Payment Request</h3>
+        <button class="modal-close" onclick="document.getElementById('payment-detail-modal').classList.remove('open')">&times;</button>
+      </div>
+      <div id="pd-body"></div>
+      <div style="margin-top:16px;">
+        <label class="hint">Attach file (max 100KB)</label>
+        <input type="file" id="pd-file" />
+        <button class="btn btn-sm btn-secondary" id="pd-upload-btn">Upload Attachment</button>
+      </div>
+    </div>
   </div>
 
   <!-- USER MODAL -->
