@@ -1597,29 +1597,38 @@ window.tickRecon = async function (jid, ticked) {
 
 window.openTrail = async function (jid) {
   try {
-    const t = await api(`/api/finance/transaction-trail/${jid}`);
+    const t = await api("/api/finance/transaction-trail/" + jid);
     document.getElementById("trail-panel").style.display = "block";
-    const src = t.source ? `<p><strong>Source:</strong> ${t.source.type} ${t.source.ref || ""} — ${t.source.name || t.source.payee || ""} (${t.source.status || ""})</p>` : "<p>No linked source document (manual journal).</p>";
-    const pair = (t.paired_entries || []).map(p =>
-      `<li>Acct #${p.account_id}: Dr ${p.debit} / Cr ${p.credit} — ${p.description || ""}</li>`
-    ).join("");
-    document.getElementById("trail-body").innerHTML = `
-      <div class="trail-box">
-        <p><strong>Entry:</strong> ${t.line.entry_no} · ${t.line.date}</p>
-        <p>${t.line.description || ""} — ${t.line.narration || ""}</p>
-        <p>Debit: ${t.line.debit} · Credit: ${t.line.credit}</p>
-        <p>Created by: ${t.created_by || "—"}</p>
-        ${src}
-        <h4>Double-entry pair</h4>
-        <ul>${pair}</ul>
-        ${t.can_correct ? `
-          <h4>Request correction</h4>
-          <div class="form-grid">
-            <div class="form-group"><label>Staff User ID</label><input id="corr-to" type="number" /></div>
-            <div class="form-group full-width"><label>Message</label><input id="corr-msg" placeholder="Please correct this entry…" /></div>
-            <div class="form-group"><button class="btn btn-sm btn-primary" onclick="sendCorrection(${jid})">Send to staff</button></div>
-          </div>` : "<p class="hint">You need finance permission to request corrections.</p>"}
-      </div>`;
+    var src = "<p>No linked source document (manual journal).</p>";
+    if (t.source) {
+      src = "<p><strong>Source:</strong> " + (t.source.type || "") + " " + (t.source.ref || "") +
+        " — " + (t.source.name || t.source.payee || "") + " (" + (t.source.status || "") + ")</p>";
+    }
+    var pair = (t.paired_entries || []).map(function (p) {
+      return "<li>Acct #" + p.account_id + ": Dr " + p.debit + " / Cr " + p.credit + " — " + (p.description || "") + "</li>";
+    }).join("");
+    var corr = "";
+    if (t.can_correct) {
+      corr = "<h4>Request correction</h4>" +
+        "<div class=\"form-grid\">" +
+        "<div class=\"form-group\"><label>Staff User ID</label><input id=\"corr-to\" type=\"number\" /></div>" +
+        "<div class=\"form-group full-width\"><label>Message</label><input id=\"corr-msg\" placeholder=\"Please correct this entry\" /></div>" +
+        "<div class=\"form-group\"><button class=\"btn btn-sm btn-primary\" onclick=\"sendCorrection(" + jid + ")\">Send to staff</button></div>" +
+        "</div>";
+    } else {
+      corr = "<p class=\"hint\">You need finance permission to request corrections.</p>";
+    }
+    var line = t.line || {};
+    document.getElementById("trail-body").innerHTML =
+      "<div class=\"trail-box\">" +
+      "<p><strong>Entry:</strong> " + (line.entry_no || "") + " · " + (line.date || "") + "</p>" +
+      "<p>" + (line.description || "") + " — " + (line.narration || "") + "</p>" +
+      "<p>Debit: " + (line.debit || 0) + " · Credit: " + (line.credit || 0) + "</p>" +
+      "<p>Created by: " + (t.created_by || "—") + "</p>" +
+      src +
+      "<h4>Double-entry pair</h4><ul>" + pair + "</ul>" +
+      corr +
+      "</div>";
   } catch (ex) { alert(ex.message); }
 };
 
