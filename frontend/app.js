@@ -1,0 +1,1069 @@
+const API = "";
+let token = localStorage.getItem("km_token");
+let currentUser = JSON.parse(localStorage.getItem("km_user") || "null");
+
+async function api(path, options = {}) {
+  const headers = options.headers || {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  if (!(options.body instanceof FormData)) {
+    headers["Content-Type"] = headers["Content-Type"] || "application/json";
+  }
+  const res = await fetch(API + path, { ...options, headers });
+  if (res.status === 401) {
+    logout(false);
+    throw new Error("Session expired");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const detail = data.detail;
+    throw new Error(typeof detail === "string" ? detail : (detail?.[0]?.msg || data.message || "Request failed"));
+  }
+  return data;
+}
+
+function showPage(id) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  const el = document.getElementById(id);
+  if (el) el.classList.add("active");
+}
+
+function showView(name) {
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  const el = document.getElementById("view-" + name);
+  if (el) el.classList.add("active");
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+  const nav = document.querySelector(`.nav-item[data-view="${name}"]`);
+  if (nav) nav.classList.add("active");
+  const titles = {
+    dashboard: "Dashboard", finance: "Finance", inventory: "Inventory",
+    assets: "Fixed Assets", vendors: "Vendors", reports: "Reports",
+    users: "User Management", settings: "Settings & Branding",
+  };
+  document.getElementById("page-title").textContent = titles[name] || name;
+  if (name === "users") loadUsers();
+  if (name === "settings") loadCompanySettings();
+}
+
+function logout(redirect = true) {
+  token = null;
+  currentUser = null;
+  localStorage.removeItem("km_token");
+  localStorage.removeItem("km_user");
+  if (redirect) {
+    showPage("landing-page");
+    showLoginCard();
+  }
+}
+
+/* ---------- Splash ---------- */
+function runSplash() {
+  return new Promise((resolve) => {
+    const fill = document.getElementById("splash-fill");
+    const status = document.getElementById("splash-status");
+    const messages = [
+      "Loading modules…",
+      "Preparing secure workspace…",
+      "Starting Knowsoft FMSS ERP…",
+    ];
+    let p = 0;
+    let i = 0;
+    const t = setInterval(() => {
+      p += 8 + Math.random() * 12;
+      if (p > 100) p = 100;
+      fill.style.width = p + "%";
+      if (p > 30 && i === 0) { status.textContent = messages[0]; i = 1; }
+      if (p > 60 && i === 1) { status.textContent = messages[1]; i = 2; }
+      if (p > 85 && i === 2) { status.textContent = messages[2]; i = 3; }
+      if (p >= 100) {
+        clearInterval(t);
+        setTimeout(() => {
+          document.getElementById("splash").classList.add("hide");
+          resolve();
+        }, 400);
+      }
+    }, 120);
+  });
+}
+
+/* ---------- Auth panel toggle ---------- */
+function showLoginCard() {
+  document.getElementById("login-card").style.display = "block";
+  document.getElementById("register-card").style.display = "none";
+}
+function showRegisterCard() {
+  document.getElementById("login-card").style.display = "none";
+  document.getElementById("register-card").style.display = "block";
+}
+
+document.getElementById("btn-show-login")?.addEventListener("click", () => {
+  showLoginCard();
+  document.getElementById("auth-panel")?.scrollIntoView({ behavior: "smooth" });
+});
+document.getElementById("btn-show-register")?.addEventListener("click", () => {
+  showRegisterCard();
+  document.getElementById("auth-panel")?.scrollIntoView({ behavior: "smooth" });
+});
+document.getElementById("btn-hero-login")?.addEventListener("click", () => {
+  showLoginCard();
+  document.getElementById("auth-panel")?.scrollIntoView({ behavior: "smooth" });
+});
+document.getElementById("btn-hero-register")?.addEventListener("click", () => {
+  showRegisterCard();
+  document.getElementById("auth-panel")?.scrollIntoView({ behavior: "smooth" });
+});
+document.getElementById("switch-to-register")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  showRegisterCard();
+});
+document.getElementById("switch-to-login")?.addEventListener("click", (e) => {
+  e.preventDefault();
+  showLoginCard();
+});
+
+// Auto-slug from company name
+document.getElementById("reg-company-name")?.addEventListener("input", (e) => {
+  const slugEl = document.getElementById("reg-company-slug");
+  if (slugEl && !slugEl.dataset.touched) {
+    slugEl.value = e.target.value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 80);
+  }
+});
+document.getElementById("reg-company-slug")?.addEventListener("input", function () {
+  this.dataset.touched = "1";
+  this.value = this.value.toLowerCase().replace(/[^a-z0-9\-]/g, "");
+});
+
+/* ---------- Login ---------- */
+document.getElementById("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("login-btn");
+  const err = document.getElementById("login-error");
+  err.style.display = "none";
+  btn.disabled = true;
+  btn.textContent = "Signing in…";
+
+  const username = document.getElementById("username").value.trim();
+  const password = document.getElementById("password").value;
+
+  try {
+    const form = new URLSearchParams();
+    form.append("username", username);
+    form.append("password", password);
+    const res = await fetch(API + "/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Login failed");
+
+    token = data.access_token;
+    currentUser = data.user;
+    localStorage.setItem("km_token", token);
+    localStorage.setItem("km_user", JSON.stringify(currentUser));
+    enterApp();
+  } catch (ex) {
+    err.textContent = ex.message || "Login failed";
+    err.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Sign In";
+  }
+});
+
+/* ---------- Register company ---------- */
+document.getElementById("register-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = document.getElementById("register-btn");
+  const err = document.getElementById("register-error");
+  const ok = document.getElementById("register-success");
+  err.style.display = "none";
+  ok.style.display = "none";
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+
+  const payload = {
+    company_name: document.getElementById("reg-company-name").value.trim(),
+    company_slug: document.getElementById("reg-company-slug").value.trim().toLowerCase(),
+    address: document.getElementById("reg-address").value.trim(),
+    admin_username: document.getElementById("reg-admin-user").value.trim(),
+    admin_email: document.getElementById("reg-admin-email").value.trim(),
+    admin_full_name: document.getElementById("reg-admin-name").value.trim() || null,
+    admin_password: document.getElementById("reg-admin-pass").value,
+  };
+
+  try {
+    const data = await api("/api/auth/register-company", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    ok.innerHTML = `Company <strong>${data.company.name}</strong> created.<br/>Login as <code>${data.company.slug}/${data.admin_username}</code>`;
+    ok.style.display = "block";
+    document.getElementById("username").value = `${data.company.slug}/${data.admin_username}`;
+    setTimeout(() => showLoginCard(), 2500);
+  } catch (ex) {
+    err.textContent = ex.message;
+    err.style.display = "block";
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Create Company Account";
+  }
+});
+
+function enterApp() {
+  showPage("app-page");
+  document.getElementById("current-user-name").textContent =
+    currentUser.full_name || currentUser.username;
+  document.getElementById("current-user-role").textContent =
+    (currentUser.role || "").replace("_", " ").toUpperCase();
+  document.getElementById("sidebar-company").textContent =
+    currentUser.company_name || currentUser.company_slug || "";
+  document.getElementById("org-name-display").textContent =
+    currentUser.company_name || "";
+
+  const isAdmin = ["company_admin", "admin", "superadmin"].includes(currentUser.role);
+  document.querySelectorAll(".admin-only").forEach(el => {
+    el.style.display = isAdmin ? "flex" : "none";
+  });
+  document.getElementById("admin-divider").style.display = isAdmin ? "block" : "none";
+
+  document.querySelectorAll("[data-perm]").forEach(el => {
+    const key = "can_access_" + el.dataset.perm;
+    el.style.display = currentUser[key] === false ? "none" : "";
+  });
+
+  loadCompanySettings();
+  showView("dashboard");
+}
+
+document.getElementById("logout-btn").addEventListener("click", () => logout(true));
+
+document.querySelectorAll(".nav-item").forEach(item => {
+  item.addEventListener("click", (e) => {
+    e.preventDefault();
+    const view = item.dataset.view;
+    if (view) showView(view);
+    document.getElementById("sidebar").classList.remove("open");
+  });
+});
+document.getElementById("menu-toggle")?.addEventListener("click", () => {
+  document.getElementById("sidebar").classList.toggle("open");
+});
+
+/* ---------- Users ---------- */
+async function loadUsers() {
+  try {
+    const users = await api("/api/admin/users");
+    const tbody = document.querySelector("#users-table tbody");
+    tbody.innerHTML = "";
+    document.getElementById("kpi-users").textContent = users.length;
+    users.forEach(u => {
+      const perms = [];
+      if (u.can_access_finance) perms.push("Finance");
+      if (u.can_access_inventory) perms.push("Inventory");
+      if (u.can_access_assets) perms.push("Assets");
+      if (u.can_access_vendors) perms.push("Vendors");
+      if (u.can_access_reports) perms.push("Reports");
+      const roleClass = u.role === "user" ? "user" : "company_admin";
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td>${u.id}</td>
+        <td><strong>${u.username}</strong></td>
+        <td>${u.full_name || "—"}</td>
+        <td>${u.email}</td>
+        <td><span class="badge badge-${roleClass}">${u.role}</span></td>
+        <td><span class="badge badge-${u.is_active ? "active" : "inactive"}">${u.is_active ? "Active" : "Inactive"}</span></td>
+        <td><div class="perm-tags">${perms.map(p => `<span class="perm-tag">${p}</span>`).join("")}</div></td>
+        <td>
+          <button class="btn btn-sm btn-outline" onclick="editUser(${u.id})">Edit</button>
+          ${u.id !== currentUser.id ? `<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id}, '${u.username}')">Delete</button>` : ""}
+        </td>`;
+      tbody.appendChild(tr);
+    });
+  } catch (ex) {
+    alert("Failed to load users: " + ex.message);
+  }
+}
+
+let editingUserId = null;
+document.getElementById("btn-add-user")?.addEventListener("click", () => {
+  editingUserId = null;
+  document.getElementById("modal-title").textContent = "Create Staff Account";
+  document.getElementById("user-form").reset();
+  document.getElementById("edit-user-id").value = "";
+  document.getElementById("u-username").disabled = false;
+  document.getElementById("pwd-hint").textContent = "(required)";
+  document.getElementById("u-password").required = true;
+  document.getElementById("user-modal").classList.add("open");
+});
+document.getElementById("modal-close")?.addEventListener("click", closeModal);
+document.getElementById("modal-cancel")?.addEventListener("click", closeModal);
+function closeModal() {
+  document.getElementById("user-modal").classList.remove("open");
+}
+
+window.editUser = async function (id) {
+  try {
+    const users = await api("/api/admin/users");
+    const u = users.find(x => x.id === id);
+    if (!u) return;
+    editingUserId = id;
+    document.getElementById("modal-title").textContent = "Edit Staff Account";
+    document.getElementById("edit-user-id").value = id;
+    document.getElementById("u-username").value = u.username;
+    document.getElementById("u-username").disabled = true;
+    document.getElementById("u-email").value = u.email;
+    document.getElementById("u-fullname").value = u.full_name || "";
+    document.getElementById("u-password").value = "";
+    document.getElementById("u-password").required = false;
+    document.getElementById("pwd-hint").textContent = "(leave blank to keep)";
+    document.getElementById("u-role").value = u.role === "admin" ? "company_admin" : u.role;
+    document.getElementById("u-active").checked = u.is_active;
+    document.getElementById("u-finance").checked = u.can_access_finance;
+    document.getElementById("u-inventory").checked = u.can_access_inventory;
+    document.getElementById("u-assets").checked = u.can_access_assets;
+    document.getElementById("u-vendors").checked = u.can_access_vendors;
+    document.getElementById("u-reports").checked = u.can_access_reports;
+    document.getElementById("user-modal").classList.add("open");
+  } catch (ex) {
+    alert(ex.message);
+  }
+};
+
+window.deleteUser = async function (id, username) {
+  if (!confirm(`Delete user "${username}"?`)) return;
+  try {
+    await api(`/api/admin/users/${id}`, { method: "DELETE" });
+    loadUsers();
+  } catch (ex) {
+    alert(ex.message);
+  }
+};
+
+document.getElementById("user-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const payload = {
+    username: document.getElementById("u-username").value.trim(),
+    email: document.getElementById("u-email").value.trim(),
+    full_name: document.getElementById("u-fullname").value.trim() || null,
+    role: document.getElementById("u-role").value,
+    is_active: document.getElementById("u-active").checked,
+    can_access_finance: document.getElementById("u-finance").checked,
+    can_access_inventory: document.getElementById("u-inventory").checked,
+    can_access_assets: document.getElementById("u-assets").checked,
+    can_access_vendors: document.getElementById("u-vendors").checked,
+    can_access_reports: document.getElementById("u-reports").checked,
+    can_edit_assets: document.getElementById("u-edit-assets")?.checked || false,
+    can_approve_payment: document.getElementById("u-approve")?.checked || false,
+  };
+  const pwd = document.getElementById("u-password").value;
+  if (pwd) payload.password = pwd;
+
+  try {
+    if (editingUserId) {
+      if (!pwd) delete payload.password;
+      await api(`/api/admin/users/${editingUserId}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+    } else {
+      if (!pwd || pwd.length < 6) {
+        alert("Password must be at least 6 characters");
+        return;
+      }
+      payload.password = pwd;
+      await api("/api/admin/users", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+    }
+    closeModal();
+    loadUsers();
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+/* ---------- Company settings ---------- */
+async function loadCompanySettings() {
+  try {
+    const s = await api("/api/company");
+    document.getElementById("set-org-name").value = s.name || "";
+    document.getElementById("set-address").value = s.address || "";
+    document.getElementById("set-project-code").value = s.project_code || "";
+    document.getElementById("set-currency-code").value = s.reporting_currency_code || "NGN";
+    document.getElementById("set-currency-symbol").value = s.reporting_currency_symbol || "₦";
+    document.getElementById("org-name-display").textContent = s.name || "";
+    document.getElementById("sidebar-company").textContent = s.name || "";
+
+    const logoUrl = (s.logo_path || "/static/images/logo.png") + "?t=" + Date.now();
+    const favUrl = (s.favicon_path || "/static/images/favicon.ico") + "?t=" + Date.now();
+    ["sidebar-logo", "preview-logo"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.src = logoUrl;
+    });
+    const fav = document.getElementById("favicon");
+    if (fav) fav.href = favUrl;
+    const prevFav = document.getElementById("preview-favicon");
+    if (prevFav) prevFav.src = favUrl;
+  } catch (ex) {
+    console.warn("Company settings:", ex);
+  }
+}
+
+document.getElementById("settings-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/company", {
+      method: "PUT",
+      body: JSON.stringify({
+        name: document.getElementById("set-org-name").value,
+        address: document.getElementById("set-address").value,
+        project_code: document.getElementById("set-project-code").value,
+        reporting_currency_code: document.getElementById("set-currency-code").value,
+        reporting_currency_symbol: document.getElementById("set-currency-symbol").value,
+      }),
+    });
+    alert("Settings saved");
+    loadCompanySettings();
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+document.getElementById("btn-upload-logo")?.addEventListener("click", async () => {
+  const fileInput = document.getElementById("logo-file");
+  if (!fileInput.files.length) return alert("Select an image first");
+  const form = new FormData();
+  form.append("file", fileInput.files[0]);
+  try {
+    const res = await fetch(API + "/api/company/upload-logo", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Upload failed");
+    alert("Logo uploaded");
+    loadCompanySettings();
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+document.getElementById("btn-upload-favicon")?.addEventListener("click", async () => {
+  const fileInput = document.getElementById("favicon-file");
+  if (!fileInput.files.length) return alert("Select an icon first");
+  const form = new FormData();
+  form.append("file", fileInput.files[0]);
+  try {
+    const res = await fetch(API + "/api/company/upload-favicon", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Upload failed");
+    alert("Icon uploaded");
+    loadCompanySettings();
+  } catch (ex) {
+    alert(ex.message);
+  }
+});
+
+/* ---------- Boot ---------- */
+(async function init() {
+  await runSplash();
+  if (token && currentUser) {
+    try {
+      await api("/api/auth/me");
+      enterApp();
+      return;
+    } catch {
+      logout(false);
+    }
+  }
+  showPage("landing-page");
+  showLoginCard();
+})();
+
+/* ========== Extended modules: payments, assets, superadmin, charts, security ========== */
+
+let chartAssets = null;
+let chartPayments = null;
+
+const titlesExtra = {
+  payments: "Payment Requests",
+  "finance-setup": "Finance Setup",
+  "assets-reg": "Asset Register",
+  superadmin: "Superadmin",
+  security: "Security & Backup",
+};
+
+const _origShowView = showView;
+showView = function (name) {
+  // map old assets view to assets-reg if needed
+  if (name === "assets") name = "assets-reg";
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  const el = document.getElementById("view-" + name);
+  if (el) el.classList.add("active");
+  document.querySelectorAll(".nav-item").forEach(n => n.classList.remove("active"));
+  const nav = document.querySelector(`.nav-item[data-view="${name}"]`) ||
+              document.querySelector(`.nav-item[data-view="assets"]`);
+  if (nav) nav.classList.add("active");
+  const titles = {
+    dashboard: "Dashboard", finance: "Finance", inventory: "Inventory",
+    assets: "Fixed Assets", vendors: "Vendors", reports: "Reports",
+    users: "User Management", settings: "Settings & Branding",
+    ...titlesExtra,
+  };
+  document.getElementById("page-title").textContent = titles[name] || name;
+  if (name === "users") loadUsers();
+  if (name === "settings") loadCompanySettings();
+  if (name === "dashboard") loadDashboardCharts();
+  if (name === "payments") { loadPaymentFormData(); loadPayments(); }
+  if (name === "finance-setup") loadFinanceSetup();
+  if (name === "assets-reg") loadAssets();
+  if (name === "superadmin") loadCompanies();
+};
+
+const _origEnterApp = enterApp;
+enterApp = function () {
+  showPage("app-page");
+  document.getElementById("current-user-name").textContent =
+    currentUser.full_name || currentUser.username;
+  document.getElementById("current-user-role").textContent =
+    (currentUser.role || "").replace("_", " ").toUpperCase();
+  document.getElementById("sidebar-company").textContent =
+    currentUser.company_name || currentUser.company_slug || "";
+  document.getElementById("org-name-display").textContent =
+    currentUser.company_name || "";
+
+  const isAdmin = ["company_admin", "admin", "superadmin"].includes(currentUser.role);
+  const isSuper = currentUser.role === "superadmin";
+  const isFinance = ["finance", "company_admin", "superadmin"].includes(currentUser.role);
+
+  document.querySelectorAll(".admin-only").forEach(el => {
+    el.style.display = isAdmin ? "flex" : "none";
+  });
+  document.querySelectorAll(".super-only").forEach(el => {
+    el.style.display = isSuper ? "flex" : "none";
+  });
+  const finSetup = document.querySelector('[data-view="finance-setup"]');
+  if (finSetup) finSetup.style.display = isFinance ? "flex" : "none";
+
+  document.getElementById("admin-divider").style.display = (isAdmin || isSuper) ? "block" : "none";
+
+  document.querySelectorAll("[data-perm]").forEach(el => {
+    const key = "can_access_" + el.dataset.perm;
+    if (currentUser[key] === false && currentUser.role !== "superadmin") {
+      el.style.display = "none";
+    }
+  });
+
+  // Auth header for download links
+  document.querySelectorAll('a[href^="/api/"]').forEach(a => {
+    a.addEventListener("click", async (e) => {
+      if (!token) return;
+      e.preventDefault();
+      const res = await fetch(a.href, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) { alert("Download failed"); return; }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const tmp = document.createElement("a");
+      tmp.href = url;
+      tmp.download = (a.href.split("/").pop() || "download") + (a.href.includes("backup") ? ".zip" : ".csv");
+      if (a.href.includes("backup")) tmp.download = "backup.zip";
+      tmp.click();
+      URL.revokeObjectURL(url);
+    });
+  });
+
+  if (!isSuper) loadCompanySettings();
+  showView(isSuper ? "superadmin" : "dashboard");
+};
+
+async function loadDashboardCharts() {
+  try {
+    const s = await api("/api/dashboard/stats");
+    if (s.assets_count !== undefined) {
+      document.getElementById("kpi-assets").textContent = s.assets_count;
+      document.getElementById("kpi-inventory").textContent = s.payments_pending ?? 0;
+      document.getElementById("kpi-vendors").textContent = s.payments_paid ?? 0;
+      document.getElementById("kpi-users").textContent = s.users_count ?? "—";
+    }
+    const cond = s.condition_breakdown || {};
+    const pay = s.payment_status_breakdown || {};
+
+    const common3d = {
+      plugins: { legend: { position: "bottom" } },
+      scales: {
+        x: { grid: { color: "rgba(15,28,58,0.06)" } },
+        y: { grid: { color: "rgba(15,28,58,0.06)" }, beginAtZero: true },
+      },
+    };
+
+    const ctx1 = document.getElementById("chart-assets");
+    if (ctx1 && window.Chart) {
+      if (chartAssets) chartAssets.destroy();
+      chartAssets = new Chart(ctx1, {
+        type: "bar",
+        data: {
+          labels: Object.keys(cond),
+          datasets: [{
+            label: "Assets by Condition",
+            data: Object.values(cond),
+            backgroundColor: [
+              "rgba(39,174,96,0.85)",
+              "rgba(52,152,219,0.85)",
+              "rgba(231,76,60,0.85)",
+              "rgba(243,156,18,0.85)",
+            ],
+            borderWidth: 0,
+            borderRadius: 8,
+            borderSkipped: false,
+          }],
+        },
+        options: {
+          ...common3d,
+          plugins: {
+            ...common3d.plugins,
+            title: { display: true, text: "Asset Condition (3D style)", font: { weight: "700" } },
+          },
+        },
+      });
+    }
+    const ctx2 = document.getElementById("chart-payments");
+    if (ctx2 && window.Chart) {
+      if (chartPayments) chartPayments.destroy();
+      chartPayments = new Chart(ctx2, {
+        type: "doughnut",
+        data: {
+          labels: Object.keys(pay),
+          datasets: [{
+            data: Object.values(pay),
+            backgroundColor: [
+              "rgba(243,156,18,0.9)",
+              "rgba(52,152,219,0.9)",
+              "rgba(155,89,182,0.9)",
+              "rgba(39,174,96,0.9)",
+              "rgba(231,76,60,0.9)",
+            ],
+            borderWidth: 3,
+            borderColor: "#fff",
+            hoverOffset: 12,
+          }],
+        },
+        options: {
+          plugins: {
+            legend: { position: "bottom" },
+            title: { display: true, text: "Payment Workflow Status", font: { weight: "700" } },
+          },
+          cutout: "45%",
+        },
+      });
+    }
+  } catch (ex) {
+    console.warn("Dashboard stats", ex);
+  }
+}
+
+/* ---- Finance setup ---- */
+async function loadFinanceSetup() {
+  try {
+    const [coa, budgets, expenses] = await Promise.all([
+      api("/api/finance/coa"),
+      api("/api/finance/budget-codes"),
+      api("/api/finance/expense-codes"),
+    ]);
+    document.getElementById("coa-list").innerHTML = coa.map(c =>
+      `<li><strong>${c.code}</strong> — ${c.name} <em>(${c.account_type})</em></li>`).join("");
+    document.getElementById("budget-list").innerHTML = budgets.map(b =>
+      `<li><strong>${b.code}</strong> — ${b.description || ""} · Budget: ${b.amount}</li>`).join("");
+    document.getElementById("expense-list").innerHTML = expenses.map(e =>
+      `<li><strong>${e.code}</strong> — ${e.description}<br/><small>Dr: ${e.default_debit_label || "—"} · Cr: ${e.default_credit_label || "—"}</small></li>`).join("");
+
+    const fill = (sel, rows, labelFn) => {
+      const el = document.getElementById(sel);
+      if (!el) return;
+      const keep = el.querySelector('option[value=""]');
+      el.innerHTML = "";
+      if (keep) el.appendChild(keep);
+      else el.innerHTML = '<option value="">—</option>';
+      rows.forEach(r => {
+        const o = document.createElement("option");
+        o.value = r.id;
+        o.textContent = labelFn(r);
+        el.appendChild(o);
+      });
+    };
+    fill("exp-debit", coa, r => `${r.code} - ${r.name}`);
+    fill("exp-credit", coa, r => `${r.code} - ${r.name}`);
+  } catch (ex) { console.warn(ex); }
+}
+
+document.getElementById("coa-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/finance/coa", {
+      method: "POST",
+      body: JSON.stringify({
+        code: document.getElementById("coa-code").value,
+        name: document.getElementById("coa-name").value,
+        account_type: document.getElementById("coa-type").value,
+      }),
+    });
+    e.target.reset();
+    loadFinanceSetup();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("budget-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/finance/budget-codes", {
+      method: "POST",
+      body: JSON.stringify({
+        code: document.getElementById("bud-code").value,
+        description: document.getElementById("bud-desc").value,
+        amount: parseFloat(document.getElementById("bud-amount").value || 0),
+      }),
+    });
+    e.target.reset();
+    loadFinanceSetup();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("expense-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const debit = document.getElementById("exp-debit").value;
+    const credit = document.getElementById("exp-credit").value;
+    await api("/api/finance/expense-codes", {
+      method: "POST",
+      body: JSON.stringify({
+        code: document.getElementById("exp-code").value,
+        description: document.getElementById("exp-desc").value,
+        default_debit_account_id: debit ? parseInt(debit) : null,
+        default_credit_account_id: credit ? parseInt(credit) : null,
+      }),
+    });
+    e.target.reset();
+    loadFinanceSetup();
+  } catch (ex) { alert(ex.message); }
+});
+
+/* ---- Payments ---- */
+async function loadPaymentFormData() {
+  try {
+    const [budgets, expenses, coa, approvers] = await Promise.all([
+      api("/api/finance/budget-codes"),
+      api("/api/finance/expense-codes"),
+      api("/api/finance/coa"),
+      api("/api/admin/approvers"),
+    ]);
+    window._expenses = expenses;
+    const fill = (id, rows, fn) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.innerHTML = '<option value="">— Select —</option>';
+      rows.forEach(r => {
+        const o = document.createElement("option");
+        o.value = r.id;
+        o.textContent = fn(r);
+        el.appendChild(o);
+      });
+    };
+    fill("pay-budget", budgets, r => `${r.code} — ${r.description || ""}`);
+    fill("pay-expense", expenses, r => `${r.code} — ${r.description}`);
+    fill("pay-debit", coa, r => `${r.code} - ${r.name}`);
+    fill("pay-credit", coa, r => `${r.code} - ${r.name}`);
+    fill("pay-approver", approvers, r => `${r.full_name || r.username} (${r.role})`);
+  } catch (ex) { console.warn(ex); }
+}
+
+document.getElementById("pay-expense")?.addEventListener("change", function () {
+  const exp = (window._expenses || []).find(e => String(e.id) === this.value);
+  document.getElementById("pay-expense-desc").value = exp ? exp.description : "";
+  if (exp?.default_debit_account_id) {
+    document.getElementById("pay-debit").value = exp.default_debit_account_id;
+  }
+  if (exp?.default_credit_account_id) {
+    document.getElementById("pay-credit").value = exp.default_credit_account_id;
+  }
+});
+
+document.getElementById("btn-new-payment")?.addEventListener("click", () => {
+  document.getElementById("payment-form").style.display = "grid";
+  loadPaymentFormData();
+});
+document.getElementById("btn-cancel-payment")?.addEventListener("click", () => {
+  document.getElementById("payment-form").style.display = "none";
+});
+
+document.getElementById("payment-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const debit = document.getElementById("pay-debit").value;
+  const credit = document.getElementById("pay-credit").value;
+  try {
+    await api("/api/payments/request", {
+      method: "POST",
+      body: JSON.stringify({
+        budget_code_id: parseInt(document.getElementById("pay-budget").value),
+        expense_code_id: parseInt(document.getElementById("pay-expense").value),
+        amount: parseFloat(document.getElementById("pay-amount").value),
+        payee_name: document.getElementById("pay-payee").value,
+        narration: document.getElementById("pay-narration").value,
+        debit_account_id: debit ? parseInt(debit) : null,
+        credit_account_id: credit ? parseInt(credit) : null,
+        designated_approver_id: parseInt(document.getElementById("pay-approver").value),
+      }),
+    });
+    alert("Payment request submitted");
+    e.target.reset();
+    document.getElementById("payment-form").style.display = "none";
+    loadPayments();
+  } catch (ex) { alert(ex.message); }
+});
+
+async function loadPayments() {
+  try {
+    const rows = await api("/api/payments");
+    const tbody = document.querySelector("#payments-table tbody");
+    if (!tbody) return;
+    const role = currentUser.role;
+    tbody.innerHTML = rows.map(p => {
+      let actions = "";
+      if (p.status === "submitted" && ["program", "project_manager", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-success" onclick="actPay(${p.id},'program-approve')">Program Approve</button> `;
+      }
+      if (p.status === "program_approved" && ["finance", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-primary" onclick="actPay(${p.id},'finance-approve')">Finance Approve</button> `;
+      }
+      if (p.status === "finance_approved" && ["finance", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-accent" onclick="actPay(${p.id},'pay')">Mark Paid</button> `;
+      }
+      if (["submitted", "program_approved"].includes(p.status) && ["finance", "program", "project_manager", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-danger" onclick="actPay(${p.id},'reject')">Reject</button>`;
+      }
+      return `<tr>
+        <td>${p.request_no}</td>
+        <td>${p.payee_name || "—"}</td>
+        <td>${Number(p.amount).toLocaleString()}</td>
+        <td>${p.expense_code || ""} — ${p.expense_description || ""}</td>
+        <td><span class="status-pill status-${p.status}">${p.status}</span></td>
+        <td>${actions}</td>
+      </tr>`;
+    }).join("");
+  } catch (ex) { console.warn(ex); }
+}
+
+window.actPay = async function (id, action) {
+  let body = { comment: "" };
+  if (action === "finance-approve") {
+    const debit = prompt("Debit account ID (leave blank to keep current):");
+    const credit = prompt("Credit account ID (leave blank to keep current):");
+    if (debit) body.debit_account_id = parseInt(debit);
+    if (credit) body.credit_account_id = parseInt(credit);
+    body.comment = prompt("Comment (optional):") || "";
+  } else if (action === "reject") {
+    body.comment = prompt("Rejection reason:") || "Rejected";
+  }
+  try {
+    await api(`/api/payments/${id}/${action}`, { method: "POST", body: JSON.stringify(body) });
+    loadPayments();
+  } catch (ex) { alert(ex.message); }
+};
+
+/* ---- Assets ---- */
+document.getElementById("btn-add-asset")?.addEventListener("click", () => {
+  document.getElementById("asset-form").style.display = "grid";
+});
+document.getElementById("btn-cancel-asset")?.addEventListener("click", () => {
+  document.getElementById("asset-form").style.display = "none";
+});
+
+document.getElementById("asset-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/assets", {
+      method: "POST",
+      body: JSON.stringify({
+        asset_number: document.getElementById("ast-number").value,
+        asset_name: document.getElementById("ast-name").value,
+        category: document.getElementById("ast-cat").value,
+        location: document.getElementById("ast-loc").value,
+        cost: parseFloat(document.getElementById("ast-cost").value || 0),
+        nbv: parseFloat(document.getElementById("ast-nbv").value || 0),
+        condition: document.getElementById("ast-cond").value,
+        insurance: document.getElementById("ast-ins").value,
+      }),
+    });
+    e.target.reset();
+    document.getElementById("asset-form").style.display = "none";
+    loadAssets();
+  } catch (ex) { alert(ex.message); }
+});
+
+async function loadAssets() {
+  try {
+    const rows = await api("/api/assets");
+    const tbody = document.querySelector("#assets-table tbody");
+    if (!tbody) return;
+    const canEdit = currentUser.can_edit_assets || ["finance", "project_manager", "company_admin", "asset_editor"].includes(currentUser.role);
+    tbody.innerHTML = rows.map(a => `<tr>
+      <td>${a.image_path ? `<img class="asset-thumb" src="${a.image_path}" />` : "—"}</td>
+      <td>${a.asset_number}</td>
+      <td>${a.asset_name}</td>
+      <td>${a.category || ""}</td>
+      <td>${Number(a.cost || 0).toLocaleString()}</td>
+      <td>${Number(a.nbv || 0).toLocaleString()}</td>
+      <td>${a.condition || ""}</td>
+      <td>${canEdit ? `<input type="file" accept="image/*" onchange="uploadAssetPhoto(${a.id}, this)" />` : "View only"}</td>
+    </tr>`).join("");
+  } catch (ex) {
+    if (ex.message.includes("403") || ex.message.includes("access")) {
+      document.querySelector("#assets-table tbody").innerHTML = "<tr><td colspan='8'>No access to asset register</td></tr>";
+    }
+  }
+}
+
+window.uploadAssetPhoto = async function (id, input) {
+  if (!input.files.length) return;
+  const form = new FormData();
+  form.append("file", input.files[0]);
+  try {
+    const res = await fetch(API + `/api/assets/${id}/photo`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Upload failed");
+    loadAssets();
+  } catch (ex) { alert(ex.message); }
+};
+
+/* ---- Superadmin ---- */
+async function loadCompanies() {
+  try {
+    const rows = await api("/api/superadmin/companies");
+    const tbody = document.querySelector("#companies-table tbody");
+    if (!tbody) return;
+    tbody.innerHTML = rows.map(c => `<tr>
+      <td>${c.name}</td>
+      <td><code>${c.slug}</code></td>
+      <td><span class="status-pill status-${c.status}">${c.status}</span></td>
+      <td>${c.license_expires || "—"}</td>
+      <td>
+        ${c.status === "pending" ? `<button class="btn btn-sm btn-success" onclick="saAction(${c.id},'approve')">Approve</button>` : ""}
+        ${c.status === "pending" ? `<button class="btn btn-sm btn-danger" onclick="saAction(${c.id},'reject')">Reject</button>` : ""}
+        ${c.status === "approved" ? `<button class="btn btn-sm btn-primary" onclick="saAction(${c.id},'license')">Issue 1yr License</button>` : ""}
+        ${c.status !== "suspended" ? `<button class="btn btn-sm btn-outline" onclick="saAction(${c.id},'suspend')">Suspend</button>` : ""}
+      </td>
+    </tr>`).join("");
+  } catch (ex) { alert(ex.message); }
+}
+
+window.saAction = async function (id, action) {
+  try {
+    if (action === "license") {
+      await api(`/api/superadmin/companies/${id}/license`, {
+        method: "POST",
+        body: JSON.stringify({ years: 1, notes: "Annual license" }),
+      });
+    } else {
+      await api(`/api/superadmin/companies/${id}/${action}`, { method: "POST" });
+    }
+    loadCompanies();
+  } catch (ex) { alert(ex.message); }
+};
+
+/* ---- Security ---- */
+document.getElementById("pwd-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({
+        current_password: document.getElementById("pwd-current").value,
+        new_password: document.getElementById("pwd-new").value,
+      }),
+    });
+    alert("Password updated");
+    e.target.reset();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("reset-req-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const data = await api("/api/auth/request-reset", {
+      method: "POST",
+      body: JSON.stringify({
+        email: document.getElementById("reset-email").value,
+        company_slug: document.getElementById("reset-slug").value || null,
+      }),
+    });
+    alert(data.message + (data.reset_token ? "\n\nDemo token:\n" + data.reset_token : ""));
+    if (data.reset_token) document.getElementById("reset-token").value = data.reset_token;
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("reset-confirm-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    await api("/api/auth/confirm-reset", {
+      method: "POST",
+      body: JSON.stringify({
+        token: document.getElementById("reset-token").value,
+        new_password: document.getElementById("reset-new").value,
+      }),
+    });
+    alert("Password reset complete. You can sign in.");
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("restore-file")?.addEventListener("change", async function () {
+  if (!this.files.length) return;
+  const form = new FormData();
+  form.append("file", this.files[0]);
+  try {
+    const res = await fetch(API + "/api/backup/restore", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Restore failed");
+    alert(data.message);
+  } catch (ex) { alert(ex.message); }
+});
+
+// Update user form roles
+(function patchUserRoles() {
+  const sel = document.getElementById("u-role");
+  if (sel && sel.options.length < 5) {
+    sel.innerHTML = `
+      <option value="user">User</option>
+      <option value="finance">Finance</option>
+      <option value="program">Program</option>
+      <option value="project_manager">Project Manager</option>
+      <option value="asset_editor">Asset Editor</option>
+      <option value="company_admin">Company Admin</option>`;
+  }
+  // add can_edit_assets checkbox if missing
+  const fs = document.querySelector("#user-form fieldset");
+  if (fs && !document.getElementById("u-edit-assets")) {
+    const lab = document.createElement("label");
+    lab.innerHTML = `<input type="checkbox" id="u-edit-assets" /> Can Edit Assets`;
+    fs.appendChild(lab);
+    const lab2 = document.createElement("label");
+    lab2.innerHTML = `<input type="checkbox" id="u-approve" /> Can Approve Payments`;
+    fs.appendChild(lab2);
+  }
+})();
+

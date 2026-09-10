@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowsoft FMSS ERP</title>
+  <link rel="icon" id="favicon" href="/static/images/favicon.ico" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+  <!-- ========== SPLASH ========== -->
+  <div id="splash" class="splash">
+    <div class="splash-inner">
+      <img src="/static/images/logo.png" alt="Knowsoft" class="splash-logo" />
+      <div class="splash-bar"><div class="splash-bar-fill" id="splash-fill"></div></div>
+      <p class="splash-status" id="splash-status">Initializing Knowsoft FMSS ERP…</p>
+    </div>
+  </div>
+
+  <!-- ========== LANDING (dark captivating) ========== -->
+  <div id="landing-page" class="page">
+    <div class="landing-bg">
+      <div class="orb orb-1"></div>
+      <div class="orb orb-2"></div>
+      <div class="orb orb-3"></div>
+    </div>
+
+    <header class="landing-header">
+      <img src="/static/images/logo.png" alt="Knowsoft" class="landing-logo" />
+      <div class="landing-nav">
+        <button class="btn btn-outline-light btn-sm" id="btn-show-login">Sign In</button>
+        <button class="btn btn-accent btn-sm" id="btn-show-register">Register Company</button>
+      </div>
+    </header>
+
+    <main class="landing-hero">
+      <div class="hero-copy">
+        <h1>Welcome to <span class="accent">Knowsoft FMSS ERP</span></h1>
+        <p class="hero-lead">
+          Experience professional workflow, financial management, asset management,
+          inventory management, bank reconciliation, project reporting and more.
+        </p>
+        <ul class="hero-features">
+          <li>Secure multi-company isolation — your data stays private</li>
+          <li>Role-based access for every staff member</li>
+          <li>Finance, Assets, Inventory, Vendors &amp; Reports in one place</li>
+        </ul>
+        <div class="hero-cta">
+          <button class="btn btn-accent btn-lg" id="btn-hero-register">Register Your Firm</button>
+          <button class="btn btn-outline-light btn-lg" id="btn-hero-login">Staff Sign In</button>
+        </div>
+      </div>
+
+      <div class="hero-panel" id="auth-panel">
+        <!-- LOGIN CARD -->
+        <div class="auth-card" id="login-card">
+          <h2>Sign In</h2>
+          <p class="auth-hint">Use <code>company-slug/username</code> or just username if unique</p>
+          <form id="login-form">
+            <div class="form-group">
+              <label>Company / Username</label>
+              <input type="text" id="username" required placeholder="demo/admin  or  admin" autocomplete="username" />
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="password" required placeholder="Enter password" autocomplete="current-password" />
+            </div>
+            <button type="submit" class="btn btn-accent btn-block" id="login-btn">Sign In</button>
+            <div id="login-error" class="error-msg" style="display:none;"></div>
+          </form>
+          <p class="auth-switch">New firm? <a href="#" id="switch-to-register">Register company</a></p>
+          <p class="demo-hint">Demo: <code>demo/admin</code> · <code>Admin@Knowsoft1!</code><br/>Superadmin: <code>superadmin</code> · <code>Knowsoft@Super0160!</code></p>
+        </div>
+
+        <!-- REGISTER CARD -->
+        <div class="auth-card" id="register-card" style="display:none;">
+          <h2>Register Your Company</h2>
+          <p class="auth-hint">Creates an isolated workspace for your firm and staff</p>
+          <form id="register-form">
+            <div class="form-group">
+              <label>Company Name *</label>
+              <input type="text" id="reg-company-name" required placeholder="Acme Consulting Ltd" />
+            </div>
+            <div class="form-group">
+              <label>Company Slug * <small>(login prefix, lowercase)</small></label>
+              <input type="text" id="reg-company-slug" required pattern="[a-z0-9\-]+" placeholder="acme-consulting" />
+            </div>
+            <div class="form-group">
+              <label>Address</label>
+              <input type="text" id="reg-address" placeholder="City, Country" />
+            </div>
+            <hr class="auth-divider" />
+            <div class="form-group">
+              <label>Admin Username *</label>
+              <input type="text" id="reg-admin-user" required minlength="3" placeholder="admin" />
+            </div>
+            <div class="form-group">
+              <label>Admin Email *</label>
+              <input type="email" id="reg-admin-email" required placeholder="admin@company.com" />
+            </div>
+            <div class="form-group">
+              <label>Admin Full Name</label>
+              <input type="text" id="reg-admin-name" placeholder="Jane Doe" />
+            </div>
+            <div class="form-group">
+              <label>Admin Password *</label>
+              <input type="password" id="reg-admin-pass" required minlength="10" placeholder="Min 10 chars, mixed case, number, symbol" placeholder="Min 6 characters" />
+            </div>
+            <button type="submit" class="btn btn-success btn-block" id="register-btn">Create Company Account</button>
+            <div id="register-error" class="error-msg" style="display:none;"></div>
+            <div id="register-success" class="success-msg" style="display:none;"></div>
+          </form>
+          <p class="auth-switch">Already registered? <a href="#" id="switch-to-login">Sign in</a></p>
+        </div>
+      </div>
+    </main>
+
+    <footer class="landing-footer">
+      <span>© 2026 Knowsoft Consulting Ltd · Multi-tenant ERP</span>
+    </footer>
+  </div>
+
+  <!-- ========== APP SHELL ========== -->
+  <div id="app-page" class="page">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-header">
+        <img id="sidebar-logo" src="/static/images/logo.png" alt="Logo" onerror="this.style.display='none'" />
+        <div>
+          <span class="brand">Knowsoft FMSS</span>
+          <small id="sidebar-company" class="sidebar-company"></small>
+        </div>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="#" class="nav-item active" data-view="dashboard"><span class="icon">📊</span> Dashboard</a>
+        <a href="#" class="nav-item" data-view="finance" data-perm="finance"><span class="icon">💰</span> Finance</a>
+        <a href="#" class="nav-item" data-view="inventory" data-perm="inventory"><span class="icon">📦</span> Inventory</a>
+        <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
+        <a href="#" class="nav-item" data-view="vendors" data-perm="vendors"><span class="icon">🤝</span> Vendors</a>
+        <a href="#" class="nav-item" data-view="reports" data-perm="reports"><span class="icon">📄</span> Reports</a>
+        <div class="nav-divider" id="admin-divider" style="display:none;"></div>
+        
+        <a href="#" class="nav-item" data-view="payments"><span class="icon">💳</span> Payment Requests</a>
+        <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
+        <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
+        <a href="#" class="nav-item super-only" data-view="superadmin" style="display:none;"><span class="icon">🛡️</span> Superadmin</a>
+
+        <a href="#" class="nav-item admin-only" data-view="users" style="display:none;"><span class="icon">👥</span> User Management</a>
+        <a href="#" class="nav-item" data-view="security"><span class="icon">🔐</span> Security & Backup</a>
+        <a href="#" class="nav-item admin-only" data-view="settings" style="display:none;"><span class="icon">⚙️</span> Settings &amp; Branding</a>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="user-info">
+          <strong id="current-user-name">—</strong>
+          <small id="current-user-role">—</small>
+        </div>
+        <button class="btn btn-outline btn-sm" id="logout-btn">Logout</button>
+      </div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <button class="menu-toggle" id="menu-toggle">☰</button>
+        <h2 id="page-title">Dashboard</h2>
+        <div class="topbar-right"><span id="org-name-display"></span></div>
+      </header>
+
+      <div class="content-area">
+        <section id="view-dashboard" class="view active">
+          <div class="kpi-grid">
+            <div class="kpi-card"><div class="kpi-icon">🏢</div><div class="kpi-value" id="kpi-assets">0</div><div class="kpi-label">Fixed Assets</div></div>
+            <div class="kpi-card"><div class="kpi-icon">📦</div><div class="kpi-value" id="kpi-inventory">0</div><div class="kpi-label">Inventory Items</div></div>
+            <div class="kpi-card"><div class="kpi-icon">🤝</div><div class="kpi-value" id="kpi-vendors">0</div><div class="kpi-label">Vendors</div></div>
+            <div class="kpi-card"><div class="kpi-icon">👥</div><div class="kpi-value" id="kpi-users">—</div><div class="kpi-label">Team Access</div></div>
+          </div>
+          <div class="card" id="dash-charts">
+            <h3>Live Charts</h3>
+            <div class="charts-grid">
+              <div class="chart-box"><canvas id="chart-assets"></canvas></div>
+              <div class="chart-box"><canvas id="chart-payments"></canvas></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Your secure company workspace</h3>
+            <p>All data for your firm is isolated from other registered companies. Company admins control who can access Finance, Inventory, Assets, Vendors and Reports.</p>
+          </div>
+        </section>
+
+        <section id="view-users" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>User Management</h3>
+              <button class="btn btn-success" id="btn-add-user">+ Create Staff Account</button>
+            </div>
+            <p class="hint" style="margin-bottom:12px;">Staff only see modules you grant. Each company has its own user list.</p>
+            <div class="table-responsive">
+              <table class="data-table" id="users-table">
+                <thead>
+                  <tr>
+                    <th>ID</th><th>Username</th><th>Full Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-settings" class="view">
+          <div class="card">
+            <h3>Company Settings</h3>
+            <form id="settings-form" class="form-grid">
+              <div class="form-group"><label>Organisation Name</label><input type="text" id="set-org-name" /></div>
+              <div class="form-group"><label>Address</label><input type="text" id="set-address" /></div>
+              <div class="form-group"><label>Project Code</label><input type="text" id="set-project-code" /></div>
+              <div class="form-group"><label>Currency Code</label><input type="text" id="set-currency-code" placeholder="NGN" /></div>
+              <div class="form-group"><label>Currency Symbol</label><input type="text" id="set-currency-symbol" placeholder="₦" /></div>
+              <div class="form-group full-width"><button type="submit" class="btn btn-primary">Save Settings</button></div>
+            </form>
+          </div>
+          <div class="card">
+            <h3>Logo &amp; Icons</h3>
+            <div class="branding-grid">
+              <div class="branding-item">
+                <h4>Company Logo</h4>
+                <img id="preview-logo" src="/static/images/logo.png" alt="Logo" class="preview-img" />
+                <input type="file" id="logo-file" accept="image/*" />
+                <button class="btn btn-secondary" id="btn-upload-logo">Upload Logo</button>
+              </div>
+              <div class="branding-item">
+                <h4>App Icon</h4>
+                <img id="preview-favicon" src="/static/images/favicon.png" alt="Icon" class="preview-img small" />
+                <input type="file" id="favicon-file" accept="image/*,.ico" />
+                <button class="btn btn-secondary" id="btn-upload-favicon">Upload Icon</button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        
+        <section id="view-payments" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>Payment Request</h3>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-success" id="btn-new-payment">+ New Request</button>
+                <a class="btn btn-outline" href="/api/payments/export" id="btn-export-payments">Download CSV</a>
+              </div>
+            </div>
+            <form id="payment-form" class="form-grid" style="display:none;margin-bottom:20px;">
+              <div class="form-group">
+                <label>Budget Code *</label>
+                <select id="pay-budget" required></select>
+              </div>
+              <div class="form-group">
+                <label>Expense Code *</label>
+                <select id="pay-expense" required></select>
+              </div>
+              <div class="form-group full-width">
+                <label>Expense Description</label>
+                <input type="text" id="pay-expense-desc" readonly placeholder="Auto-filled from expense code" />
+              </div>
+              <div class="form-group">
+                <label>Amount *</label>
+                <input type="number" id="pay-amount" step="0.01" min="0.01" required />
+              </div>
+              <div class="form-group">
+                <label>Payee Name</label>
+                <input type="text" id="pay-payee" />
+              </div>
+              <div class="form-group">
+                <label>Debit Account (optional)</label>
+                <select id="pay-debit"><option value="">— Use finance default —</option></select>
+              </div>
+              <div class="form-group">
+                <label>Credit Account (optional)</label>
+                <select id="pay-credit"><option value="">— Use finance default —</option></select>
+              </div>
+              <div class="form-group full-width">
+                <label>Who should approve this budget line? *</label>
+                <select id="pay-approver" required></select>
+              </div>
+              <div class="form-group full-width">
+                <label>Narration</label>
+                <input type="text" id="pay-narration" />
+              </div>
+              <div class="form-group full-width">
+                <button type="submit" class="btn btn-accent">Submit for Approval</button>
+                <button type="button" class="btn btn-outline" id="btn-cancel-payment">Cancel</button>
+              </div>
+            </form>
+            <div class="table-responsive">
+              <table class="data-table" id="payments-table">
+                <thead><tr><th>No</th><th>Payee</th><th>Amount</th><th>Expense</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-finance-setup" class="view">
+          <div class="card">
+            <h3>Chart of Accounts</h3>
+            <form id="coa-form" class="form-grid">
+              <div class="form-group"><label>Code</label><input id="coa-code" required /></div>
+              <div class="form-group"><label>Name</label><input id="coa-name" required /></div>
+              <div class="form-group"><label>Type</label>
+                <select id="coa-type"><option>Expense</option><option>Cash</option><option>Asset</option><option>Liability</option><option>Income</option><option>Equity</option></select>
+              </div>
+              <div class="form-group"><button class="btn btn-primary" type="submit">Add Account</button></div>
+            </form>
+            <ul id="coa-list" class="simple-list"></ul>
+          </div>
+          <div class="card">
+            <h3>Budget Codes</h3>
+            <form id="budget-form" class="form-grid">
+              <div class="form-group"><label>Code</label><input id="bud-code" required /></div>
+              <div class="form-group"><label>Description</label><input id="bud-desc" /></div>
+              <div class="form-group"><label>Amount</label><input id="bud-amount" type="number" step="0.01" /></div>
+              <div class="form-group"><button class="btn btn-primary" type="submit">Add Budget Code</button></div>
+            </form>
+            <ul id="budget-list" class="simple-list"></ul>
+          </div>
+          <div class="card">
+            <h3>Expense Codes (tie to debit/credit accounts)</h3>
+            <form id="expense-form" class="form-grid">
+              <div class="form-group"><label>Code</label><input id="exp-code" required /></div>
+              <div class="form-group"><label>Description</label><input id="exp-desc" required /></div>
+              <div class="form-group"><label>Default Debit Account</label><select id="exp-debit"></select></div>
+              <div class="form-group"><label>Default Credit Account</label><select id="exp-credit"></select></div>
+              <div class="form-group"><button class="btn btn-primary" type="submit">Add Expense Code</button></div>
+            </form>
+            <ul id="expense-list" class="simple-list"></ul>
+          </div>
+        </section>
+
+        <section id="view-assets-reg" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>Asset Register</h3>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn btn-success" id="btn-add-asset">+ Add Asset</button>
+                <a class="btn btn-outline" href="/api/assets/export" id="btn-export-assets">Download CSV</a>
+              </div>
+            </div>
+            <form id="asset-form" class="form-grid" style="display:none;margin-bottom:16px;">
+              <div class="form-group"><label>Asset Number *</label><input id="ast-number" required /></div>
+              <div class="form-group"><label>Asset Name *</label><input id="ast-name" required /></div>
+              <div class="form-group"><label>Category</label><input id="ast-cat" /></div>
+              <div class="form-group"><label>Location</label><input id="ast-loc" /></div>
+              <div class="form-group"><label>Cost</label><input id="ast-cost" type="number" step="0.01" /></div>
+              <div class="form-group"><label>NBV</label><input id="ast-nbv" type="number" step="0.01" /></div>
+              <div class="form-group"><label>Condition</label>
+                <select id="ast-cond"><option>Good</option><option>Fair</option><option>Bad</option><option>Lost</option></select>
+              </div>
+              <div class="form-group"><label>Insurance</label><input id="ast-ins" /></div>
+              <div class="form-group full-width">
+                <button type="submit" class="btn btn-accent">Save Asset</button>
+                <button type="button" class="btn btn-outline" id="btn-cancel-asset">Cancel</button>
+              </div>
+            </form>
+            <div class="table-responsive">
+              <table class="data-table" id="assets-table">
+                <thead><tr><th>Photo</th><th>Number</th><th>Name</th><th>Category</th><th>Cost</th><th>NBV</th><th>Condition</th><th>Photo Upload</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-superadmin" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>Registered Firms</h3>
+              <a class="btn btn-secondary" href="/api/superadmin/backup/all" id="btn-backup-all">Backup All Firms</a>
+            </div>
+            <div class="table-responsive">
+              <table class="data-table" id="companies-table">
+                <thead><tr><th>Name</th><th>Slug</th><th>Status</th><th>License Expiry</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-security" class="view">
+          <div class="card">
+            <h3>Change Password</h3>
+            <form id="pwd-form" class="form-grid">
+              <div class="form-group"><label>Current Password</label><input type="password" id="pwd-current" required /></div>
+              <div class="form-group"><label>New Password (strong)</label><input type="password" id="pwd-new" required minlength="10" /></div>
+              <div class="form-group full-width"><button class="btn btn-primary" type="submit">Update Password</button></div>
+            </form>
+            <p class="hint">Min 10 characters with uppercase, lowercase, number and special character.</p>
+          </div>
+          <div class="card">
+            <h3>Password Reset (email token)</h3>
+            <form id="reset-req-form" class="form-grid">
+              <div class="form-group"><label>Email</label><input type="email" id="reset-email" required /></div>
+              <div class="form-group"><label>Company Slug (optional)</label><input id="reset-slug" /></div>
+              <div class="form-group full-width"><button class="btn btn-secondary" type="submit">Request Reset Token</button></div>
+            </form>
+            <form id="reset-confirm-form" class="form-grid" style="margin-top:16px;">
+              <div class="form-group"><label>Token</label><input id="reset-token" required /></div>
+              <div class="form-group"><label>New Password</label><input type="password" id="reset-new" required minlength="10" /></div>
+              <div class="form-group full-width"><button class="btn btn-success" type="submit">Confirm Reset</button></div>
+            </form>
+          </div>
+          <div class="card">
+            <h3>Backup &amp; Restore</h3>
+            <p class="hint">Download a ZIP (JSON + CSV) of your company data. Restore merges COA, budgets and assets.</p>
+            <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;">
+              <a class="btn btn-secondary" href="/api/backup/company" id="btn-backup-company">Download Company Backup</a>
+              <label class="btn btn-outline" style="cursor:pointer;">
+                Restore Backup
+                <input type="file" id="restore-file" accept=".zip,.json" style="display:none;" />
+              </label>
+            </div>
+          </div>
+        </section>
+
+        <section id="view-finance" class="view"><div class="card"><h3>Finance Module</h3><p>Coming soon — Vouchers, Journal, Bank Reconciliation…</p></div></section>
+        <section id="view-inventory" class="view"><div class="card"><h3>Inventory</h3><p>Coming soon.</p></div></section>
+        <section id="view-assets" class="view"><div class="card"><h3>Fixed Assets</h3><p>Coming soon.</p></div></section>
+        <section id="view-vendors" class="view"><div class="card"><h3>Vendors</h3><p>Coming soon.</p></div></section>
+        <section id="view-reports" class="view"><div class="card"><h3>Reports</h3><p>Coming soon.</p></div></section>
+      </div>
+    </main>
+  </div>
+
+  <!-- USER MODAL -->
+  <div id="user-modal" class="modal">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h3 id="modal-title">Create Staff Account</h3>
+        <button class="modal-close" id="modal-close">&times;</button>
+      </div>
+      <form id="user-form">
+        <input type="hidden" id="edit-user-id" />
+        <div class="form-group"><label>Username *</label><input type="text" id="u-username" required minlength="3" /></div>
+        <div class="form-group"><label>Email *</label><input type="email" id="u-email" required /></div>
+        <div class="form-group"><label>Full Name</label><input type="text" id="u-fullname" /></div>
+        <div class="form-group"><label>Password <span id="pwd-hint">(required)</span></label><input type="password" id="u-password" minlength="6" /></div>
+        <div class="form-group">
+          <label>Role</label>
+          <select id="u-role">
+            <option value="user">User</option>
+            <option value="company_admin">Company Admin</option>
+          </select>
+        </div>
+        <div class="form-group"><label><input type="checkbox" id="u-active" checked /> Active</label></div>
+        <fieldset>
+          <legend>Module Access</legend>
+          <label><input type="checkbox" id="u-finance" checked /> Finance</label>
+          <label><input type="checkbox" id="u-inventory" checked /> Inventory</label>
+          <label><input type="checkbox" id="u-assets" checked /> Assets</label>
+          <label><input type="checkbox" id="u-vendors" checked /> Vendors</label>
+          <label><input type="checkbox" id="u-reports" checked /> Reports</label>
+        </fieldset>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-outline" id="modal-cancel">Cancel</button>
+          <button type="submit" class="btn btn-success">Save User</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
