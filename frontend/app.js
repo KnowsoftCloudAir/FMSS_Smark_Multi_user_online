@@ -56,18 +56,7 @@ function logout(redirect = true) {
 }
 
 /* ---------- Splash ---------- */
-function hideSplash() {
-  const splash = document.getElementById("splash");
-  if (!splash) return;
-  splash.classList.add("hide");
-  splash.style.opacity = "0";
-  splash.style.visibility = "hidden";
-  splash.style.pointerEvents = "none";
-  setTimeout(() => { splash.style.display = "none"; }, 700);
-}
-
-function runSplash() { return Promise.resolve(); }
-function runSplash_disabled() {
+function runSplash() {
   return new Promise((resolve) => {
     const fill = document.getElementById("splash-fill");
     const status = document.getElementById("splash-status");
@@ -78,34 +67,21 @@ function runSplash_disabled() {
     ];
     let p = 0;
     let i = 0;
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      hideSplash();
-      resolve();
-    };
-    // Hard failsafe — never stay on splash more than 2.5s
-    setTimeout(finish, 2500);
-    const timer = setInterval(() => {
-      try {
-        p += 12 + Math.random() * 15;
-        if (p > 100) p = 100;
-        if (fill) fill.style.width = p + "%";
-        if (status) {
-          if (p > 25 && i === 0) { status.textContent = messages[0]; i = 1; }
-          if (p > 55 && i === 1) { status.textContent = messages[1]; i = 2; }
-          if (p > 80 && i === 2) { status.textContent = messages[2]; i = 3; }
-        }
-        if (p >= 100) {
-          clearInterval(timer);
-          setTimeout(finish, 200);
-        }
-      } catch (e) {
-        clearInterval(timer);
-        finish();
+    const t = setInterval(() => {
+      p += 8 + Math.random() * 12;
+      if (p > 100) p = 100;
+      fill.style.width = p + "%";
+      if (p > 30 && i === 0) { status.textContent = messages[0]; i = 1; }
+      if (p > 60 && i === 1) { status.textContent = messages[1]; i = 2; }
+      if (p > 85 && i === 2) { status.textContent = messages[2]; i = 3; }
+      if (p >= 100) {
+        clearInterval(t);
+        setTimeout(() => {
+          document.getElementById("splash").classList.add("hide");
+          resolve();
+        }, 400);
       }
-    }, 80);
+    }, 120);
   });
 }
 
@@ -161,7 +137,7 @@ document.getElementById("reg-company-slug")?.addEventListener("input", function 
 });
 
 /* ---------- Login ---------- */
-document.getElementById("login-form")?.addEventListener("submit", async (e) => {
+document.getElementById("login-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const btn = document.getElementById("login-btn");
   const err = document.getElementById("login-error");
@@ -199,7 +175,7 @@ document.getElementById("login-form")?.addEventListener("submit", async (e) => {
 });
 
 /* ---------- Register company ---------- */
-document.getElementById("register-form")?.addEventListener("submit", async (e) => {
+document.getElementById("register-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const btn = document.getElementById("register-btn");
   const err = document.getElementById("register-error");
@@ -499,8 +475,20 @@ document.getElementById("btn-upload-favicon")?.addEventListener("click", async (
 });
 
 /* ---------- Boot ---------- */
-/* init moved to end of file */
-
+(async function init() {
+  await runSplash();
+  if (token && currentUser) {
+    try {
+      await api("/api/auth/me");
+      enterApp();
+      return;
+    } catch {
+      logout(false);
+    }
+  }
+  showPage("landing-page");
+  showLoginCard();
+})();
 
 /* ========== Extended modules: payments, assets, superadmin, charts, security ========== */
 
@@ -1803,47 +1791,3 @@ window.downloadVoucher = async function (id) {
   catch (ex) { alert(ex.message); }
 };
 
-
-
-/* ========== BOOT (must be last) ========== */
-(function boot() {
-  function goLanding() {
-    try {
-      hideSplash();
-      showPage("landing-page");
-      if (typeof showLoginCard === "function") showLoginCard();
-    } catch (e) {
-      console.error("boot landing", e);
-      const s = document.getElementById("splash");
-      if (s) s.style.display = "none";
-      const lp = document.getElementById("landing-page");
-      if (lp) { lp.classList.add("active"); lp.style.display = "block"; }
-    }
-  }
-  async function start() {
-    try {
-      /* splash disabled */
-      if (typeof hideSplash === "function") hideSplash();
-      if (token && currentUser) {
-        try {
-          await api("/api/auth/me");
-          enterApp();
-          return;
-        } catch {
-          if (typeof logout === "function") logout(false);
-        }
-      }
-      goLanding();
-    } catch (e) {
-      console.error("boot error", e);
-      goLanding();
-    }
-  }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", start);
-  } else {
-    start();
-  }
-  // Ultimate failsafe
-  setTimeout(goLanding, 500);
-})();
