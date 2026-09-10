@@ -66,7 +66,8 @@ function hideSplash() {
   setTimeout(() => { splash.style.display = "none"; }, 700);
 }
 
-function runSplash() {
+function runSplash() { return Promise.resolve(); }
+function runSplash_disabled() {
   return new Promise((resolve) => {
     const fill = document.getElementById("splash-fill");
     const status = document.getElementById("splash-status");
@@ -1821,11 +1822,8 @@ window.downloadVoucher = async function (id) {
   }
   async function start() {
     try {
-      if (typeof runSplash === "function") {
-        await runSplash();
-      } else {
-        hideSplash();
-      }
+      /* splash disabled */
+      if (typeof hideSplash === "function") hideSplash();
       if (token && currentUser) {
         try {
           await api("/api/auth/me");
@@ -1847,5 +1845,5 @@ window.downloadVoucher = async function (id) {
     start();
   }
   // Ultimate failsafe
-  setTimeout(goLanding, 3500);
+  setTimeout(goLanding, 500);
 })();

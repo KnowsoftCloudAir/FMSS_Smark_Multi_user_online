@@ -678,3 +678,6 @@ fieldset label { display: block; margin: 6px 0; font-size: 0.9rem; }
   border: 1px solid var(--border);
   margin-top: 8px;
 }
+
+/* splash removed */
+.splash, #splash { display: none !important; }
