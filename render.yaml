@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: knowsoft-fmss
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health

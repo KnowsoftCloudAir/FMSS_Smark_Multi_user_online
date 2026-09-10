@@ -139,6 +139,183 @@ def init_defaults(db: Session):
         )
         db.add_all([admin, finance, program])
         db.commit()
+        db.refresh(admin)
+        db.refresh(finance)
+        db.refresh(program)
+
+        # ---- Full sample financial data ----
+        coa_rows = [
+            ("1000", "Cash at Bank - Main", "Cash"),
+            ("1100", "Petty Cash", "Cash"),
+            ("1200", "Accounts Receivable", "Asset"),
+            ("1500", "Furniture & Fittings", "Asset"),
+            ("1510", "IT Equipment", "Asset"),
+            ("1520", "Motor Vehicles", "Asset"),
+            ("2000", "Accounts Payable", "Liability"),
+            ("3000", "Retained Earnings", "Equity"),
+            ("4000", "Grant Income", "Income"),
+            ("4100", "Other Income", "Income"),
+            ("5000", "Staff Salaries", "Expense"),
+            ("5100", "Office Rent", "Expense"),
+            ("5200", "Travel & Transport", "Expense"),
+            ("5300", "Training & Workshops", "Expense"),
+            ("5400", "Utilities & Communications", "Expense"),
+            ("5500", "Programme Supplies", "Expense"),
+            ("5600", "Professional Fees", "Expense"),
+            ("5700", "Bank Charges", "Expense"),
+        ]
+        coa_map = {}
+        for code, name, typ in coa_rows:
+            row = ChartOfAccount(company_id=demo.id, code=code, name=name, account_type=typ)
+            db.add(row)
+            db.flush()
+            coa_map[code] = row.id
+
+        budgets = [
+            ("BUD-HEALTH-2026", "Health Programme 2026", 25000000, program.id),
+            ("BUD-EDU-2026", "Education Support 2026", 18000000, program.id),
+            ("BUD-OPS-2026", "Operations & Admin 2026", 8000000, finance.id),
+            ("BUD-CAPEX-2026", "Capital Expenditure 2026", 12000000, admin.id),
+        ]
+        bud_map = {}
+        for code, desc, amt, approver in budgets:
+            b = BudgetCode(company_id=demo.id, code=code, description=desc, amount=amt, spent=0, default_approver_id=approver)
+            db.add(b)
+            db.flush()
+            bud_map[code] = b.id
+
+        expenses = [
+            ("EXP-SAL", "Monthly staff salaries", bud_map["BUD-OPS-2026"], coa_map["5000"], coa_map["1000"]),
+            ("EXP-RENT", "Office rent payment", bud_map["BUD-OPS-2026"], coa_map["5100"], coa_map["1000"]),
+            ("EXP-TRV", "Field travel allowances", bud_map["BUD-HEALTH-2026"], coa_map["5200"], coa_map["1000"]),
+            ("EXP-TRN", "Community training workshop", bud_map["BUD-EDU-2026"], coa_map["5300"], coa_map["1000"]),
+            ("EXP-SUP", "Medical supplies for outreach", bud_map["BUD-HEALTH-2026"], coa_map["5500"], coa_map["1000"]),
+            ("EXP-IT", "Laptops and peripherals", bud_map["BUD-CAPEX-2026"], coa_map["1510"], coa_map["1000"]),
+            ("EXP-UTIL", "Electricity and internet", bud_map["BUD-OPS-2026"], coa_map["5400"], coa_map["1000"]),
+            ("EXP-FEE", "External audit fees", bud_map["BUD-OPS-2026"], coa_map["5600"], coa_map["1000"]),
+        ]
+        exp_map = {}
+        for code, desc, bid, debit, credit in expenses:
+            e = ExpenseCode(
+                company_id=demo.id, code=code, description=desc,
+                budget_code_id=bid, default_debit_account_id=debit, default_credit_account_id=credit,
+            )
+            db.add(e)
+            db.flush()
+            exp_map[code] = e.id
+
+        # Assets sample
+        assets = [
+            ("FA-001", "Toyota Hilux 2022", "Motor Vehicles", "Head Office", 18500000, 14800000, "Good", "Yes"),
+            ("FA-002", "Dell Latitude Laptops (10)", "IT Equipment", "ICT Store", 4500000, 3600000, "Good", "Yes"),
+            ("FA-003", "Office Furniture Set", "Furniture", "Lagos Office", 1200000, 900000, "Fair", "No"),
+            ("FA-004", "Generator 50KVA", "Plant & Machinery", "Compound", 3200000, 2560000, "Good", "Yes"),
+            ("FA-005", "Old Desktop PCs (5)", "IT Equipment", "Archive", 450000, 50000, "Bad", "No"),
+            ("FA-006", "Projector Epson", "IT Equipment", "Training Hall", 380000, 266000, "Good", "Yes"),
+            ("FA-007", "Missing Tablet", "IT Equipment", "Field", 180000, 0, "Lost", "No"),
+        ]
+        for num, name, cat, loc, cost, nbv, cond, ins in assets:
+            db.add(Asset(
+                company_id=demo.id, asset_number=num, asset_name=name, category=cat,
+                location=loc, cost=cost, nbv=nbv, condition=cond, insurance=ins,
+                created_by=admin.id,
+            ))
+
+        # Payment requests across workflow stages
+        from datetime import timedelta as _td
+        samples = [
+            # paid
+            ("PR-202603-0001", admin.id, bud_map["BUD-OPS-2026"], exp_map["EXP-RENT"], 850000,
+             "Office rent Q1 2026", "Property Holdings Ltd", coa_map["5100"], coa_map["1000"],
+             program.id, "paid", program.id, finance.id),
+            ("PR-202603-0002", finance.id, bud_map["BUD-OPS-2026"], exp_map["EXP-SAL"], 4200000,
+             "March 2026 payroll", "Staff Payroll Account", coa_map["5000"], coa_map["1000"],
+             program.id, "paid", program.id, finance.id),
+            # finance approved - ready to pay
+            ("PR-202603-0003", admin.id, bud_map["BUD-CAPEX-2026"], exp_map["EXP-IT"], 2750000,
+             "Purchase of 5 project laptops", "TechMart Nigeria", coa_map["1510"], coa_map["1000"],
+             admin.id, "finance_approved", program.id, finance.id),
+            # program approved - awaiting finance
+            ("PR-202603-0004", program.id, bud_map["BUD-HEALTH-2026"], exp_map["EXP-SUP"], 1850000,
+             "Outreach medical kits - Kano State", "MedSupply Co", coa_map["5500"], coa_map["1000"],
+             program.id, "program_approved", program.id, None),
+            # submitted - awaiting program
+            ("PR-202603-0005", admin.id, bud_map["BUD-EDU-2026"], exp_map["EXP-TRN"], 980000,
+             "Teacher capacity workshop - Abuja", "Training Hub Ltd", None, None,
+             program.id, "submitted", None, None),
+            ("PR-202603-0006", finance.id, bud_map["BUD-HEALTH-2026"], exp_map["EXP-TRV"], 640000,
+             "Field monitoring travel - 3 states", "Various (staff)", None, None,
+             program.id, "submitted", None, None),
+            # rejected sample
+            ("PR-202603-0007", admin.id, bud_map["BUD-OPS-2026"], exp_map["EXP-FEE"], 1500000,
+             "Unbudgeted consultancy", "ConsultX Ltd", None, None,
+             program.id, "rejected", None, None),
+        ]
+        for (rno, req, bid, eid, amt, narr, payee, debit, credit, appr, status, prog, fin) in samples:
+            pr = PaymentRequest(
+                company_id=demo.id, request_no=rno, requester_id=req,
+                budget_code_id=bid, expense_code_id=eid, amount=amt,
+                narration=narr, payee_name=payee,
+                debit_account_id=debit, credit_account_id=credit,
+                designated_approver_id=appr, status=status,
+                program_approved_by=prog,
+                program_approved_at=datetime.utcnow() - _td(days=2) if prog else None,
+                finance_approved_by=fin,
+                finance_approved_at=datetime.utcnow() - _td(days=1) if fin else None,
+                paid_at=datetime.utcnow() - _td(hours=12) if status == "paid" else None,
+                rejection_reason="Insufficient budget line justification" if status == "rejected" else "",
+            )
+            db.add(pr)
+            db.flush()
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=req, action="submit", comment="Sample submission"))
+            if status in ("program_approved", "finance_approved", "paid") and prog:
+                db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=prog, action="program_approve", comment="Programme OK"))
+            if status in ("finance_approved", "paid") and fin:
+                db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=fin, action="finance_approve", comment="Accounts verified"))
+            if status == "paid" and fin:
+                db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=fin, action="pay", comment="Paid via transfer"))
+            if status == "rejected":
+                db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="reject", comment="Insufficient justification"))
+
+        # Update spent on paid items
+        paid_rent = db.query(BudgetCode).filter(BudgetCode.id == bud_map["BUD-OPS-2026"]).first()
+        if paid_rent:
+            paid_rent.spent = 850000 + 4200000  # rent + salary samples
+
+        db.commit()
+        print("✅ Demo company seeded with COA, budgets, expenses, assets, payment workflow samples")
+
+        # Second company still pending approval (for superadmin demo)
+        pending = db.query(Company).filter(Company.slug == "sunrise-ngo").first()
+        if not pending:
+            pending = Company(
+                name="Sunrise Community NGO",
+                slug="sunrise-ngo",
+                address="Abuja, FCT",
+                status="pending",
+            )
+            db.add(pending)
+            db.commit()
+            db.refresh(pending)
+            db.add(User(
+                company_id=pending.id,
+                username="admin",
+                email="admin@sunrise.ngo",
+                full_name="Sunrise Admin",
+                hashed_password=get_password_hash("Sunrise@Admin1!"),
+                role="company_admin",
+                is_active=True,
+                can_access_finance=True,
+                can_access_inventory=True,
+                can_access_assets=True,
+                can_edit_assets=True,
+                can_access_vendors=True,
+                can_access_reports=True,
+                can_approve_payment=True,
+            ))
+            db.commit()
+            print("✅ Pending sample firm: sunrise-ngo (awaits superadmin approval)")
+
         print("✅ Demo company approved + licensed | admin / Admin@Knowsoft1!")
 
 

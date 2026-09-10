@@ -42,3 +42,22 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8000
 Open http://localhost:8000
 
 © 2026 Knowsoft Consulting Ltd
+
+
+## Sample data (demo company)
+
+On first startup the **demo** company is seeded with:
+
+- 18 chart-of-account lines
+- 4 budget codes (Health, Education, Ops, Capex)
+- 8 expense codes linked to debit/credit accounts
+- 7 fixed assets (Good / Fair / Bad / Lost)
+- 7 payment requests across the workflow:
+  - 2 **paid**
+  - 1 **finance_approved** (ready to pay)
+  - 1 **program_approved** (awaiting finance)
+  - 2 **submitted** (awaiting program)
+  - 1 **rejected**
+- A second firm **sunrise-ngo** left in **pending** status for superadmin approval practice
+
+Login as `demo/program` to approve submitted requests, then `demo/finance` to set accounts and pay.
