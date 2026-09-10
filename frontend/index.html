@@ -145,6 +145,7 @@
         <div class="nav-divider" id="admin-divider" style="display:none;"></div>
         
         <a href="#" class="nav-item" data-view="payments"><span class="icon">💳</span> Payment Requests</a>
+        <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
         <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
         <a href="#" class="nav-item super-only" data-view="superadmin" style="display:none;"><span class="icon">🛡️</span> Superadmin</a>
@@ -248,7 +249,8 @@
               <h3>Payment Request</h3>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <button class="btn btn-success" id="btn-new-payment">+ New Request</button>
-                <a class="btn btn-outline" href="/api/payments/export" id="btn-export-payments">Download CSV</a>
+                <a class="btn btn-outline" href="/api/payments/export" id="btn-export-payments">Excel/CSV</a>
+                <a class="btn btn-outline" href="/api/reports/payments/pdf" data-auth-dl>PDF Report</a>
               </div>
             </div>
             <form id="payment-form" class="form-grid" style="display:none;margin-bottom:20px;">
@@ -355,7 +357,8 @@
               <h3>Asset Register</h3>
               <div style="display:flex;gap:8px;flex-wrap:wrap;">
                 <button class="btn btn-success" id="btn-add-asset">+ Add Asset</button>
-                <a class="btn btn-outline" href="/api/assets/export" id="btn-export-assets">Download CSV</a>
+                <a class="btn btn-outline" href="/api/assets/export" id="btn-export-assets">Excel/CSV</a>
+                <a class="btn btn-outline" href="/api/reports/assets/pdf" data-auth-dl>PDF Report</a>
               </div>
             </div>
             <form id="asset-form" class="form-grid" style="display:none;margin-bottom:16px;">
@@ -443,41 +446,102 @@
 
         <section id="view-finance" class="view">
           <div class="card">
-            <h3>Finance Hub</h3>
-            <p class="hint">Manage chart of accounts, budgets, expense codes, post manual journals, and review bank items.</p>
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;">
-              <button class="btn btn-primary" onclick="showView('finance-setup')">Finance Setup (COA / Budget / Expense)</button>
-              <button class="btn btn-secondary" onclick="showView('payments')">Payment Requests</button>
-              <button class="btn btn-secondary" onclick="showView('reports')">Ledger &amp; Trial Balance</button>
+            <h3>Finance Dashboard</h3>
+            <div class="kpi-grid" id="finance-kpis"></div>
+            <div class="charts-grid">
+              <div class="chart-box"><canvas id="chart-fin-pay"></canvas></div>
+              <div class="chart-box"><canvas id="chart-fin-budget"></canvas></div>
             </div>
           </div>
           <div class="card">
-            <h3>Manual Journal Entry</h3>
+            <h3>Finance Modules</h3>
+            <div class="module-grid">
+              <button class="btn btn-primary module-btn" onclick="showView('payments')">💳 Payment Requests</button>
+              <button class="btn btn-secondary module-btn" onclick="showView('payments')">📄 Single / Bulk Vouchers</button>
+              <button class="btn btn-accent module-btn" onclick="showView('bank-recon')">🏦 Bank Reconciliation</button>
+              <button class="btn btn-primary module-btn" onclick="showView('finance-setup')">📒 COA / Budget / Expense</button>
+              <button class="btn btn-secondary module-btn" onclick="loadVariance()">📊 Budget &amp; Variance</button>
+              <button class="btn btn-secondary module-btn" onclick="showView('reports');document.getElementById('btn-load-ledger')?.click()">📖 General Ledger</button>
+              <button class="btn btn-secondary module-btn" onclick="showView('reports');document.getElementById('btn-load-tb')?.click()">⚖️ Trial Balance</button>
+              <button class="btn btn-outline module-btn" onclick="showView('finance-setup')">📝 Journals</button>
+              <button class="btn btn-outline module-btn" onclick="showView('reports')">📑 All Reports</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Manual Journal (double-entry)</h3>
             <form id="journal-form" class="form-grid">
               <div class="form-group"><label>Description *</label><input id="je-desc" required /></div>
               <div class="form-group"><label>Narration</label><input id="je-narr" /></div>
               <div class="form-group"><label>Debit Account ID *</label><input id="je-debit" type="number" required /></div>
               <div class="form-group"><label>Credit Account ID *</label><input id="je-credit" type="number" required /></div>
               <div class="form-group"><label>Amount *</label><input id="je-amt" type="number" step="0.01" required /></div>
-              <div class="form-group"><label>Project Code ID (optional)</label><input id="je-proj" type="number" /></div>
+              <div class="form-group"><label>Project Code ID</label><input id="je-proj" type="number" /></div>
               <div class="form-group full-width"><button class="btn btn-accent" type="submit">Post Journal</button></div>
             </form>
           </div>
+          <div class="card" id="variance-panel" style="display:none;">
+            <div class="card-header">
+              <h3>Budget &amp; Variance (per project)</h3>
+              <div style="display:flex;gap:8px;">
+                <input id="var-project" placeholder="Project code filter" />
+                <button class="btn btn-sm btn-primary" onclick="loadVariance()">Refresh</button>
+                <a class="btn btn-sm btn-outline" href="/api/reports/budget-variance/pdf" data-auth-dl>PDF</a>
+              </div>
+            </div>
+            <div id="variance-out" class="table-responsive"></div>
+          </div>
+        </section>
+
+        <section id="view-bank-recon" class="view">
           <div class="card">
-            <h3>Bank Reconciliation (tick items)</h3>
-            <p class="hint">Mark ledger cash lines as reconciled. Data comes from general ledger cash accounts.</p>
-            <div id="bank-rec-list" class="table-responsive"></div>
-            <button class="btn btn-primary" id="btn-load-bank-rec" type="button">Load Cash Ledger Lines</button>
+            <div class="card-header">
+              <h3>🏦 Bank Reconciliation Statement</h3>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <a class="btn btn-outline" href="/api/reports/bank-recon/pdf" data-auth-dl>Download PDF</a>
+                <a class="btn btn-outline" href="/api/reports/ledger/export" data-auth-dl>Excel/CSV</a>
+              </div>
+            </div>
+            <div class="form-grid" style="margin-bottom:12px;">
+              <div class="form-group"><label>Cash Account</label><select id="br-account"><option value="">All cash accounts</option></select></div>
+              <div class="form-group"><label>Start Date</label><input type="date" id="br-start" /></div>
+              <div class="form-group"><label>End Date</label><input type="date" id="br-end" /></div>
+              <div class="form-group"><label>Bank Statement Balance</label><input type="number" id="br-stmt" step="0.01" /></div>
+              <div class="form-group"><label>Book Balance</label><input type="number" id="br-book" step="0.01" readonly /></div>
+              <div class="form-group"><button class="btn btn-primary" type="button" id="btn-load-br">Load / Refresh</button></div>
+            </div>
+            <div class="kpi-grid" id="br-totals"></div>
+            <div class="table-responsive">
+              <table class="data-table" id="br-table">
+                <thead><tr>
+                  <th>Tick</th><th>Date</th><th>Entry / Voucher</th><th>Account</th>
+                  <th>Description</th><th>Debit</th><th>Credit</th><th>Balance</th><th>Trail</th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card" id="trail-panel" style="display:none;">
+            <h3>Transaction Trail</h3>
+            <div id="trail-body"></div>
           </div>
         </section>
         
         <section id="view-inventory-full" class="view">
+          <div class="card" id="inv-dash">
+            <h3>Inventory Dashboard</h3>
+            <div class="kpi-grid" id="inv-kpis"></div>
+            <div class="charts-grid">
+              <div class="chart-box"><canvas id="chart-inv-cat"></canvas></div>
+              <div class="chart-box"><canvas id="chart-inv-val"></canvas></div>
+            </div>
+          </div>
           <div class="card">
             <div class="card-header">
               <h3>Inventory</h3>
               <div style="display:flex;gap:8px;">
                 <button class="btn btn-success" id="btn-add-inv">+ Add Item</button>
-                <a class="btn btn-outline" href="/api/inventory/export">CSV</a>
+                <a class="btn btn-outline" href="/api/inventory/export" data-auth-dl>Excel/CSV</a>
+                <a class="btn btn-outline" href="/api/reports/inventory/pdf" data-auth-dl>PDF Report</a>
               </div>
             </div>
             <form id="inv-form" class="form-grid" style="display:none;margin-bottom:12px;">
@@ -500,12 +564,21 @@
           </div>
         </section>
         <section id="view-vendors-full" class="view">
+          <div class="card" id="ven-dash">
+            <h3>Procurement Dashboard</h3>
+            <div class="kpi-grid" id="ven-kpis"></div>
+            <div class="charts-grid">
+              <div class="chart-box"><canvas id="chart-ven-score"></canvas></div>
+              <div class="chart-box"><canvas id="chart-ven-amt"></canvas></div>
+            </div>
+          </div>
           <div class="card">
             <div class="card-header">
               <h3>Vendors / Procurement</h3>
               <div style="display:flex;gap:8px;">
                 <button class="btn btn-success" id="btn-add-vendor">+ Add Vendor</button>
-                <a class="btn btn-outline" href="/api/vendors/export">CSV</a>
+                <a class="btn btn-outline" href="/api/vendors/export" data-auth-dl>Excel/CSV</a>
+                <a class="btn btn-outline" href="/api/reports/vendors/pdf" data-auth-dl>PDF Report</a>
               </div>
             </div>
             <form id="vendor-form" class="form-grid" style="display:none;margin-bottom:12px;">
@@ -541,7 +614,11 @@
             <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
               <button class="btn btn-primary" id="btn-load-tb">Trial Balance</button>
               <button class="btn btn-secondary" id="btn-load-ledger">General Ledger</button>
-              <a class="btn btn-outline" href="/api/reports/trial-balance/export">TB Excel/CSV</a>
+              <a class="btn btn-outline" href="/api/reports/trial-balance/export" data-auth-dl>TB Excel/CSV</a>
+              <a class="btn btn-outline" href="/api/reports/trial-balance/pdf" data-auth-dl>TB PDF</a>
+              <a class="btn btn-outline" href="/api/reports/ledger/pdf" data-auth-dl>Ledger PDF</a>
+              <a class="btn btn-outline" href="/api/reports/budget-variance/pdf" data-auth-dl>Variance PDF</a>
+              <a class="btn btn-outline" href="/api/reports/bank-recon/pdf" data-auth-dl>Bank Recon PDF</a>
               <a class="btn btn-outline" href="/api/reports/ledger/export">Ledger CSV</a>
               <a class="btn btn-outline" href="/api/payments/export">Payments CSV</a>
               <a class="btn btn-outline" href="/api/assets/export">Assets CSV</a>

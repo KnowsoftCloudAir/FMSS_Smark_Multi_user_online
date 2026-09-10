@@ -1509,3 +1509,285 @@ showView = function (name) {
   if (name === "vendors") name = "vendors-full";
   __sv(name);
 };
+
+/* ========== Bank recon, variance, module dashboards, auth downloads ========== */
+
+async function authDownload(url, filename) {
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!res.ok) {
+    let msg = "Download failed";
+    try { const j = await res.json(); msg = j.detail || msg; } catch (_) {}
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename || url.split("/").pop() || "report";
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+document.querySelectorAll("[data-auth-dl]").forEach(a => {
+  a.addEventListener("click", async (e) => {
+    e.preventDefault();
+    try {
+      const name = a.getAttribute("href").split("/").pop() + (a.getAttribute("href").includes("pdf") ? ".pdf" : ".csv");
+      await authDownload(a.href, name);
+    } catch (ex) { alert(ex.message); }
+  });
+});
+
+/* Bank reconciliation */
+async function loadBankRecon() {
+  const acc = document.getElementById("br-account")?.value || "";
+  const sd = document.getElementById("br-start")?.value || "";
+  const ed = document.getElementById("br-end")?.value || "";
+  let url = "/api/finance/bank-recon?";
+  if (acc) url += `account_id=${acc}&`;
+  if (sd) url += `start_date=${sd}&`;
+  if (ed) url += `end_date=${ed}&`;
+  try {
+    const data = await api(url);
+    const sel = document.getElementById("br-account");
+    if (sel && sel.options.length <= 1) {
+      (data.cash_accounts || []).forEach(a => {
+        const o = document.createElement("option");
+        o.value = a.id;
+        o.textContent = `${a.code} - ${a.name}`;
+        sel.appendChild(o);
+      });
+    }
+    const t = data.totals || {};
+    document.getElementById("br-book").value = (t.book_balance || 0).toFixed(2);
+    document.getElementById("br-totals").innerHTML = `
+      <div class="kpi-card"><div class="kpi-value" style="color:#27AE60">${Number(t.reconciled||0).toLocaleString()}</div><div class="kpi-label">Reconciled</div></div>
+      <div class="kpi-card"><div class="kpi-value" style="color:#E74C3C">${Number(t.outstanding||0).toLocaleString()}</div><div class="kpi-label">Outstanding</div></div>
+      <div class="kpi-card"><div class="kpi-value">${Number(t.book_balance||0).toLocaleString()}</div><div class="kpi-label">Book Balance</div></div>`;
+    const tbody = document.querySelector("#br-table tbody");
+    tbody.innerHTML = (data.lines || []).map(L => `<tr>
+      <td><input type="checkbox" ${L.ticked ? "checked" : ""} onchange="tickRecon(${L.journal_entry_id}, this.checked)" /></td>
+      <td>${L.date}</td>
+      <td><a href="#" onclick="openTrail(${L.journal_entry_id});return false;">${L.entry_no}</a></td>
+      <td>${L.account}</td>
+      <td>${L.description || ""}</td>
+      <td>${Number(L.debit||0).toLocaleString()}</td>
+      <td>${Number(L.credit||0).toLocaleString()}</td>
+      <td>${Number(L.balance||0).toLocaleString()}</td>
+      <td><button class="btn btn-sm btn-outline" onclick="openTrail(${L.journal_entry_id})">Trail</button></td>
+    </tr>`).join("");
+  } catch (ex) { alert(ex.message); }
+}
+
+window.tickRecon = async function (jid, ticked) {
+  const form = new FormData();
+  form.append("journal_entry_id", jid);
+  form.append("ticked", ticked ? "true" : "false");
+  try {
+    const res = await fetch(API + "/api/finance/bank-recon/tick", {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    if (!res.ok) throw new Error((await res.json()).detail || "Tick failed");
+  } catch (ex) { alert(ex.message); loadBankRecon(); }
+};
+
+window.openTrail = async function (jid) {
+  try {
+    const t = await api(`/api/finance/transaction-trail/${jid}`);
+    document.getElementById("trail-panel").style.display = "block";
+    const src = t.source ? `<p><strong>Source:</strong> ${t.source.type} ${t.source.ref || ""} — ${t.source.name || t.source.payee || ""} (${t.source.status || ""})</p>` : "<p>No linked source document (manual journal).</p>";
+    const pair = (t.paired_entries || []).map(p =>
+      `<li>Acct #${p.account_id}: Dr ${p.debit} / Cr ${p.credit} — ${p.description || ""}</li>`
+    ).join("");
+    document.getElementById("trail-body").innerHTML = `
+      <div class="trail-box">
+        <p><strong>Entry:</strong> ${t.line.entry_no} · ${t.line.date}</p>
+        <p>${t.line.description || ""} — ${t.line.narration || ""}</p>
+        <p>Debit: ${t.line.debit} · Credit: ${t.line.credit}</p>
+        <p>Created by: ${t.created_by || "—"}</p>
+        ${src}
+        <h4>Double-entry pair</h4>
+        <ul>${pair}</ul>
+        ${t.can_correct ? `
+          <h4>Request correction</h4>
+          <div class="form-grid">
+            <div class="form-group"><label>Staff User ID</label><input id="corr-to" type="number" /></div>
+            <div class="form-group full-width"><label>Message</label><input id="corr-msg" placeholder="Please correct this entry…" /></div>
+            <div class="form-group"><button class="btn btn-sm btn-primary" onclick="sendCorrection(${jid})">Send to staff</button></div>
+          </div>` : "<p class="hint">You need finance permission to request corrections.</p>"}
+      </div>`;
+  } catch (ex) { alert(ex.message); }
+};
+
+window.sendCorrection = async function (jid) {
+  const form = new FormData();
+  form.append("to_user_id", document.getElementById("corr-to").value);
+  form.append("message", document.getElementById("corr-msg").value);
+  form.append("journal_entry_id", jid);
+  try {
+    const res = await fetch(API + "/api/finance/correction-request", {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message);
+  } catch (ex) { alert(ex.message); }
+};
+
+document.getElementById("btn-load-br")?.addEventListener("click", loadBankRecon);
+
+window.loadVariance = async function () {
+  document.getElementById("variance-panel").style.display = "block";
+  const pc = document.getElementById("var-project")?.value || "";
+  try {
+    const d = await api("/api/reports/budget-variance" + (pc ? `?project_code=${encodeURIComponent(pc)}` : ""));
+    let h = `<table class="data-table"><thead><tr><th>Code</th><th>Description</th><th>Budgeted</th><th>Actual</th><th>Variance</th><th>Remark</th></tr></thead><tbody>`;
+    (d.rows || []).forEach(r => {
+      h += `<tr><td>${r.budget_code}</td><td>${r.description}</td>
+        <td>${Number(r.budgeted).toLocaleString()}</td>
+        <td>${Number(r.actual).toLocaleString()}</td>
+        <td style="color:${r.variance>=0?"#27AE60":"#E74C3C"}">${Number(r.variance).toLocaleString()}</td>
+        <td>${r.remark}</td></tr>`;
+    });
+    h += `</tbody></table>
+      <p><strong>Total Budget:</strong> ${Number(d.total_budget).toLocaleString()} ·
+      <strong>Actual:</strong> ${Number(d.total_actual).toLocaleString()} ·
+      <strong>Variance:</strong> ${Number(d.total_variance).toLocaleString()}</p>`;
+    document.getElementById("variance-out").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+};
+
+/* Inventory dashboard */
+const _loadInv = loadInventory;
+loadInventory = async function () {
+  await _loadInv();
+  try {
+    const rows = await api("/api/inventory");
+    const byCat = {};
+    let totalVal = 0;
+    rows.forEach(i => {
+      byCat[i.category || "Other"] = (byCat[i.category || "Other"] || 0) + 1;
+      totalVal += i.total_value || 0;
+    });
+    const k = document.getElementById("inv-kpis");
+    if (k) k.innerHTML = `
+      <div class="kpi-card"><div class="kpi-value">${rows.length}</div><div class="kpi-label">Items</div></div>
+      <div class="kpi-card"><div class="kpi-value">${Number(totalVal).toLocaleString()}</div><div class="kpi-label">Stock Value</div></div>
+      <div class="kpi-card"><div class="kpi-value">${Object.keys(byCat).length}</div><div class="kpi-label">Categories</div></div>`;
+    if (window.Chart) {
+      const c1 = document.getElementById("chart-inv-cat");
+      if (c1) {
+        if (c1._chart) c1._chart.destroy();
+        c1._chart = new Chart(c1, {
+          type: "doughnut",
+          data: { labels: Object.keys(byCat), datasets: [{ data: Object.values(byCat), backgroundColor: ["#27AE60","#3498DB","#F39C12","#9B59B6","#E74C3C"], borderWidth: 2, borderColor: "#fff" }] },
+          options: { plugins: { title: { display: true, text: "Items by Category", font: { weight: "700" } }, legend: { position: "bottom" } }, cutout: "45%" },
+        });
+      }
+      const c2 = document.getElementById("chart-inv-val");
+      if (c2) {
+        if (c2._chart) c2._chart.destroy();
+        const top = rows.slice(0, 8);
+        c2._chart = new Chart(c2, {
+          type: "bar",
+          data: { labels: top.map(i => i.item_code), datasets: [{ label: "Value", data: top.map(i => i.total_value || 0), backgroundColor: "rgba(26,107,154,0.85)", borderRadius: 8 }] },
+          options: { plugins: { title: { display: true, text: "Stock Value by Item", font: { weight: "700" } } }, scales: { y: { beginAtZero: true } } },
+        });
+      }
+    }
+  } catch (_) {}
+};
+
+/* Vendor dashboard */
+const _loadVen = loadVendors;
+loadVendors = async function () {
+  await _loadVen();
+  try {
+    const rows = await api("/api/vendors");
+    const k = document.getElementById("ven-kpis");
+    if (k) k.innerHTML = `
+      <div class="kpi-card"><div class="kpi-value">${rows.length}</div><div class="kpi-label">Vendors</div></div>
+      <div class="kpi-card"><div class="kpi-value">${Number(rows.reduce((s,v)=>s+(v.amount||0),0)).toLocaleString()}</div><div class="kpi-label">Total Commitments</div></div>
+      <div class="kpi-card"><div class="kpi-value">${rows.filter(v=>(v.tax_clearance||"").toLowerCase()==="yes").length}</div><div class="kpi-label">Tax Compliant</div></div>`;
+    if (window.Chart) {
+      const c1 = document.getElementById("chart-ven-score");
+      if (c1) {
+        if (c1._chart) c1._chart.destroy();
+        c1._chart = new Chart(c1, {
+          type: "bar",
+          data: { labels: rows.map(v => v.vendor_number), datasets: [{ label: "Score", data: rows.map(v => v.score || 0), backgroundColor: "rgba(39,174,96,0.85)", borderRadius: 8 }] },
+          options: { plugins: { title: { display: true, text: "Vendor Scores", font: { weight: "700" } } }, scales: { y: { beginAtZero: true, max: 100 } } },
+        });
+      }
+      const c2 = document.getElementById("chart-ven-amt");
+      if (c2) {
+        if (c2._chart) c2._chart.destroy();
+        c2._chart = new Chart(c2, {
+          type: "doughnut",
+          data: { labels: rows.map(v => v.name), datasets: [{ data: rows.map(v => v.amount || 0), backgroundColor: ["#1A6B9A","#27AE60","#F39C12","#9B59B6","#E74C3C"], borderWidth: 2, borderColor: "#fff" }] },
+          options: { plugins: { title: { display: true, text: "Commitment by Vendor", font: { weight: "700" } }, legend: { position: "bottom" } }, cutout: "40%" },
+        });
+      }
+    }
+  } catch (_) {}
+};
+
+/* Finance dashboard */
+async function loadFinanceDash() {
+  try {
+    const s = await api("/api/dashboard/stats");
+    const k = document.getElementById("finance-kpis");
+    if (k) k.innerHTML = `
+      <div class="kpi-card"><div class="kpi-value">${s.payments_pending ?? 0}</div><div class="kpi-label">Pending Payments</div></div>
+      <div class="kpi-card"><div class="kpi-value">${s.payments_paid ?? 0}</div><div class="kpi-label">Paid</div></div>
+      <div class="kpi-card"><div class="kpi-value">${Number(s.payments_total_amount||0).toLocaleString()}</div><div class="kpi-label">Paid Amount</div></div>
+      <div class="kpi-card"><div class="kpi-value">${s.users_count ?? "—"}</div><div class="kpi-label">Users</div></div>`;
+    const pay = s.payment_status_breakdown || {};
+    if (window.Chart && document.getElementById("chart-fin-pay")) {
+      const c = document.getElementById("chart-fin-pay");
+      if (c._chart) c._chart.destroy();
+      c._chart = new Chart(c, {
+        type: "doughnut",
+        data: { labels: Object.keys(pay), datasets: [{ data: Object.values(pay), backgroundColor: ["#F39C12","#3498DB","#9B59B6","#27AE60","#E74C3C"], borderWidth: 2, borderColor: "#fff" }] },
+        options: { plugins: { title: { display: true, text: "Payment Status", font: { weight: "700" } }, legend: { position: "bottom" } }, cutout: "45%" },
+      });
+    }
+    try {
+      const v = await api("/api/reports/budget-variance");
+      const c2 = document.getElementById("chart-fin-budget");
+      if (c2 && window.Chart) {
+        if (c2._chart) c2._chart.destroy();
+        c2._chart = new Chart(c2, {
+          type: "bar",
+          data: {
+            labels: (v.rows || []).map(r => r.budget_code),
+            datasets: [
+              { label: "Budgeted", data: (v.rows || []).map(r => r.budgeted), backgroundColor: "rgba(26,107,154,0.8)", borderRadius: 6 },
+              { label: "Actual", data: (v.rows || []).map(r => r.actual), backgroundColor: "rgba(231,76,60,0.8)", borderRadius: 6 },
+            ],
+          },
+          options: { plugins: { title: { display: true, text: "Budget vs Actual", font: { weight: "700" } } }, scales: { y: { beginAtZero: true } } },
+        });
+      }
+    } catch (_) {}
+  } catch (_) {}
+}
+
+// Hook showView
+const ___sv = showView;
+showView = function (name) {
+  if (name === "inventory") name = "inventory-full";
+  if (name === "assets") name = "assets-reg";
+  if (name === "vendors") name = "vendors-full";
+  ___sv(name);
+  if (name === "bank-recon") loadBankRecon();
+  if (name === "finance") loadFinanceDash();
+  if (name === "inventory-full") loadInventory();
+  if (name === "vendors-full") loadVendors();
+};
+
+// Voucher PDF from payment detail
+window.downloadVoucher = async function (id) {
+  try { await authDownload(`/api/reports/voucher/${id}/pdf`, `voucher_${id}.pdf`); }
+  catch (ex) { alert(ex.message); }
+};
+

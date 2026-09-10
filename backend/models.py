@@ -341,3 +341,49 @@ class AssetAccountingEntry(Base):
     journal_entry_no = Column(String(50), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class BankReconState(Base):
+    """Persistent tick state for bank reconciliation lines."""
+    __tablename__ = "bank_recon_states"
+    __table_args__ = (UniqueConstraint("company_id", "journal_entry_id", name="uq_recon_je"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=False, index=True)
+    ticked = Column(Boolean, default=False)
+    ticked_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    ticked_at = Column(DateTime, nullable=True)
+    note = Column(Text, default="")
+
+
+class CorrectionRequest(Base):
+    """Message to staff to correct a transaction; trail investigation."""
+    __tablename__ = "correction_requests"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    journal_entry_id = Column(Integer, ForeignKey("journal_entries.id"), nullable=True)
+    source_type = Column(String(40), default="")
+    source_id = Column(Integer, nullable=True)
+    from_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    message = Column(Text, nullable=False)
+    status = Column(String(20), default="open")  # open | resolved | dismissed
+    created_at = Column(DateTime, default=datetime.utcnow)
+    resolved_at = Column(DateTime, nullable=True)
+
+
+class BankStatementSession(Base):
+    """Bank statement balance entered for a recon period."""
+    __tablename__ = "bank_statement_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=False)
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    statement_balance = Column(Float, default=0.0)
+    book_balance = Column(Float, default=0.0)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

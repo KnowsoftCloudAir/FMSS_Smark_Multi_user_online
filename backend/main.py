@@ -14,7 +14,7 @@ from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry
+    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -1801,6 +1801,398 @@ def bank_cash_lines(current_user: User = Depends(require_roles("finance", "compa
             "narration": j.narration,
         })
     return out
+
+
+
+
+# ===================== BANK RECONCILIATION (full) =====================
+@app.get("/api/finance/bank-recon")
+def bank_recon_lines(
+    account_id: Optional[int] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    cid = current_user.company_id
+    q_acc = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid, ChartOfAccount.account_type == "Cash")
+    cash_accounts = q_acc.all()
+    cash_ids = [a.id for a in cash_accounts]
+    if account_id:
+        cash_ids = [account_id] if account_id in cash_ids or True else cash_ids
+
+    q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id.in_(cash_ids) if cash_ids else False)
+    if start_date:
+        try:
+            q = q.filter(JournalEntry.entry_date >= date.fromisoformat(start_date))
+        except Exception:
+            pass
+    if end_date:
+        try:
+            q = q.filter(JournalEntry.entry_date <= date.fromisoformat(end_date))
+        except Exception:
+            pass
+    rows = q.order_by(JournalEntry.entry_date, JournalEntry.id).all()
+
+    running = 0.0
+    out = []
+    reconciled_total = 0.0
+    outstanding_total = 0.0
+    for j in rows:
+        running += (j.debit or 0) - (j.credit or 0)
+        st = db.query(BankReconState).filter(
+            BankReconState.company_id == cid, BankReconState.journal_entry_id == j.id
+        ).first()
+        ticked = bool(st and st.ticked)
+        net = (j.debit or 0) - (j.credit or 0)
+        if ticked:
+            reconciled_total += abs(net)
+        else:
+            outstanding_total += abs(net)
+        acc = db.query(ChartOfAccount).filter(ChartOfAccount.id == j.account_id).first()
+        out.append({
+            "journal_entry_id": j.id,
+            "entry_no": j.entry_no,
+            "date": str(j.entry_date),
+            "account_id": j.account_id,
+            "account": f"{acc.code} - {acc.name}" if acc else "",
+            "description": j.description,
+            "narration": j.narration,
+            "debit": j.debit,
+            "credit": j.credit,
+            "balance": running,
+            "ticked": ticked,
+            "source_type": j.source_type,
+            "source_id": j.source_id,
+        })
+    return {
+        "lines": out,
+        "cash_accounts": [{"id": a.id, "code": a.code, "name": a.name} for a in cash_accounts],
+        "totals": {
+            "reconciled": reconciled_total,
+            "outstanding": outstanding_total,
+            "book_balance": running,
+        },
+    }
+
+
+@app.post("/api/finance/bank-recon/tick")
+def bank_recon_tick(
+    journal_entry_id: int = Form(...),
+    ticked: bool = Form(True),
+    note: str = Form(""),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    cid = current_user.company_id
+    je = db.query(JournalEntry).filter(JournalEntry.id == journal_entry_id, JournalEntry.company_id == cid).first()
+    if not je:
+        raise HTTPException(404, "Journal line not found")
+    st = db.query(BankReconState).filter(
+        BankReconState.company_id == cid, BankReconState.journal_entry_id == journal_entry_id
+    ).first()
+    if not st:
+        st = BankReconState(company_id=cid, journal_entry_id=journal_entry_id)
+        db.add(st)
+    st.ticked = ticked
+    st.ticked_by = current_user.id
+    st.ticked_at = datetime.utcnow() if ticked else None
+    st.note = note
+    db.commit()
+    return {"ok": True, "ticked": st.ticked}
+
+
+@app.post("/api/finance/bank-recon/session")
+def save_bank_session(
+    account_id: int = Form(...),
+    statement_balance: float = Form(0),
+    book_balance: float = Form(0),
+    start_date: Optional[str] = Form(None),
+    end_date: Optional[str] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    sd = date.fromisoformat(start_date) if start_date else None
+    ed = date.fromisoformat(end_date) if end_date else None
+    sess = BankStatementSession(
+        company_id=current_user.company_id, account_id=account_id,
+        start_date=sd, end_date=ed, statement_balance=statement_balance,
+        book_balance=book_balance, created_by=current_user.id,
+    )
+    db.add(sess)
+    db.commit()
+    db.refresh(sess)
+    return sess
+
+
+@app.get("/api/finance/transaction-trail/{journal_entry_id}")
+def transaction_trail(
+    journal_entry_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Follow a ledger line back to its source document."""
+    j = db.query(JournalEntry).filter(
+        JournalEntry.id == journal_entry_id, JournalEntry.company_id == current_user.company_id
+    ).first()
+    if not j:
+        raise HTTPException(404, "Not found")
+    # paired lines same entry_no
+    pair = db.query(JournalEntry).filter(
+        JournalEntry.company_id == current_user.company_id, JournalEntry.entry_no == j.entry_no
+    ).all()
+    source = None
+    if j.source_type == "payment" and j.source_id:
+        pr = db.query(PaymentRequest).filter(PaymentRequest.id == j.source_id).first()
+        if pr:
+            source = {"type": "payment", "id": pr.id, "ref": pr.request_no, "payee": pr.payee_name, "amount": pr.amount, "status": pr.status}
+    elif j.source_type == "inventory" and j.source_id:
+        inv = db.query(InventoryItem).filter(InventoryItem.id == j.source_id).first()
+        if inv:
+            source = {"type": "inventory", "id": inv.id, "ref": inv.item_code, "name": inv.item_name}
+    elif j.source_type == "asset_adjustment" and j.source_id:
+        a = db.query(Asset).filter(Asset.id == j.source_id).first()
+        if a:
+            source = {"type": "asset", "id": a.id, "ref": a.asset_number, "name": a.asset_name}
+    elif j.source_type == "vendor" and j.source_id:
+        v = db.query(Vendor).filter(Vendor.id == j.source_id).first()
+        if v:
+            source = {"type": "vendor", "id": v.id, "ref": v.vendor_number, "name": v.name}
+    creator = db.query(User).filter(User.id == j.created_by).first() if j.created_by else None
+    return {
+        "line": {
+            "id": j.id, "entry_no": j.entry_no, "date": str(j.entry_date),
+            "description": j.description, "narration": j.narration,
+            "debit": j.debit, "credit": j.credit, "source_type": j.source_type, "source_id": j.source_id,
+        },
+        "paired_entries": [{
+            "id": p.id, "account_id": p.account_id, "debit": p.debit, "credit": p.credit, "description": p.description
+        } for p in pair],
+        "source": source,
+        "created_by": (creator.full_name or creator.username) if creator else None,
+        "can_correct": current_user.role in ("finance", "company_admin", "superadmin"),
+    }
+
+
+@app.post("/api/finance/correction-request")
+def create_correction_request(
+    to_user_id: int = Form(...),
+    message: str = Form(...),
+    journal_entry_id: Optional[int] = Form(None),
+    source_type: str = Form(""),
+    source_id: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    row = CorrectionRequest(
+        company_id=current_user.company_id,
+        journal_entry_id=journal_entry_id,
+        source_type=source_type,
+        source_id=source_id,
+        from_user_id=current_user.id,
+        to_user_id=to_user_id,
+        message=message,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return {"message": "Correction request sent", "id": row.id}
+
+
+@app.get("/api/finance/correction-requests")
+def list_corrections(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(CorrectionRequest).filter(
+        CorrectionRequest.company_id == current_user.company_id,
+        (CorrectionRequest.to_user_id == current_user.id) | (CorrectionRequest.from_user_id == current_user.id),
+    ).order_by(CorrectionRequest.created_at.desc()).limit(100).all()
+
+
+# ===================== BUDGET VARIANCE (per project) =====================
+@app.get("/api/reports/budget-variance")
+def budget_variance(
+    project_code: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    cid = current_user.company_id
+    budgets = db.query(BudgetCode).filter(BudgetCode.company_id == cid, BudgetCode.is_active == True).all()
+    # actuals from payment requests paid + journal on expense accounts linked via expense codes
+    rows = []
+    total_b = total_a = 0.0
+    for b in budgets:
+        # filter by project if budget description/code contains project or via expense link
+        if project_code and project_code.lower() not in (b.code or "").lower() and project_code.lower() not in (b.description or "").lower():
+            # also check project codes table match
+            pass  # still include if no strict link — filter loosely
+            if project_code and project_code not in (b.code or "") and project_code not in (b.description or ""):
+                continue
+        actual = float(b.spent or 0)
+        # also sum paid payments on this budget
+        pays = db.query(PaymentRequest).filter(
+            PaymentRequest.company_id == cid,
+            PaymentRequest.budget_code_id == b.id,
+            PaymentRequest.status == "paid",
+        ).all()
+        actual = max(actual, sum(p.amount for p in pays))
+        budgeted = float(b.amount or 0)
+        var = budgeted - actual
+        rows.append({
+            "budget_code": b.code,
+            "description": b.description,
+            "budgeted": budgeted,
+            "actual": actual,
+            "variance": var,
+            "remark": "Favourable" if var >= 0 else "Adverse",
+        })
+        total_b += budgeted
+        total_a += actual
+    return {
+        "project_code": project_code or "ALL",
+        "rows": rows,
+        "total_budget": total_b,
+        "total_actual": total_a,
+        "total_variance": total_b - total_a,
+    }
+
+
+# ===================== PDF / EXCEL REPORTS =====================
+from reports import build_pdf, build_csv
+
+
+def _company_and_currency(db, user):
+    co = db.query(Company).filter(Company.id == user.company_id).first() if user.company_id else None
+    code = co.reporting_currency_code if co else "NGN"
+    sym = co.reporting_currency_symbol if co else "₦"
+    return co, code, sym
+
+
+@app.get("/api/reports/bank-recon/pdf")
+def bank_recon_pdf(
+    account_id: Optional[int] = None,
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    data = bank_recon_lines(account_id, None, None, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Tick", "Date", "Entry", "Account", "Description", f"Debit ({sym})", f"Credit ({sym})", "Balance"]
+    rows = []
+    for L in data["lines"]:
+        rows.append([
+            "✓" if L["ticked"] else "",
+            L["date"], L["entry_no"], L["account"], L["description"] or "",
+            f"{L['debit']:,.2f}", f"{L['credit']:,.2f}", f"{L['balance']:,.2f}",
+        ])
+    foot = [
+        f"Reconciled: {sym}{data['totals']['reconciled']:,.2f}",
+        f"Outstanding: {sym}{data['totals']['outstanding']:,.2f}",
+        f"Book balance: {sym}{data['totals']['book_balance']:,.2f}",
+    ]
+    buf = build_pdf(co, "BANK RECONCILIATION STATEMENT", headers, rows, code, sym, True, foot)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=bank_reconciliation.pdf"})
+
+
+@app.get("/api/reports/trial-balance/pdf")
+def trial_balance_pdf(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = trial_balance(current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Code", "Name", "Type", "Project", f"Debit ({sym})", f"Credit ({sym})", "Balance"]
+    rows = [[r["code"], r["name"], r["type"], r["project_code"], f"{r['debit']:,.2f}", f"{r['credit']:,.2f}", f"{r['balance']:,.2f}"] for r in data["rows"]]
+    foot = [f"Total Debit: {sym}{data['total_debit']:,.2f}", f"Total Credit: {sym}{data['total_credit']:,.2f}",
+            "BALANCED" if data["balanced"] else "OUT OF BALANCE"]
+    buf = build_pdf(co, "TRIAL BALANCE", headers, rows, code, sym, True, foot)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=trial_balance.pdf"})
+
+
+@app.get("/api/reports/ledger/pdf")
+def ledger_pdf(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = general_ledger(current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Entry", "Date", "Source", "Account", "Description", f"Debit ({sym})", f"Credit ({sym})"]
+    rows = [[r["entry_no"], r["date"], r["source_type"], r["account"], r["description"], f"{r['debit']:,.2f}", f"{r['credit']:,.2f}"] for r in data]
+    buf = build_pdf(co, "GENERAL LEDGER", headers, rows, code, sym, True)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=general_ledger.pdf"})
+
+
+@app.get("/api/reports/budget-variance/pdf")
+def variance_pdf(project_code: Optional[str] = None, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = budget_variance(project_code, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Budget Code", "Description", f"Budgeted ({sym})", f"Actual ({sym})", f"Variance ({sym})", "Remark"]
+    rows = [[r["budget_code"], r["description"], f"{r['budgeted']:,.2f}", f"{r['actual']:,.2f}", f"{r['variance']:,.2f}", r["remark"]] for r in data["rows"]]
+    rows.append(["", "TOTAL", f"{data['total_budget']:,.2f}", f"{data['total_actual']:,.2f}", f"{data['total_variance']:,.2f}", ""])
+    buf = build_pdf(co, f"BUDGET VARIANCE — {data['project_code']}", headers, rows, code, sym, True)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=budget_variance.pdf"})
+
+
+@app.get("/api/reports/assets/pdf")
+def assets_pdf(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    assets = db.query(Asset).filter(Asset.company_id == current_user.company_id).all()
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Number", "Name", "Category", "Assigned", "Cost", "NBV", "Condition", "Status", "Insurance"]
+    rows = [[a.asset_number, a.asset_name, a.category or "", a.assigned_to or "", f"{(a.cost or 0):,.2f}", f"{(a.nbv or 0):,.2f}", a.condition or "", a.status or "", a.insurance or ""] for a in assets]
+    buf = build_pdf(co, "FIXED ASSET REGISTER", headers, rows, code, sym, True)
+    return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=assets.pdf"})
+
+
+@app.get("/api/reports/inventory/pdf")
+def inventory_pdf(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    items = db.query(InventoryItem).filter(InventoryItem.company_id == current_user.company_id).all()
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Code", "Name", "Category", "Dept", "Cost", "Balance", "Value"]
+    rows = [[i.item_code, i.item_name, i.category or "", i.department or "", f"{(i.cost_price or 0):,.2f}", i.balance_qty, f"{(i.total_value or 0):,.2f}"] for i in items]
+    buf = build_pdf(co, "INVENTORY REGISTER", headers, rows, code, sym, True)
+    return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=inventory.pdf"})
+
+
+@app.get("/api/reports/vendors/pdf")
+def vendors_pdf(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    vendors = db.query(Vendor).filter(Vendor.company_id == current_user.company_id).all()
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["No", "Name", "Tax", "Score", "Amount", "Bank", "Description"]
+    rows = [[v.vendor_number, v.name, v.tax_clearance or "", v.score, f"{(v.amount or 0):,.2f}", v.bank or "", (v.description or "")[:40]] for v in vendors]
+    buf = build_pdf(co, "VENDOR / PROCUREMENT REGISTER", headers, rows, code, sym, True)
+    return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=vendors.pdf"})
+
+
+@app.get("/api/reports/payments/pdf")
+def payments_pdf(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    pays = db.query(PaymentRequest).filter(PaymentRequest.company_id == current_user.company_id).all()
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Request No", "Payee", "Amount", "Status", "Narration"]
+    rows = [[p.request_no, p.payee_name or "", f"{p.amount:,.2f}", p.status, (p.narration or "")[:40]] for p in pays]
+    buf = build_pdf(co, "PAYMENT REQUESTS", headers, rows, code, sym, True)
+    return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=payments.pdf"})
+
+
+# Single payment voucher PDF
+@app.get("/api/reports/voucher/{pid}/pdf")
+def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404, "Not found")
+    co, code, sym = _company_and_currency(db, current_user)
+    exp = db.query(ExpenseCode).filter(ExpenseCode.id == pr.expense_code_id).first()
+    debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.debit_account_id).first() if pr.debit_account_id else None
+    credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
+    headers = ["Field", "Value"]
+    rows = [
+        ["Voucher No", pr.request_no],
+        ["Payee", pr.payee_name or ""],
+        ["Amount", f"{sym}{pr.amount:,.2f}"],
+        ["Expense", f"{exp.code if exp else ''} — {exp.description if exp else ''}"],
+        ["Debit Account", f"{debit.code} - {debit.name}" if debit else ""],
+        ["Credit Account", f"{credit.code} - {credit.name}" if credit else ""],
+        ["Narration", pr.narration or ""],
+        ["Status", pr.status],
+        ["Date", pr.created_at.strftime("%Y-%m-%d") if pr.created_at else ""],
+    ]
+    buf = build_pdf(co, "PAYMENT VOUCHER", headers, rows, code, sym, False)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename=voucher_{pr.request_no}.pdf"})
 
 
 
