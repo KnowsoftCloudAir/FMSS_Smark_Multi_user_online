@@ -22,9 +22,19 @@ async function api(path, options = {}) {
 }
 
 function showPage(id) {
-  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.querySelectorAll(".page").forEach(function(p) {
+    p.classList.remove("active");
+    if (p.id === "app-page" || p.id === "landing-page") p.style.display = "";
+  });
   const el = document.getElementById(id);
-  if (el) el.classList.add("active");
+  if (el) {
+    el.classList.add("active");
+    if (id === "app-page") {
+      el.style.display = "flex";
+      window.__userEnteredApp = true;
+    }
+    if (id === "landing-page") el.style.display = "block";
+  }
 }
 
 /* ---------- Splash (reliable) ---------- */
@@ -161,12 +171,11 @@ document.getElementById("login-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const btn = document.getElementById("login-btn");
   const err = document.getElementById("login-error");
-  err.style.display = "none";
-  btn.disabled = true;
-  btn.textContent = "Signing in…";
+  if (err) { err.style.display = "none"; err.textContent = ""; }
+  if (btn) { btn.disabled = true; btn.textContent = "Signing in…"; }
 
-  const username = document.getElementById("username").value.trim();
-  const password = document.getElementById("password").value;
+  const username = (document.getElementById("username")?.value || "").trim();
+  const password = document.getElementById("password")?.value || "";
 
   try {
     const form = new URLSearchParams();
@@ -177,20 +186,30 @@ document.getElementById("login-form")?.addEventListener("submit", async (e) => {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: form,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Login failed");
-
+    let data = {};
+    try { data = await res.json(); } catch (_) {}
+    if (!res.ok) {
+      var msg = data.detail || "Login failed";
+      if (Array.isArray(msg)) msg = msg.map(function(x){ return x.msg || JSON.stringify(x); }).join(", ");
+      throw new Error(msg);
+    }
     token = data.access_token;
     currentUser = data.user;
     localStorage.setItem("km_token", token);
     localStorage.setItem("km_user", JSON.stringify(currentUser));
+    window.__userEnteredApp = true;
+    hideSplash();
     enterApp();
   } catch (ex) {
-    err.textContent = ex.message || "Login failed";
-    err.style.display = "block";
+    console.error("login", ex);
+    if (err) {
+      err.textContent = ex.message || "Login failed";
+      err.style.display = "block";
+    } else {
+      alert(ex.message || "Login failed");
+    }
   } finally {
-    btn.disabled = false;
-    btn.textContent = "Sign In";
+    if (btn) { btn.disabled = false; btn.textContent = "Sign In"; }
   }
 });
 
@@ -234,32 +253,32 @@ document.getElementById("register-form")?.addEventListener("submit", async (e) =
 });
 
 function enterApp() {
+  window.__appReady = true;
+  hideSplash();
   showPage("app-page");
-  document.getElementById("current-user-name").textContent =
-    currentUser.full_name || currentUser.username;
-  document.getElementById("current-user-role").textContent =
-    (currentUser.role || "").replace("_", " ").toUpperCase();
-  document.getElementById("sidebar-company").textContent =
-    currentUser.company_name || currentUser.company_slug || "";
-  document.getElementById("org-name-display").textContent =
-    currentUser.company_name || "";
+  const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val || ""; };
+  setTxt("current-user-name", currentUser.full_name || currentUser.username);
+  setTxt("current-user-role", (currentUser.role || "").replace(/_/g, " ").toUpperCase());
+  setTxt("sidebar-company", currentUser.company_name || currentUser.company_slug || "");
+  setTxt("org-name-display", currentUser.company_name || "");
 
   const isAdmin = ["company_admin", "admin", "superadmin"].includes(currentUser.role);
   document.querySelectorAll(".admin-only").forEach(el => {
     el.style.display = isAdmin ? "flex" : "none";
   });
-  document.getElementById("admin-divider").style.display = isAdmin ? "block" : "none";
+  const ad = document.getElementById("admin-divider");
+  if (ad) ad.style.display = isAdmin ? "block" : "none";
 
   document.querySelectorAll("[data-perm]").forEach(el => {
     const key = "can_access_" + el.dataset.perm;
     el.style.display = currentUser[key] === false ? "none" : "";
   });
 
-  loadCompanySettings();
-  showView("dashboard");
+  try { loadCompanySettings(); } catch (e) { console.warn(e); }
+  try { showView("dashboard"); } catch (e) { console.warn(e); }
 }
 
-document.getElementById("logout-btn").addEventListener("click", () => logout(true));
+document.getElementById("logout-btn")?.addEventListener("click", () => logout(true));
 
 document.querySelectorAll(".nav-item").forEach(item => {
   item.addEventListener("click", (e) => {
@@ -537,9 +556,14 @@ showView = function (name) {
 
 const _origEnterApp = enterApp;
 enterApp = function () {
+  window.__appReady = true;
+  try { hideSplash(); } catch (e) {}
   showPage("app-page");
-  document.getElementById("current-user-name").textContent =
-    currentUser.full_name || currentUser.username;
+  const _set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v || ""; };
+  _set("current-user-name", currentUser.full_name || currentUser.username);
+  // keep next lines but null-safe below
+  document.getElementById("current-user-name") && (document.getElementById("current-user-name").textContent =
+    currentUser.full_name || currentUser.username);
   document.getElementById("current-user-role").textContent =
     (currentUser.role || "").replace("_", " ").toUpperCase();
   document.getElementById("sidebar-company").textContent =
@@ -1808,7 +1832,11 @@ window.downloadVoucher = async function (id) {
 
 /* ========== BOOT — single entry, always last ========== */
 (function () {
+  window.__appReady = false;
+  window.__userEnteredApp = false;
+
   function showLanding() {
+    if (window.__userEnteredApp) return; // do not kick out logged-in user
     hideSplash();
     var pages = document.querySelectorAll(".page");
     for (var i = 0; i < pages.length; i++) pages[i].classList.remove("active");
@@ -1817,6 +1845,8 @@ window.downloadVoucher = async function (id) {
       landing.classList.add("active");
       landing.style.display = "block";
     }
+    var app = document.getElementById("app-page");
+    if (app) app.style.display = "";
     try {
       if (typeof showLoginCard === "function") showLoginCard();
     } catch (e) {}
@@ -1833,7 +1863,9 @@ window.downloadVoucher = async function (id) {
       if (typeof token !== "undefined" && token && currentUser) {
         try {
           await api("/api/auth/me");
+          window.__userEnteredApp = true;
           enterApp();
+          window.__appReady = true;
           return;
         } catch (e) {
           try { logout(false); } catch (e2) {}
@@ -1843,10 +1875,18 @@ window.downloadVoucher = async function (id) {
       console.warn("auth check", e);
     }
     showLanding();
+    window.__appReady = true;
   }
 
-  // Failsafe: never stuck on splash
-  setTimeout(showLanding, 2500);
+  // Failsafe: clear splash only — never force landing if already in app
+  setTimeout(function () {
+    hideSplash();
+    if (!window.__userEnteredApp) {
+      var app = document.getElementById("app-page");
+      var onApp = app && app.classList.contains("active");
+      if (!onApp) showLanding();
+    }
+  }, 2500);
 
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startApp);

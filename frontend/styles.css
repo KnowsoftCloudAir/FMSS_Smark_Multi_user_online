@@ -678,3 +678,33 @@ fieldset label { display: block; margin: 6px 0; font-size: 0.9rem; }
   margin-top: 8px;
 }
 
+
+.demo-credentials {
+  margin-top: 18px;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  color: rgba(232, 238, 245, 0.92);
+}
+.demo-credentials .demo-title {
+  font-weight: 700;
+  color: #00E5FF;
+  margin: 0 0 10px 0;
+  font-size: 0.95rem;
+}
+.demo-credentials code {
+  background: rgba(0,0,0,0.35);
+  padding: 2px 7px;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: #7FDBFF;
+}
+.demo-credentials .demo-note {
+  margin-top: 10px;
+  opacity: 0.75;
+  font-size: 0.8rem;
+}
+.demo-credentials p { margin: 0 0 10px 0; }

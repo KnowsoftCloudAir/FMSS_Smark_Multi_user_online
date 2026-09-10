@@ -20,11 +20,15 @@
     </div>
   </div>
   <script>
-  /* splash-failsafe: hide splash even if app.js fails to parse */
+  /* splash-failsafe: hide splash even if app.js fails; never force landing after login */
   setTimeout(function(){
+    if (window.__appReady) return;
     var s=document.getElementById("splash");
     if(s){s.className+=" hide";s.style.display="none";}
+    if (window.__appReady) return;
     var l=document.getElementById("landing-page");
+    var app=document.getElementById("app-page");
+    if(app && app.classList.contains("active")) return;
     if(l){l.className+=" active";l.style.display="block";}
   }, 2000);
   </script>
@@ -71,7 +75,7 @@
           <form id="login-form">
             <div class="form-group">
               <label>Company / Username</label>
-              <input type="text" id="username" required placeholder="demo/admin  or  admin" autocomplete="username" />
+              <input type="text" id="username" required placeholder="demo/admin  or  superadmin" autocomplete="username" />
             </div>
             <div class="form-group">
               <label>Password</label>
@@ -80,6 +84,18 @@
             <button type="submit" class="btn btn-accent btn-block" id="login-btn">Sign In</button>
             <div id="login-error" class="error-msg" style="display:none;"></div>
           </form>
+          <div class="demo-credentials">
+            <p class="demo-title">Demo login credentials</p>
+            <p><strong>Company admin</strong><br/>
+              Username: <code>demo/admin</code><br/>
+              Password: <code>Admin@Knowsoft1!</code></p>
+            <p><strong>Finance</strong> — <code>demo/finance</code> / <code>Finance@Knowsoft1!</code><br/>
+               <strong>Program</strong> — <code>demo/program</code> / <code>Program@Knowsoft1!</code></p>
+            <p><strong>Platform superadmin</strong><br/>
+              Username: <code>superadmin</code><br/>
+              Password: <code>Knowsoft@Super0160!</code></p>
+            <p class="demo-note">Use format <code>company-slug/username</code> for firm users.</p>
+          </div>
           <p class="auth-switch">New firm? <a href="#" id="switch-to-register">Register company</a></p>
           <p class="demo-hint">Demo company (full data): <code>demo/admin</code> · <code>Admin@Knowsoft1!</code>
             · finance <code>Finance@Knowsoft1!</code> · program <code>Program@Knowsoft1!</code><br/>
