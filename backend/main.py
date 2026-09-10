@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, date
+from typing import Optional, List, Dict, Any
 from pathlib import Path
 import os, shutil, re, json, zipfile, io, csv, secrets
 
@@ -1754,6 +1755,53 @@ def export_vendors(current_user: User = Depends(get_current_active_user), db: Se
 
 
 # Patch mark_paid to post journal
+
+
+
+@app.post("/api/finance/journal")
+def post_manual_journal(
+    description: str = Form(...),
+    narration: str = Form(""),
+    debit_account_id: int = Form(...),
+    credit_account_id: int = Form(...),
+    amount: float = Form(...),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    entry_no = post_double_entry(
+        db, current_user.company_id, current_user.id,
+        "manual", None, description, narration,
+        debit_account_id, credit_account_id, amount, project_code_id,
+    )
+    db.commit()
+    return {"message": "Journal posted", "entry_no": entry_no}
+
+
+@app.get("/api/finance/bank-lines")
+def bank_cash_lines(current_user: User = Depends(require_roles("finance", "company_admin")), db: Session = Depends(get_db)):
+    """Ledger lines for Cash-type accounts for reconciliation."""
+    cash_ids = [a.id for a in db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == current_user.company_id,
+        ChartOfAccount.account_type == "Cash",
+    ).all()]
+    if not cash_ids:
+        return []
+    rows = db.query(JournalEntry).filter(
+        JournalEntry.company_id == current_user.company_id,
+        JournalEntry.account_id.in_(cash_ids),
+    ).order_by(JournalEntry.entry_date.desc()).limit(200).all()
+    out = []
+    for j in rows:
+        acc = db.query(ChartOfAccount).filter(ChartOfAccount.id == j.account_id).first()
+        out.append({
+            "id": j.id, "entry_no": j.entry_no, "date": str(j.entry_date),
+            "account": f"{acc.code} - {acc.name}" if acc else "",
+            "description": j.description, "debit": j.debit, "credit": j.credit,
+            "narration": j.narration,
+        })
+    return out
+
 
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"

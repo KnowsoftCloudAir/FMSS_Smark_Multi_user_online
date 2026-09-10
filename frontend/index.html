@@ -311,6 +311,7 @@
               <div class="form-group"><label>Type</label>
                 <select id="coa-type"><option>Expense</option><option>Cash</option><option>Asset</option><option>Liability</option><option>Income</option><option>Equity</option></select>
               </div>
+              <div class="form-group"><label>Project Code</label><input id="coa-project" placeholder="e.g. PRJ-HLT" /></div>
               <div class="form-group"><button class="btn btn-primary" type="submit">Add Account</button></div>
             </form>
             <ul id="coa-list" class="simple-list"></ul>
@@ -440,7 +441,35 @@
           </div>
         </section>
 
-        <section id="view-finance" class="view"><div class="card"><h3>Finance Module</h3><p>Coming soon — Vouchers, Journal, Bank Reconciliation…</p></div></section>
+        <section id="view-finance" class="view">
+          <div class="card">
+            <h3>Finance Hub</h3>
+            <p class="hint">Manage chart of accounts, budgets, expense codes, post manual journals, and review bank items.</p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;margin:12px 0;">
+              <button class="btn btn-primary" onclick="showView('finance-setup')">Finance Setup (COA / Budget / Expense)</button>
+              <button class="btn btn-secondary" onclick="showView('payments')">Payment Requests</button>
+              <button class="btn btn-secondary" onclick="showView('reports')">Ledger &amp; Trial Balance</button>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Manual Journal Entry</h3>
+            <form id="journal-form" class="form-grid">
+              <div class="form-group"><label>Description *</label><input id="je-desc" required /></div>
+              <div class="form-group"><label>Narration</label><input id="je-narr" /></div>
+              <div class="form-group"><label>Debit Account ID *</label><input id="je-debit" type="number" required /></div>
+              <div class="form-group"><label>Credit Account ID *</label><input id="je-credit" type="number" required /></div>
+              <div class="form-group"><label>Amount *</label><input id="je-amt" type="number" step="0.01" required /></div>
+              <div class="form-group"><label>Project Code ID (optional)</label><input id="je-proj" type="number" /></div>
+              <div class="form-group full-width"><button class="btn btn-accent" type="submit">Post Journal</button></div>
+            </form>
+          </div>
+          <div class="card">
+            <h3>Bank Reconciliation (tick items)</h3>
+            <p class="hint">Mark ledger cash lines as reconciled. Data comes from general ledger cash accounts.</p>
+            <div id="bank-rec-list" class="table-responsive"></div>
+            <button class="btn btn-primary" id="btn-load-bank-rec" type="button">Load Cash Ledger Lines</button>
+          </div>
+        </section>
         
         <section id="view-inventory-full" class="view">
           <div class="card">
@@ -503,9 +532,9 @@
           </div>
         </section>
 
-        <section id="view-inventory" class="view"><div class="card"><h3>Inventory</h3><p>Coming soon.</p></div></section>
-        <section id="view-assets" class="view"><div class="card"><h3>Fixed Assets</h3><p>Coming soon.</p></div></section>
-        <section id="view-vendors" class="view"><div class="card"><h3>Vendors</h3><p>Coming soon.</p></div></section>
+        <section id="view-inventory" class="view"><div class="card"><h3>Inventory</h3><p>Redirecting…</p><button class="btn btn-primary" onclick="showView('inventory-full')">Open Inventory Register</button></div></section>
+        <section id="view-assets" class="view"><div class="card"><h3>Fixed Assets</h3><p>Redirecting…</p><button class="btn btn-primary" onclick="showView('assets-reg')">Open Asset Register</button></div></section>
+        <section id="view-vendors" class="view"><div class="card"><h3>Vendors</h3><p>Redirecting…</p><button class="btn btn-primary" onclick="showView('vendors-full')">Open Vendor Register</button></div></section>
         <section id="view-reports" class="view">
           <div class="card">
             <h3>Financial Reports</h3>

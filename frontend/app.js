@@ -1440,3 +1440,72 @@ showView = function (name) {
   if (name === "reports") { /* wait for button */ }
 };
 
+
+/* Finance journal + bank rec + COA project code */
+(function patchCoaForm() {
+  const form = document.getElementById("coa-form");
+  if (!form) return;
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    try {
+      await api("/api/finance/coa", {
+        method: "POST",
+        body: JSON.stringify({
+          code: document.getElementById("coa-code").value,
+          name: document.getElementById("coa-name").value,
+          account_type: document.getElementById("coa-type").value,
+          project_code: document.getElementById("coa-project")?.value || "",
+        }),
+      });
+      form.reset();
+      loadFinanceSetup();
+    } catch (ex) { alert(ex.message); }
+  }, true);
+})();
+
+document.getElementById("journal-form")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const form = new FormData();
+  form.append("description", document.getElementById("je-desc").value);
+  form.append("narration", document.getElementById("je-narr").value);
+  form.append("debit_account_id", document.getElementById("je-debit").value);
+  form.append("credit_account_id", document.getElementById("je-credit").value);
+  form.append("amount", document.getElementById("je-amt").value);
+  if (document.getElementById("je-proj").value) form.append("project_code_id", document.getElementById("je-proj").value);
+  try {
+    const res = await fetch(API + "/api/finance/journal", {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert("Posted: " + data.entry_no);
+    e.target.reset();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-load-bank-rec")?.addEventListener("click", async () => {
+  try {
+    const rows = await api("/api/finance/bank-lines");
+    const el = document.getElementById("bank-rec-list");
+    if (!rows.length) { el.innerHTML = "<p>No cash ledger lines yet. Post payments or journals first.</p>"; return; }
+    el.innerHTML = `<table class="data-table"><thead><tr><th>Tick</th><th>Date</th><th>Entry</th><th>Account</th><th>Description</th><th>Debit</th><th>Credit</th></tr></thead><tbody>
+      ${rows.map(r => `<tr>
+        <td><input type="checkbox" /></td>
+        <td>${r.date}</td><td>${r.entry_no}</td><td>${r.account}</td>
+        <td>${r.description||""}</td>
+        <td>${Number(r.debit||0).toLocaleString()}</td>
+        <td>${Number(r.credit||0).toLocaleString()}</td>
+      </tr>`).join("")}
+    </tbody></table>`;
+  } catch (ex) { alert(ex.message); }
+});
+
+// Auto-redirect old stub views
+const __sv = showView;
+showView = function (name) {
+  if (name === "inventory") name = "inventory-full";
+  if (name === "assets") name = "assets-reg";
+  if (name === "vendors") name = "vendors-full";
+  __sv(name);
+};
