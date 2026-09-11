@@ -280,6 +280,8 @@
               </div>
             </div>
             <form id="payment-form" class="form-grid" style="display:none;margin-bottom:20px;">
+              <div class="form-group"><label>Project code</label>
+                <select id="pay-project"><option value="">— Select project —</option></select></div>
               <div class="form-group">
                 <label>Budget Code *</label>
                 <select id="pay-budget" required></select>
@@ -294,7 +296,13 @@
               </div>
               <div class="form-group">
                 <label>Amount *</label>
-                <input type="number" id="pay-amount" step="0.01" min="0.01" required />
+                <input type="number" id="pay-amount" step="0.01" min="0.01" required readonly title="Auto total from lines" />
+                <p class="hint" id="pay-amount-words" style="grid-column:1/-1;font-style:italic;color:#1A6B9A"></p>
+              <div style="grid-column:1/-1" class="card">
+                <h4>Expense lines (description · qty · unit cost)</h4>
+                <div id="pay-lines"></div>
+                <button type="button" class="btn btn-sm btn-outline" id="btn-add-pay-line">+ Add line</button>
+              </div>
               </div>
               <div class="form-group">
                 <label>Payee Name</label>
@@ -403,7 +411,9 @@
               <div class="form-group"><label>Status</label>
                 <select id="ast-status"><option value="active">Active</option><option value="under_repair">Under Repair</option></select>
               </div>
-              <div class="form-group"><label>Debit Account ID</label><input id="ast-debit" type="number" /></div>
+              <div class="form-group"><label>Debit account</label><select id="ast-debit"><option value="">— Select —</option></select></div>
+              <div class="form-group"><label>Credit account</label><select id="ast-credit"><option value="">— Select —</option></select></div>
+              <div class="form-group"><label>Project</label><select id="ast-project"><option value="">— Optional —</option></select></div>
               <div class="form-group"><label>Credit Account ID</label><input id="ast-credit" type="number" /></div>
               <div class="form-group full-width">
                 <button type="submit" class="btn btn-accent">Save Asset</button>
@@ -672,6 +682,37 @@
               <h3>Synchronised reports (internal memory)</h3>
               <div id="stored-reports-list"></div>
               <button type="button" class="btn btn-sm btn-outline" id="btn-refresh-stored">Refresh stored</button>
+            </div>
+            <div class="card" style="margin-bottom:1rem">
+              <h3>Project report</h3>
+              <div style="display:flex;flex-wrap:gap:.5rem;align-items:end">
+                <div class="form-group"><label>Project</label><select id="rpt-project"></select></div>
+                <div class="form-group"><label>From</label><input type="date" id="rpt-proj-from" /></div>
+                <div class="form-group"><label>To</label><input type="date" id="rpt-proj-to" /></div>
+                <button type="button" class="btn btn-primary" id="btn-load-project-rpt">View</button>
+                <a class="btn btn-outline" id="btn-pdf-project-rpt" href="#">PDF</a>
+              </div>
+              <div id="project-report-out" class="table-responsive"></div>
+            </div>
+            <div class="card" style="margin-bottom:1rem">
+              <h3>Financial statements</h3>
+              <p class="hint">Set period (or year) then view. Figures trail to journal source; request correction from trail.</p>
+              <div style="display:flex;flex-wrap:gap:.5rem;align-items:end">
+                <div class="form-group"><label>From</label><input type="date" id="fs-from" /></div>
+                <div class="form-group"><label>To</label><input type="date" id="fs-to" /></div>
+                <div class="form-group"><label>Or year</label><input type="number" id="fs-year" placeholder="2026" min="2000" max="2100" /></div>
+              </div>
+              <div style="display:flex;flex-wrap:gap:.5rem;margin-top:.5rem">
+                <button type="button" class="btn btn-secondary" id="btn-load-sfp">Statement of Financial Position</button>
+                <button type="button" class="btn btn-secondary" id="btn-load-sfpn">Statement of Financial Performance</button>
+                <button type="button" class="btn btn-secondary" id="btn-load-scf">Statement of Cash Flows</button>
+              </div>
+              <div style="display:flex;flex-wrap:gap:.5rem;margin-top:.5rem">
+                <a class="btn btn-outline btn-sm" id="btn-pdf-sfp" href="#">SFP PDF</a>
+                <a class="btn btn-outline btn-sm" id="btn-pdf-sfpn" href="#">Performance PDF</a>
+                <a class="btn btn-outline btn-sm" id="btn-pdf-scf" href="#">Cash Flow PDF</a>
+              </div>
+              <div id="fs-report-out" class="table-responsive" style="margin-top:1rem"></div>
             </div>
             <div id="report-output" class="table-responsive"></div>
           </div>

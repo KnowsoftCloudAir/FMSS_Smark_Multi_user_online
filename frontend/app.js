@@ -1316,6 +1316,8 @@ if (origAssetSubmit) {
           status: document.getElementById("ast-status")?.value || "active",
           debit_account_id: document.getElementById("ast-debit")?.value ? parseInt(document.getElementById("ast-debit").value) : null,
           credit_account_id: document.getElementById("ast-credit")?.value ? parseInt(document.getElementById("ast-credit").value) : null,
+          project_code_id: document.getElementById("ast-project")?.value ? parseInt(document.getElementById("ast-project").value) : null,
+          credit_account_id: document.getElementById("ast-credit")?.value ? parseInt(document.getElementById("ast-credit").value) : null,
         }),
       });
       e.target.reset();
@@ -2075,3 +2077,317 @@ if (typeof showView === "function") {
     if (name === "reports") loadStoredReports();
   };
 }
+
+
+/* ===== Payment lines, project, amount in words, FS reports ===== */
+function numberToWordsSimple(n) {
+  // Client-side mirror; server stores authoritative amount_in_words
+  n = Math.abs(Number(n) || 0);
+  if (!n) return "Zero Naira Only";
+  return "Amount: " + n.toLocaleString(undefined, {minimumFractionDigits: 2}) + " (see voucher for words)";
+}
+
+function ensurePayLines() {
+  const box = document.getElementById("pay-lines");
+  if (!box || box.children.length) return;
+  addPayLine();
+}
+
+function addPayLine(desc="", qty=1, unit=0) {
+  const box = document.getElementById("pay-lines");
+  if (!box) return;
+  const row = document.createElement("div");
+  row.className = "pay-line";
+  row.style.cssText = "display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:.4rem;margin-bottom:.4rem";
+  row.innerHTML = `
+    <input class="pl-desc" placeholder="Description" value="${desc}" />
+    <input class="pl-qty" type="number" step="0.01" min="0" value="${qty}" />
+    <input class="pl-unit" type="number" step="0.01" min="0" value="${unit}" />
+    <input class="pl-amt" type="number" step="0.01" readonly value="${(qty*unit).toFixed(2)}" />
+    <button type="button" class="btn btn-sm btn-outline pl-remove">×</button>`;
+  box.appendChild(row);
+  const recalc = () => {
+    const q = parseFloat(row.querySelector(".pl-qty").value) || 0;
+    const u = parseFloat(row.querySelector(".pl-unit").value) || 0;
+    row.querySelector(".pl-amt").value = (q * u).toFixed(2);
+    sumPayLines();
+  };
+  row.querySelector(".pl-qty").addEventListener("input", recalc);
+  row.querySelector(".pl-unit").addEventListener("input", recalc);
+  row.querySelector(".pl-remove").addEventListener("click", () => { row.remove(); sumPayLines(); });
+}
+
+function sumPayLines() {
+  let total = 0;
+  document.querySelectorAll("#pay-lines .pl-amt").forEach(el => { total += parseFloat(el.value) || 0; });
+  const amt = document.getElementById("pay-amount");
+  if (amt) amt.value = total.toFixed(2);
+  const w = document.getElementById("pay-amount-words");
+  if (w) w.textContent = total ? numberToWordsSimple(total) : "";
+}
+
+document.getElementById("btn-add-pay-line")?.addEventListener("click", () => addPayLine());
+
+const _loadPayForm = loadPaymentFormData;
+loadPaymentFormData = async function () {
+  await _loadPayForm();
+  ensurePayLines();
+  try {
+    const projects = await api("/api/projects");
+    const sel = document.getElementById("pay-project");
+    if (sel) {
+      sel.innerHTML = `<option value="">— Select project —</option>` +
+        projects.map(p => `<option value="${p.id}">${p.code} — ${p.name}</option>`).join("");
+    }
+  } catch (e) {}
+};
+
+// Override payment submit to include lines + project
+document.getElementById("payment-form")?.addEventListener("submit", async (e) => {
+  // handled by existing listener - we patch by replacing is hard; use capture
+}, true);
+
+// Replace submit handler by cloning
+(function () {
+  const form = document.getElementById("payment-form");
+  if (!form) return;
+  const clone = form.cloneNode(true);
+  form.parentNode.replaceChild(clone, form);
+  // re-bind add line on clone
+  document.getElementById("btn-add-pay-line")?.addEventListener("click", () => addPayLine());
+  document.getElementById("payment-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const lines = [];
+    document.querySelectorAll("#pay-lines .pay-line").forEach(row => {
+      const description = row.querySelector(".pl-desc").value;
+      const quantity = parseFloat(row.querySelector(".pl-qty").value) || 0;
+      const unit_cost = parseFloat(row.querySelector(".pl-unit").value) || 0;
+      const amount = quantity * unit_cost;
+      if (description || amount) lines.push({ description, quantity, unit_cost, amount });
+    });
+    sumPayLines();
+    const debit = document.getElementById("pay-debit")?.value;
+    const credit = document.getElementById("pay-credit")?.value;
+    const project = document.getElementById("pay-project")?.value;
+    try {
+      await api("/api/payments/request", {
+        method: "POST",
+        body: JSON.stringify({
+          budget_code_id: parseInt(document.getElementById("pay-budget").value),
+          expense_code_id: parseInt(document.getElementById("pay-expense").value),
+          project_code_id: project ? parseInt(project) : null,
+          amount: parseFloat(document.getElementById("pay-amount").value),
+          payee_name: document.getElementById("pay-payee").value,
+          narration: document.getElementById("pay-narration").value,
+          debit_account_id: debit ? parseInt(debit) : null,
+          credit_account_id: credit ? parseInt(credit) : null,
+          designated_approver_id: parseInt(document.getElementById("pay-approver").value),
+          line_items: lines,
+        }),
+      });
+      alert("Payment request submitted");
+      e.target.reset();
+      document.getElementById("pay-lines").innerHTML = "";
+      document.getElementById("payment-form").style.display = "none";
+      loadPayments();
+    } catch (ex) { alert(ex.message); }
+  });
+  document.getElementById("btn-new-payment")?.addEventListener("click", () => {
+    document.getElementById("payment-form").style.display = "grid";
+    loadPaymentFormData();
+  });
+  document.getElementById("btn-cancel-payment")?.addEventListener("click", () => {
+    document.getElementById("payment-form").style.display = "none";
+  });
+})();
+
+function fsQuery() {
+  const from = document.getElementById("fs-from")?.value;
+  const to = document.getElementById("fs-to")?.value;
+  const year = document.getElementById("fs-year")?.value;
+  const q = new URLSearchParams();
+  if (year) q.set("year", year);
+  else {
+    if (from) q.set("start_date", from);
+    if (to) q.set("end_date", to);
+  }
+  return q.toString() ? "?" + q.toString() : "";
+}
+
+async function loadProjectsInto(selId) {
+  const projects = await api("/api/projects");
+  const sel = document.getElementById(selId);
+  if (!sel) return projects;
+  sel.innerHTML = projects.map(p => `<option value="${p.id}">${p.code} — ${p.name}</option>`).join("");
+  return projects;
+}
+
+document.getElementById("btn-load-project-rpt")?.addEventListener("click", async () => {
+  const id = document.getElementById("rpt-project")?.value;
+  if (!id) return alert("Select a project");
+  const from = document.getElementById("rpt-proj-from")?.value;
+  const to = document.getElementById("rpt-proj-to")?.value;
+  let url = `/api/reports/project/${id}`;
+  const q = [];
+  if (from) q.push("start_date=" + from);
+  if (to) q.push("end_date=" + to);
+  if (q.length) url += "?" + q.join("&");
+  try {
+    const d = await api(url);
+    let h = `<p><strong>${d.project.code}</strong> — ${d.project.name} | Budget: ${Number(d.totals.budget).toLocaleString()} | Payments: ${Number(d.totals.payments).toLocaleString()} | Variance: ${Number(d.totals.variance).toLocaleString()}</p>`;
+    h += `<table class="data-table"><thead><tr><th>Date</th><th>Entry</th><th>Description</th><th>Debit</th><th>Credit</th><th>Trail</th></tr></thead><tbody>`;
+    (d.lines || []).forEach(L => {
+      h += `<tr><td>${L.date}</td><td>${L.entry_no}</td><td>${L.description||""}</td>
+        <td>${Number(L.debit||0).toLocaleString()}</td><td>${Number(L.credit||0).toLocaleString()}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="openTrail(${L.id})">Trail</button></td></tr>`;
+    });
+    h += `</tbody></table>`;
+    document.getElementById("project-report-out").innerHTML = h;
+    const pdf = document.getElementById("btn-pdf-project-rpt");
+    if (pdf) pdf.href = API + `/api/reports/project/${id}/pdf` + (q.length ? "?" + q.join("&") : "");
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-load-sfp")?.addEventListener("click", async () => {
+  try {
+    const d = await api("/api/reports/financial-position" + fsQuery());
+    let h = `<h4>Statement of Financial Position as at ${d.as_at}</h4>`;
+    h += `<p><strong>Total assets:</strong> ${Number(d.total_assets).toLocaleString()} · <strong>Liabilities:</strong> ${Number(d.total_liabilities).toLocaleString()} · <strong>Equity:</strong> ${Number(d.total_equity).toLocaleString()}</p>`;
+    h += `<table class="data-table"><thead><tr><th>Code</th><th>Account</th><th>Balance</th><th></th></tr></thead><tbody>`;
+    [["Assets", d.assets], ["Liabilities", d.liabilities], ["Equity", d.equity]].forEach(([label, rows]) => {
+      h += `<tr><td colspan="4"><strong>${label}</strong></td></tr>`;
+      (rows || []).forEach(a => {
+        h += `<tr><td>${a.code}</td><td>${a.name}</td><td>${Number(a.balance).toLocaleString()}</td>
+          <td class="hint">Trail via ledger / COA ${a.code}</td></tr>`;
+      });
+    });
+    h += `</tbody></table>`;
+    document.getElementById("fs-report-out").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-load-sfpn")?.addEventListener("click", async () => {
+  try {
+    const d = await api("/api/reports/financial-performance" + fsQuery());
+    let h = `<h4>Statement of Financial Performance</h4>
+      <p>Income: ${Number(d.total_income).toLocaleString()} · Expenses: ${Number(d.total_expenses).toLocaleString()} · Surplus/(Deficit): ${Number(d.surplus_deficit).toLocaleString()}</p>
+      <table class="data-table"><thead><tr><th>Code</th><th>Account</th><th>Amount</th></tr></thead><tbody>`;
+    h += `<tr><td colspan="3"><strong>Income</strong></td></tr>`;
+    (d.income||[]).forEach(a => { h += `<tr><td>${a.code}</td><td>${a.name}</td><td>${Number(a.balance).toLocaleString()}</td></tr>`; });
+    h += `<tr><td colspan="3"><strong>Expenses</strong></td></tr>`;
+    (d.expenses||[]).forEach(a => { h += `<tr><td>${a.code}</td><td>${a.name}</td><td>${Number(a.balance).toLocaleString()}</td></tr>`; });
+    h += `</tbody></table>`;
+    document.getElementById("fs-report-out").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-load-scf")?.addEventListener("click", async () => {
+  try {
+    const d = await api("/api/reports/cash-flow" + fsQuery());
+    let h = `<h4>Statement of Cash Flows</h4>
+      <p>Operating: ${Number(d.operating).toLocaleString()} · Investing: ${Number(d.investing).toLocaleString()} · Financing: ${Number(d.financing).toLocaleString()} · Net: ${Number(d.net_change).toLocaleString()}</p>
+      <table class="data-table"><thead><tr><th>Date</th><th>Entry</th><th>Description</th><th>Net</th><th>Bucket</th><th>Trail</th></tr></thead><tbody>`;
+    (d.lines||[]).forEach(L => {
+      h += `<tr><td>${L.date}</td><td>${L.entry_no}</td><td>${L.description||""}</td>
+        <td>${Number(L.net).toLocaleString()}</td><td>${L.bucket}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="openTrail(${L.id})">Trail</button></td></tr>`;
+    });
+    h += `</tbody></table>`;
+    document.getElementById("fs-report-out").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+});
+
+function bindFsPdf(btnId, path) {
+  document.getElementById(btnId)?.addEventListener("click", (e) => {
+    e.preventDefault();
+    window.open(API + path + fsQuery(), "_blank");
+  });
+}
+bindFsPdf("btn-pdf-sfp", "/api/reports/financial-position/pdf");
+bindFsPdf("btn-pdf-sfpn", "/api/reports/financial-performance/pdf");
+bindFsPdf("btn-pdf-scf", "/api/reports/cash-flow/pdf");
+
+// Load projects when opening reports
+const _sv2 = window.showView;
+if (typeof _sv2 === "function") {
+  window.showView = function (name) {
+    _sv2(name);
+    if (name === "reports") {
+      loadProjectsInto("rpt-project");
+      loadStoredReports();
+    }
+  };
+}
+
+/* Finance panel on payment detail */
+const _openPay = window.openPaymentDetail;
+window.openPaymentDetail = async function (id) {
+  if (typeof _openPay === "function") await _openPay(id);
+  const panel = document.getElementById("pd-finance-panel");
+  if (!panel) return;
+  const role = currentUser?.role;
+  if (["finance", "company_admin"].includes(role)) {
+    panel.style.display = "block";
+    try {
+      const accounts = await api("/api/coa");
+      const fill = (selId) => {
+        const s = document.getElementById(selId);
+        if (!s) return;
+        s.innerHTML = (accounts || []).map(a => `<option value="${a.id}">${a.code} — ${a.name}</option>`).join("");
+      };
+      fill("pd-debit"); fill("pd-credit");
+      await loadProjectsInto("pd-project");
+    } catch (e) {}
+  } else {
+    panel.style.display = "none";
+  }
+};
+
+document.getElementById("btn-pd-save-accounts")?.addEventListener("click", async () => {
+  const pid = document.getElementById("payment-detail-modal")?.dataset?.pid;
+  if (!pid) return;
+  const form = new FormData();
+  form.append("debit_account_id", document.getElementById("pd-debit").value);
+  form.append("credit_account_id", document.getElementById("pd-credit").value);
+  form.append("project_code_id", document.getElementById("pd-project").value || "");
+  try {
+    const res = await fetch(API + `/api/payments/${pid}/accounts`, {
+      method: "PATCH", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert("Account codes updated");
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-pd-request-corr")?.addEventListener("click", async () => {
+  const pid = document.getElementById("payment-detail-modal")?.dataset?.pid;
+  const msg = document.getElementById("pd-corr-msg")?.value;
+  if (!pid || !msg) return alert("Enter a message");
+  const form = new FormData();
+  form.append("message", msg);
+  try {
+    const res = await fetch(API + `/api/payments/${pid}/request-correction`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message);
+    loadPayments();
+  } catch (ex) { alert(ex.message); }
+});
+
+
+async function loadAssetAccountDropdowns() {
+  try {
+    const accounts = await api("/api/coa");
+    for (const id of ["ast-debit", "ast-credit"]) {
+      const s = document.getElementById(id);
+      if (!s) continue;
+      s.innerHTML = `<option value="">— Select —</option>` +
+        (accounts || []).map(a => `<option value="${a.id}">${a.code} — ${a.name}</option>`).join("");
+    }
+    await loadProjectsInto("ast-project");
+  } catch (e) {}
+}
+document.getElementById("btn-new-asset")?.addEventListener("click", () => loadAssetAccountDropdowns());

@@ -14,7 +14,7 @@ from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession, StoredReport
+    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession, StoredReport, PaymentLineItem, ProjectCode
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -22,6 +22,7 @@ from schemas import (
     COAIn, BudgetCodeIn, ExpenseCodeIn, PaymentRequestIn, PaymentAction, AssetIn,
     CompanySettingsOut
 )
+from reports import amount_to_words
 from auth import (
     create_access_token, get_password_hash, verify_password,
     get_current_active_user, get_superadmin, get_company_admin,
@@ -332,8 +333,9 @@ def init_defaults(db: Session):
             ))
 
         # Project codes
-        for code, name in [("PRJ-HLT", "Health Outreach"), ("PRJ-EDU", "Education Support"), ("PRJ-OPS", "Operations")]:
-            db.add(ProjectCode(company_id=demo.id, code=code, name=name))
+        for code, name, bud in [("PRJ-HLT", "Health Outreach", 5000000), ("PRJ-EDU", "Education Support", 3500000), ("PRJ-OPS", "Operations", 1500000), ("PRJ-WASH", "Water & Sanitation", 2800000)]:
+            if not db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first():
+                db.add(ProjectCode(company_id=demo.id, code=code, name=name, budget_amount=bud, description=name))
 
         # Update assets with assigned_to and accounts
         for a in db.query(Asset).filter(Asset.company_id == demo.id).all():
@@ -1040,6 +1042,9 @@ def submit_payment_request(
         debit_account_id=debit_id,
         credit_account_id=credit_id,
         designated_approver_id=data.designated_approver_id,
+        project_code_id=getattr(data, "project_code_id", None),
+        amount_in_words=amount_to_words(getattr(data, "amount", 0)),
+        line_items_json=__import__("json").dumps([li.dict() if hasattr(li, "dict") else (li.model_dump() if hasattr(li, "model_dump") else li) for li in (getattr(data, "line_items", None) or [])]),
         status="submitted",
     )
     db.add(pr)
@@ -1066,7 +1071,7 @@ def list_payments(current_user: User = Depends(get_current_active_user), db: Ses
         bud = db.query(BudgetCode).filter(BudgetCode.id == p.budget_code_id).first()
         out.append({
             "id": p.id, "request_no": p.request_no, "amount": p.amount, "status": p.status,
-            "payee_name": p.payee_name, "narration": p.narration,
+            "payee_name": p.payee_name, "project_code_id": getattr(p, "project_code_id", None), "amount_in_words": getattr(p, "amount_in_words", "") or "", "line_items_json": getattr(p, "line_items_json", "[]") or "[]", "narration": p.narration,
             "expense_code": exp.code if exp else None,
             "expense_description": exp.description if exp else None,
             "budget_code": bud.code if bud else None,
@@ -2135,7 +2140,7 @@ def budget_variance(
 
 
 # ===================== PDF / EXCEL REPORTS =====================
-from reports import build_pdf, build_csv, build_bank_recon_pdf, build_payment_voucher_pdf
+from reports import build_pdf, build_csv, build_bank_recon_pdf, build_payment_voucher_pdf, amount_to_words
 
 def _dashboard_kpis(db, company_id):
     """Lightweight dashboard metrics for PDF page 1."""
@@ -2479,3 +2484,377 @@ def serve_frontend(full_path: str):
         return FileResponse(fp)
     index = FRONTEND_DIR / "index.html"
     return FileResponse(index) if index.exists() else HTTPException(404)
+
+
+# ===================== PROJECTS & FINANCIAL STATEMENTS =====================
+@app.get("/api/projects")
+def list_projects(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(ProjectCode).filter(
+        ProjectCode.company_id == current_user.company_id, ProjectCode.is_active == True
+    ).order_by(ProjectCode.code).all()
+    return [{
+        "id": p.id, "code": p.code, "name": p.name, "description": p.description or "",
+        "budget_amount": getattr(p, "budget_amount", 0) or 0,
+        "start_date": str(p.start_date) if getattr(p, "start_date", None) else None,
+        "end_date": str(p.end_date) if getattr(p, "end_date", None) else None,
+    } for p in rows]
+
+
+@app.get("/api/reports/project/{project_id}")
+def project_report_data(
+    project_id: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    p = db.query(ProjectCode).filter(
+        ProjectCode.id == project_id, ProjectCode.company_id == current_user.company_id
+    ).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+    q = db.query(JournalEntry).filter(
+        JournalEntry.company_id == current_user.company_id,
+        JournalEntry.project_code_id == project_id,
+    )
+    if start_date:
+        try: q = q.filter(JournalEntry.entry_date >= date.fromisoformat(start_date))
+        except Exception: pass
+    if end_date:
+        try: q = q.filter(JournalEntry.entry_date <= date.fromisoformat(end_date))
+        except Exception: pass
+    lines = q.order_by(JournalEntry.entry_date).all()
+    payments = db.query(PaymentRequest).filter(
+        PaymentRequest.company_id == current_user.company_id,
+        PaymentRequest.project_code_id == project_id,
+    ).all()
+    total_dr = sum(l.debit or 0 for l in lines)
+    total_cr = sum(l.credit or 0 for l in lines)
+    pay_total = sum(x.amount or 0 for x in payments if x.status in ("paid", "finance_approved", "program_approved", "submitted"))
+    return {
+        "project": {"id": p.id, "code": p.code, "name": p.name, "budget_amount": getattr(p, "budget_amount", 0) or 0},
+        "lines": [{
+            "id": l.id, "date": str(l.entry_date), "entry_no": l.entry_no,
+            "description": l.description, "debit": l.debit, "credit": l.credit,
+            "account_id": l.account_id, "source_type": l.source_type, "source_id": l.source_id,
+        } for l in lines],
+        "payments": [{
+            "id": x.id, "request_no": x.request_no, "amount": x.amount,
+            "status": x.status, "payee": x.payee_name,
+        } for x in payments],
+        "totals": {"debit": total_dr, "credit": total_cr, "payments": pay_total,
+                   "budget": getattr(p, "budget_amount", 0) or 0,
+                   "variance": (getattr(p, "budget_amount", 0) or 0) - pay_total},
+    }
+
+
+@app.get("/api/reports/project/{project_id}/pdf")
+def project_report_pdf(
+    project_id: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    data = project_report_data(project_id, start_date, end_date, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Date", "Entry", "Description", f"Debit ({sym})", f"Credit ({sym})", "Source"]
+    rows = [[L["date"], L["entry_no"], (L["description"] or "")[:40],
+             f"{L['debit']:,.2f}", f"{L['credit']:,.2f}",
+             f"{L.get('source_type') or ''}:{L.get('source_id') or ''}"] for L in data["lines"]]
+    foot = [
+        f"Project: {data['project']['code']} — {data['project']['name']}",
+        f"Budget: {sym}{data['totals']['budget']:,.2f} | Payments: {sym}{data['totals']['payments']:,.2f} | Variance: {sym}{data['totals']['variance']:,.2f}",
+        "Figures are trailable via Entry No / Source on the project report screen.",
+    ]
+    buf = build_pdf(co, f"PROJECT REPORT — {data['project']['code']}", headers, rows, code, sym, True,
+                    foot, description=data["project"]["name"],
+                    kpis=_dashboard_kpis(db, current_user.company_id))
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename=project_{data['project']['code']}.pdf"})
+
+
+def _period_filter(q, start_date, end_date, year):
+    if year:
+        try:
+            y = int(year)
+            q = q.filter(JournalEntry.entry_date >= date(y, 1, 1), JournalEntry.entry_date <= date(y, 12, 31))
+            return q
+        except Exception:
+            pass
+    if start_date:
+        try: q = q.filter(JournalEntry.entry_date >= date.fromisoformat(start_date))
+        except Exception: pass
+    if end_date:
+        try: q = q.filter(JournalEntry.entry_date <= date.fromisoformat(end_date))
+        except Exception: pass
+    return q
+
+
+@app.get("/api/reports/financial-position")
+def statement_financial_position(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    year: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Statement of Financial Position (Balance Sheet) as at end date / year-end."""
+    cid = current_user.company_id
+    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid, ChartOfAccount.is_active == True).all()
+    assets, liabilities, equity = [], [], []
+    ta = tl = te = 0.0
+    for a in accounts:
+        q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == a.id)
+        q = _period_filter(q, start_date, end_date, year)
+        lines = q.all()
+        bal = sum((x.debit or 0) - (x.credit or 0) for x in lines)
+        row = {"id": a.id, "code": a.code, "name": a.name, "balance": bal,
+               "trail": f"/api/finance/transaction-trail by account {a.id}"}
+        t = (a.account_type or "").lower()
+        if t in ("asset", "cash", "fixed asset", "inventory"):
+            assets.append(row); ta += bal
+        elif t in ("liability", "payable"):
+            liabilities.append(row); tl += bal
+        elif t in ("equity", "capital"):
+            equity.append(row); te += bal
+        else:
+            # net income proxy not classified here
+            pass
+    return {
+        "as_at": end_date or (f"{year}-12-31" if year else str(date.today())),
+        "assets": assets, "liabilities": liabilities, "equity": equity,
+        "total_assets": ta, "total_liabilities": tl, "total_equity": te,
+    }
+
+
+@app.get("/api/reports/financial-performance")
+def statement_financial_performance(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    year: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Statement of Financial Performance (Income Statement / P&L)."""
+    cid = current_user.company_id
+    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid, ChartOfAccount.is_active == True).all()
+    income, expenses = [], []
+    ti = te = 0.0
+    for a in accounts:
+        q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == a.id)
+        q = _period_filter(q, start_date, end_date, year)
+        lines = q.all()
+        # income credit-nature, expense debit-nature
+        bal = sum((x.credit or 0) - (x.debit or 0) for x in lines)
+        t = (a.account_type or "").lower()
+        row = {"id": a.id, "code": a.code, "name": a.name, "balance": abs(bal),
+               "raw": bal, "trail_hint": f"Account {a.code} journal lines"}
+        if t in ("income", "revenue"):
+            income.append(row); ti += abs(bal)
+        elif t in ("expense", "cost"):
+            # expenses: debit - credit
+            ebal = sum((x.debit or 0) - (x.credit or 0) for x in lines)
+            row["balance"] = ebal
+            expenses.append(row); te += ebal
+    return {
+        "period": {"start": start_date, "end": end_date, "year": year},
+        "income": income, "expenses": expenses,
+        "total_income": ti, "total_expenses": te, "surplus_deficit": ti - te,
+    }
+
+
+@app.get("/api/reports/cash-flow")
+def statement_cash_flow(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    year: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Simplified Statement of Cash Flows from cash account movements."""
+    cid = current_user.company_id
+    cash_accs = db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == cid,
+        ChartOfAccount.account_type.in_(["Cash", "cash", "Asset"]),
+    ).all()
+    # Prefer name containing bank/cash
+    cash_ids = [a.id for a in cash_accs if "cash" in (a.name or "").lower() or "bank" in (a.name or "").lower() or (a.account_type or "").lower() == "cash"]
+    if not cash_ids:
+        cash_ids = [a.id for a in cash_accs]
+    q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id.in_(cash_ids or [-1]))
+    q = _period_filter(q, start_date, end_date, year)
+    lines = q.order_by(JournalEntry.entry_date).all()
+    operating = investing = financing = 0.0
+    detail = []
+    for L in lines:
+        net = (L.debit or 0) - (L.credit or 0)
+        st = (L.source_type or "").lower()
+        bucket = "operating"
+        if st in ("asset", "asset_adjustment"):
+            bucket = "investing"; investing += net
+        elif st in ("equity",):
+            bucket = "financing"; financing += net
+        else:
+            operating += net
+        detail.append({
+            "id": L.id, "date": str(L.entry_date), "entry_no": L.entry_no,
+            "description": L.description, "net": net, "bucket": bucket,
+            "source_type": L.source_type, "source_id": L.source_id,
+        })
+    return {
+        "period": {"start": start_date, "end": end_date, "year": year},
+        "operating": operating, "investing": investing, "financing": financing,
+        "net_change": operating + investing + financing,
+        "lines": detail,
+    }
+
+
+def _fs_pdf(title, headers, rows, foot, user, db):
+    co, code, sym = _company_and_currency(db, user)
+    buf = build_pdf(co, title, headers, rows, code, sym, False, foot,
+                    kpis=_dashboard_kpis(db, user.company_id))
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={title.lower().replace(' ','_')}.pdf"})
+
+
+@app.get("/api/reports/financial-position/pdf")
+def sfp_pdf(start_date: Optional[str] = None, end_date: Optional[str] = None, year: Optional[int] = None,
+            current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = statement_financial_position(start_date, end_date, year, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    rows = [["ASSETS", "", ""]]
+    for a in data["assets"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total assets", "", f"{data['total_assets']:,.2f}"])
+    rows.append(["LIABILITIES", "", ""])
+    for a in data["liabilities"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total liabilities", "", f"{data['total_liabilities']:,.2f}"])
+    rows.append(["EQUITY", "", ""])
+    for a in data["equity"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total equity", "", f"{data['total_equity']:,.2f}"])
+    return _fs_pdf("STATEMENT OF FINANCIAL POSITION", ["Code", "Account", f"Amount ({sym})"], rows,
+                   [f"As at {data['as_at']}", "Click trail on screen for source journals"], current_user, db)
+
+
+@app.get("/api/reports/financial-performance/pdf")
+def sfpn_pdf(start_date: Optional[str] = None, end_date: Optional[str] = None, year: Optional[int] = None,
+             current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = statement_financial_performance(start_date, end_date, year, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    rows = [["INCOME", "", ""]]
+    for a in data["income"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total income", "", f"{data['total_income']:,.2f}"])
+    rows.append(["EXPENSES", "", ""])
+    for a in data["expenses"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total expenses", "", f"{data['total_expenses']:,.2f}"])
+    rows.append(["Surplus / (Deficit)", "", f"{data['surplus_deficit']:,.2f}"])
+    return _fs_pdf("STATEMENT OF FINANCIAL PERFORMANCE", ["Code", "Account", f"Amount ({sym})"], rows,
+                   ["Trail each line on-screen to journal source"], current_user, db)
+
+
+@app.get("/api/reports/cash-flow/pdf")
+def scf_pdf(start_date: Optional[str] = None, end_date: Optional[str] = None, year: Optional[int] = None,
+            current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = statement_cash_flow(start_date, end_date, year, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    rows = [
+        ["Operating activities", f"{data['operating']:,.2f}"],
+        ["Investing activities", f"{data['investing']:,.2f}"],
+        ["Financing activities", f"{data['financing']:,.2f}"],
+        ["Net change in cash", f"{data['net_change']:,.2f}"],
+    ]
+    return _fs_pdf("STATEMENT OF CASH FLOWS", ["Particulars", f"Amount ({sym})"], rows,
+                   ["Detail lines trailable on the Cash Flow report page"], current_user, db)
+
+
+@app.patch("/api/payments/{pid}/accounts")
+def finance_change_accounts(
+    pid: int,
+    debit_account_id: Optional[int] = Form(None),
+    credit_account_id: Optional[int] = Form(None),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Finance can change COA codes on a request awaiting finance approval."""
+    pr = db.query(PaymentRequest).filter(
+        PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id
+    ).first()
+    if not pr:
+        raise HTTPException(404)
+    if pr.status not in ("submitted", "program_approved", "returned"):
+        raise HTTPException(400, "Only open / program-approved requests can be adjusted")
+    if debit_account_id is not None:
+        pr.debit_account_id = debit_account_id
+    if credit_account_id is not None:
+        pr.credit_account_id = credit_account_id
+    if project_code_id is not None:
+        pr.project_code_id = project_code_id
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="accounts_updated", comment="Account codes updated by finance"))
+    db.commit()
+    return {"ok": True, "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id}
+
+
+@app.post("/api/payments/{pid}/request-correction")
+def payment_request_correction(
+    pid: int,
+    message: str = Form(...),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Finance messages originator to correct and resubmit the payment request."""
+    pr = db.query(PaymentRequest).filter(
+        PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id
+    ).first()
+    if not pr:
+        raise HTTPException(404)
+    pr.status = "returned"
+    pr.rejection_reason = message
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="request_correction", comment=message))
+    # Also create correction-style inbox message to requester
+    db.add(CorrectionRequest(
+        company_id=current_user.company_id,
+        journal_entry_id=None,
+        source_type="payment",
+        source_id=pr.id,
+        from_user_id=current_user.id,
+        to_user_id=pr.requester_id,
+        message=f"Payment {pr.request_no}: {message}",
+        status="open",
+    ))
+    db.commit()
+    return {"ok": True, "message": "Originator notified to correct and resubmit", "status": "returned"}
+
+
+@app.post("/api/payments/{pid}/resubmit")
+def payment_resubmit(
+    pid: int,
+    amount: Optional[float] = Form(None),
+    narration: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    pr = db.query(PaymentRequest).filter(
+        PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id
+    ).first()
+    if not pr:
+        raise HTTPException(404)
+    if pr.requester_id != current_user.id and current_user.role not in ("company_admin",):
+        raise HTTPException(403, "Only the originator can resubmit")
+    if pr.status != "returned":
+        raise HTTPException(400, "Only returned requests can be resubmitted")
+    if amount is not None:
+        pr.amount = amount
+        pr.amount_in_words = amount_to_words(amount)
+    if narration is not None:
+        pr.narration = narration
+    pr.status = "submitted"
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="resubmit", comment="Resubmitted after correction"))
+    db.commit()
+    return {"ok": True, "status": "submitted"}
+

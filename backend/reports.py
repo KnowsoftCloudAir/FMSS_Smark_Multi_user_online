@@ -1,3 +1,48 @@
+def amount_to_words(n, currency="Naira"):
+    """Simple English amount in words for NGN-style amounts."""
+    try:
+        n = float(n)
+    except Exception:
+        return ""
+    units = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+             "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
+             "Seventeen", "Eighteen", "Nineteen"]
+    tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"]
+
+    def under_1000(x):
+        x = int(x)
+        if x < 20:
+            return units[x]
+        if x < 100:
+            return tens[x // 10] + ((" " + units[x % 10]) if x % 10 else "")
+        return units[x // 100] + " Hundred" + ((" and " + under_1000(x % 100)) if x % 100 else "")
+
+    whole = int(abs(n))
+    kobo = int(round((abs(n) - whole) * 100))
+    if whole == 0:
+        words = "Zero"
+    else:
+        parts = []
+        billions = whole // 1_000_000_000
+        millions = (whole // 1_000_000) % 1000
+        thousands = (whole // 1000) % 1000
+        rem = whole % 1000
+        if billions:
+            parts.append(under_1000(billions) + " Billion")
+        if millions:
+            parts.append(under_1000(millions) + " Million")
+        if thousands:
+            parts.append(under_1000(thousands) + " Thousand")
+        if rem:
+            parts.append(under_1000(rem))
+        words = " ".join(parts)
+    result = f"{words} {currency}"
+    if kobo:
+        result += f" and {kobo}/100"
+    result += " Only"
+    return result
+
+
 """PDF / Excel report builders with company branding, dashboard page 1, stamps."""
 from io import BytesIO
 from datetime import datetime

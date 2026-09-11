@@ -152,9 +152,12 @@ class PaymentRequest(Base):
     requester_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     budget_code_id = Column(Integer, ForeignKey("budget_codes.id"), nullable=False)
     expense_code_id = Column(Integer, ForeignKey("expense_codes.id"), nullable=False)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
     amount = Column(Float, nullable=False)
+    amount_in_words = Column(String(500), default="")
     currency = Column(String(10), default="NGN")
     narration = Column(Text, default="")
+    line_items_json = Column(Text, default="[]")  # [{desc, qty, unit_cost, amount}]
     payee_name = Column(String(200), default="")
     # optional user selection; finance can override before final approval
     debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
@@ -171,6 +174,19 @@ class PaymentRequest(Base):
     rejection_reason = Column(Text, default="")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PaymentLineItem(Base):
+    """Expense line on a payment request: qty x unit cost = amount."""
+    __tablename__ = "payment_line_items"
+
+    id = Column(Integer, primary_key=True, index=True)
+    payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=False, index=True)
+    description = Column(String(300), default="")
+    quantity = Column(Float, default=1.0)
+    unit_cost = Column(Float, default=0.0)
+    amount = Column(Float, default=0.0)
+    sort_order = Column(Integer, default=0)
 
 
 class PaymentApprovalLog(Base):
