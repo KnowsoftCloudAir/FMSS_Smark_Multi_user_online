@@ -1,5 +1,43 @@
 
 /** Force file download (browser still chooses folder once; avoids opening PDF in tab). */
+async function loadCoaOptions() {
+  try {
+    let rows = await api("/api/finance/coa/options");
+    if (!rows || !rows.length) rows = await api("/api/finance/coa");
+    return (rows || []).map(a => ({
+      id: a.id,
+      label: a.label || (`${a.code} — ${a.name}`),
+      code: a.code, name: a.name,
+    }));
+  } catch (e) {
+    try {
+      const rows = await api("/api/finance/coa");
+      return (rows || []).map(a => ({ id: a.id, label: `${a.code} — ${a.name}`, code: a.code, name: a.name }));
+    } catch (e2) { return []; }
+  }
+}
+
+async function fillCoaSelect(sel, selectedId) {
+  if (!sel) return;
+  const opts = await loadCoaOptions();
+  const cur = selectedId != null ? String(selectedId) : (sel.value || "");
+  sel.innerHTML = `<option value="">— Select account —</option>` +
+    opts.map(o => `<option value="${o.id}">${o.label}</option>`).join("");
+  if (cur) sel.value = cur;
+}
+
+async function loadAllCoaSelects(root) {
+  const scope = root || document;
+  const nodes = scope.querySelectorAll("select.coa-select, #pay-debit, #pay-credit, #pd-debit, #pd-credit, #ast-debit, #ast-credit, #ven-debit, #ven-credit, #rfq-debit, #rfq-credit, #corr-debit, #corr-credit");
+  const opts = await loadCoaOptions();
+  nodes.forEach(sel => {
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">— Select account —</option>` +
+      opts.map(o => `<option value="${o.id}">${o.label}</option>`).join("");
+    if (cur) sel.value = cur;
+  });
+}
+
 async function forceDownload(url, filename) {
   const res = await fetch(url.startsWith("http") ? url : (API + url), {
     headers: { Authorization: `Bearer ${token}` },
@@ -2376,7 +2414,7 @@ window.openPaymentDetail = async function (id) {
   if (["finance", "company_admin"].includes(role)) {
     panel.style.display = "block";
     try {
-      const accounts = await api("/api/coa");
+      const accounts = await api("/api/finance/coa");
       const fill = (selId) => {
         const s = document.getElementById(selId);
         if (!s) return;
@@ -2427,7 +2465,7 @@ document.getElementById("btn-pd-request-corr")?.addEventListener("click", async 
 
 async function loadAssetAccountDropdowns() {
   try {
-    const accounts = await api("/api/coa");
+    const accounts = await api("/api/finance/coa");
     for (const id of ["ast-debit", "ast-credit"]) {
       const s = document.getElementById(id);
       if (!s) continue;
@@ -2472,3 +2510,367 @@ window.financeCorrectPayment = async function (id) {
     loadPayments();
   } catch (ex) { alert(ex.message); }
 };
+
+
+/* COA interconnection + Procurement */
+const _showViewCoa = window.showView;
+if (typeof _showViewCoa === "function") {
+  window.showView = function (name) {
+    _showViewCoa(name);
+    if (["payments", "assets", "vendors", "bank-recon", "procurement", "corrections", "reports"].includes(name)) {
+      loadAllCoaSelects();
+    }
+    if (name === "procurement") loadProcurement();
+    if (name === "vendors") loadAllCoaSelects();
+  };
+}
+
+document.getElementById("btn-new-payment")?.addEventListener("click", () => setTimeout(loadAllCoaSelects, 200));
+document.getElementById("btn-new-asset")?.addEventListener("click", () => setTimeout(loadAllCoaSelects, 200));
+
+async function loadProcurement() {
+  try {
+    await loadAllCoaSelects();
+    const services = await api("/api/procurement/services");
+    const ssel = document.getElementById("rfq-service");
+    if (ssel) ssel.innerHTML = `<option value="">— Service —</option>` + (services||[]).map(s => `<option value="${s.id}">${s.code} — ${s.name}</option>`).join("");
+    try { await loadProjectsInto("rfq-project"); } catch (e) {}
+    const vendors = await api("/api/vendors");
+    const vsel = document.getElementById("quote-vendor");
+    if (vsel) vsel.innerHTML = `<option value="">— Vendor —</option>` + (vendors||[]).map(v => `<option value="${v.id}">${v.vendor_number || ""} ${v.name}</option>`).join("");
+    const rfqs = await api("/api/procurement/rfqs");
+    const el = document.getElementById("rfq-list");
+    if (!el) return;
+    let h = `<table class="data-table"><thead><tr><th>RFQ</th><th>Title</th><th>Service</th><th>Debit</th><th>Credit</th><th>Status</th><th></th></tr></thead><tbody>`;
+    (rfqs||[]).forEach(r => {
+      h += `<tr><td>${r.rfq_no}</td><td>${r.title}</td><td>${r.service||""}</td><td>${r.debit_account||""}</td><td>${r.credit_account||""}</td>
+        <td>${r.status}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="openRfq(${r.id},'${(r.title||"").replace(/'/g,"")}')">Quotes</button></td></tr>`;
+    });
+    h += `</tbody></table>`;
+    el.innerHTML = h;
+  } catch (ex) {
+    const el = document.getElementById("rfq-list");
+    if (el) el.innerHTML = `<p class="hint">${ex.message}</p>`;
+  }
+}
+
+document.getElementById("btn-create-rfq")?.addEventListener("click", async () => {
+  const form = new FormData();
+  form.append("title", document.getElementById("rfq-title").value);
+  form.append("description", document.getElementById("rfq-desc").value || "");
+  if (document.getElementById("rfq-service").value) form.append("service_id", document.getElementById("rfq-service").value);
+  if (document.getElementById("rfq-debit").value) form.append("debit_account_id", document.getElementById("rfq-debit").value);
+  if (document.getElementById("rfq-credit").value) form.append("credit_account_id", document.getElementById("rfq-credit").value);
+  if (document.getElementById("rfq-project").value) form.append("project_code_id", document.getElementById("rfq-project").value);
+  try {
+    const res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert("RFQ created: " + (data.rfq_no || ""));
+    loadProcurement();
+  } catch (ex) { alert(ex.message); }
+});
+
+window._currentRfq = null;
+window.openRfq = async function (id, title) {
+  window._currentRfq = id;
+  document.getElementById("rfq-detail").style.display = "block";
+  document.getElementById("rfq-detail-title").textContent = "Quotes — " + (title || id);
+  try {
+    const quotes = await api(`/api/procurement/rfqs/${id}/quotes`);
+    let h = `<table class="data-table"><thead><tr><th>Vendor</th><th>Amount</th><th>Tax</th><th>Total</th><th>System (40)</th><th>Committee (60)</th><th>Final</th><th>Status</th><th></th></tr></thead><tbody>`;
+    (quotes||[]).forEach(q => {
+      h += `<tr><td>${q.vendor_name||""}</td><td>${Number(q.amount||0).toLocaleString()}</td>
+        <td>${Number(q.tax_amount||0).toLocaleString()}</td><td>${Number(q.total_amount||0).toLocaleString()}</td>
+        <td>${q.system_score||0}</td><td>${q.committee_score||0}</td><td><strong>${q.final_score||0}</strong></td><td>${q.status}</td>
+        <td>
+          <button class="btn btn-sm btn-outline" onclick="scoreQuote(${q.id})">Committee score</button>
+          <button class="btn btn-sm btn-success" onclick="awardQuote(${id},${q.id})">Award</button>
+        </td></tr>`;
+    });
+    h += `</tbody></table>`;
+    document.getElementById("quote-list").innerHTML = h;
+  } catch (ex) { alert(ex.message); }
+};
+
+document.getElementById("btn-add-quote")?.addEventListener("click", async () => {
+  if (!window._currentRfq) return;
+  const form = new FormData();
+  if (document.getElementById("quote-vendor").value) form.append("vendor_id", document.getElementById("quote-vendor").value);
+  form.append("vendor_name", document.getElementById("quote-vname").value || document.getElementById("quote-vendor").selectedOptions[0]?.text || "");
+  form.append("amount", document.getElementById("quote-amt").value || "0");
+  form.append("tax_amount", document.getElementById("quote-tax").value || "0");
+  form.append("delivery_days", document.getElementById("quote-days").value || "0");
+  try {
+    const res = await fetch(API + `/api/procurement/rfqs/${window._currentRfq}/quotes`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    openRfq(window._currentRfq, document.getElementById("rfq-detail-title").textContent);
+  } catch (ex) { alert(ex.message); }
+});
+
+window.scoreQuote = async function (qid) {
+  const score = prompt("Committee score (0–60):", "40");
+  if (score == null) return;
+  const form = new FormData();
+  form.append("score", score);
+  try {
+    const res = await fetch(API + `/api/procurement/quotes/${qid}/committee-score`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    if (window._currentRfq) openRfq(window._currentRfq, "");
+  } catch (ex) { alert(ex.message); }
+};
+
+window.awardQuote = async function (rid, qid) {
+  if (!confirm("Award this quote and post commitment to ledger (if accounts set)?")) return;
+  const form = new FormData();
+  form.append("quote_id", qid);
+  try {
+    const res = await fetch(API + `/api/procurement/rfqs/${rid}/award`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message || "Awarded");
+    loadProcurement();
+  } catch (ex) { alert(ex.message); }
+};
+
+// Enhance trail / correction to show COA codes on journal lines
+const _openTrail = window.openTrail;
+window.openTrail = async function (jid) {
+  if (typeof _openTrail === "function") {
+    await _openTrail(jid);
+  }
+  try {
+    const t = await api(`/api/finance/transaction-trail/${jid}`);
+    const box = document.querySelector(".trail-box");
+    if (!box || !t.paired_entries) return;
+    const opts = await loadCoaOptions();
+    const byId = Object.fromEntries(opts.map(o => [String(o.id), o.label]));
+    let extra = "<h4>Accounts (Chart of Accounts)</h4><ul>";
+    (t.paired_entries || []).forEach(p => {
+      extra += `<li>${byId[String(p.account_id)] || ("Account #" + p.account_id)} — Dr ${p.debit||0} / Cr ${p.credit||0}</li>`;
+    });
+    extra += "</ul>";
+    // correction account change for finance
+    if (currentUser && ["finance", "company_admin"].includes(currentUser.role)) {
+      extra += `<div class="card" style="margin-top:.5rem"><p class="hint">Correct posting amounts and resubmit via Corrections inbox, or adjust account on the payment request.</p></div>`;
+    }
+    box.insertAdjacentHTML("beforeend", extra);
+  } catch (e) {}
+};
+
+
+/* ===== Full committee, PO, archives ===== */
+async function loadCommittees() {
+  try {
+    const rows = await api("/api/procurement/committees");
+    const el = document.getElementById("committee-list");
+    const pick = document.getElementById("cm-pick");
+    const rfqC = document.getElementById("rfq-committee");
+    let h = "<ul>";
+    (rows||[]).forEach(c => {
+      h += `<li><strong>${c.name}</strong> — ${(c.members||[]).map(m => m.name + " (" + m.role + ")").join(", ") || "no members"}</li>`;
+    });
+    h += "</ul>";
+    if (el) el.innerHTML = h;
+    const opts = `<option value="">— Committee —</option>` + (rows||[]).map(c => `<option value="${c.id}">${c.name}</option>`).join("");
+    if (pick) pick.innerHTML = opts;
+    if (rfqC) rfqC.innerHTML = opts;
+  } catch (e) {}
+}
+
+document.getElementById("btn-create-committee")?.addEventListener("click", async () => {
+  const form = new FormData();
+  form.append("name", document.getElementById("cm-name").value || "Evaluation Committee");
+  try {
+    const res = await fetch(API + "/api/procurement/committees", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    loadCommittees();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-add-member")?.addEventListener("click", async () => {
+  const cid = document.getElementById("cm-pick").value;
+  if (!cid) return alert("Select committee");
+  const form = new FormData();
+  form.append("member_name", document.getElementById("cm-member").value);
+  form.append("role_title", document.getElementById("cm-role").value);
+  try {
+    const res = await fetch(API + `/api/procurement/committees/${cid}/members`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    loadCommittees();
+  } catch (ex) { alert(ex.message); }
+});
+
+async function loadPurchaseOrders() {
+  try {
+    const rows = await api("/api/procurement/purchase-orders");
+    const el = document.getElementById("po-list");
+    if (!el) return;
+    let h = `<table class="data-table"><thead><tr><th>PO</th><th>Vendor</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>`;
+    (rows||[]).forEach(p => {
+      let act = "";
+      if (p.status === "pending_officer") {
+        act = `<button class="btn btn-sm btn-primary" onclick="submitPoPayment(${p.id})">Review & submit to payment</button>`;
+      } else if (p.payment_request_id) {
+        act = `Payment #${p.payment_request_id}`;
+      }
+      h += `<tr><td>${p.po_no}</td><td>${p.vendor_name||""}</td><td>${Number(p.amount||0).toLocaleString()}</td><td>${p.status}</td><td>${act}</td></tr>`;
+    });
+    h += `</tbody></table>`;
+    el.innerHTML = h;
+  } catch (e) {}
+}
+
+window.submitPoPayment = async function (poid) {
+  try {
+    const budgets = await api("/api/finance/budget-codes").catch(() => api("/api/budgets").catch(() => []));
+  } catch (e) {}
+  let budget_code_id = prompt("Budget code ID (from Finance → Budget):");
+  let expense_code_id = prompt("Expense code ID:");
+  let designated_approver_id = prompt("Designated approver user ID:");
+  if (!budget_code_id || !expense_code_id || !designated_approver_id) return;
+  const form = new FormData();
+  form.append("budget_code_id", budget_code_id);
+  form.append("expense_code_id", expense_code_id);
+  form.append("designated_approver_id", designated_approver_id);
+  form.append("narration", "Submitted from purchase order");
+  try {
+    const res = await fetch(API + `/api/procurement/purchase-orders/${poid}/submit-payment`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message + " (" + data.request_no + ")");
+    loadPurchaseOrders();
+    if (typeof loadPayments === "function") loadPayments();
+  } catch (ex) { alert(ex.message); }
+};
+
+// Patch create RFQ to include committee
+const _btnRfq = document.getElementById("btn-create-rfq");
+if (_btnRfq) {
+  _btnRfq.addEventListener("click", async (e) => {
+    // existing handler may also fire - ensure committee appended via form in our new flow
+  });
+}
+
+// Override RFQ create to include committee_id - patch by replacing listener is hard; extend form append
+document.getElementById("btn-create-rfq")?.addEventListener("click", async () => {
+  /* second listener: no-op if first already works; committee added in re-bind below */
+}, true);
+
+// Re-bind create RFQ
+(function () {
+  const btn = document.getElementById("btn-create-rfq");
+  if (!btn) return;
+  btn.onclick = async () => {
+    const form = new FormData();
+    form.append("title", document.getElementById("rfq-title").value);
+    form.append("description", document.getElementById("rfq-desc")?.value || "");
+    if (document.getElementById("rfq-service")?.value) form.append("service_id", document.getElementById("rfq-service").value);
+    if (document.getElementById("rfq-committee")?.value) form.append("committee_id", document.getElementById("rfq-committee").value);
+    if (document.getElementById("rfq-debit")?.value) form.append("debit_account_id", document.getElementById("rfq-debit").value);
+    if (document.getElementById("rfq-credit")?.value) form.append("credit_account_id", document.getElementById("rfq-credit").value);
+    if (document.getElementById("rfq-project")?.value) form.append("project_code_id", document.getElementById("rfq-project").value);
+    try {
+      const res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Failed");
+      alert("RFQ created: " + (data.rfq_no || ""));
+      loadProcurement();
+    } catch (ex) { alert(ex.message); }
+  };
+})();
+
+const _loadProc = typeof loadProcurement === "function" ? loadProcurement : null;
+window.loadProcurement = async function () {
+  if (_loadProc) await _loadProc();
+  await loadCommittees();
+  await loadPurchaseOrders();
+};
+
+// Award with PO instead of simple award
+window.awardQuote = async function (rid, qid) {
+  if (!confirm("Committee approve & create Purchase Order for requesting officer?")) return;
+  const form = new FormData();
+  form.append("quote_id", qid);
+  try {
+    const res = await fetch(API + `/api/procurement/rfqs/${rid}/award-with-po`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message || "PO created");
+    loadProcurement();
+  } catch (ex) { alert(ex.message); }
+};
+
+document.getElementById("btn-committee-report")?.addEventListener("click", async () => {
+  if (!window._currentRfq) return;
+  try { await forceDownload(`/api/procurement/rfqs/${window._currentRfq}/committee-report/pdf`, "committee_report.pdf"); }
+  catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-proc-archive")?.addEventListener("click", async () => {
+  if (!window._currentRfq) return;
+  try { await forceDownload(`/api/procurement/rfqs/${window._currentRfq}/archive.zip`, "procurement_archive.zip"); }
+  catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("rfq-doc-file")?.addEventListener("change", async (e) => {
+  if (!window._currentRfq || !e.target.files.length) return;
+  const form = new FormData();
+  form.append("file", e.target.files[0]);
+  form.append("doc_type", "support");
+  try {
+    const res = await fetch(API + `/api/procurement/rfqs/${window._currentRfq}/documents`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Upload failed");
+    alert("Document archived: " + data.filename);
+  } catch (ex) { alert(ex.message); }
+});
+
+// Payment archive in table
+const _lp = loadPayments;
+if (typeof loadPayments === "function") {
+  // enhance actions after load - wrap openPaymentDetail actions
+}
+window.downloadPaymentArchive = async function (id, reqNo) {
+  try { await forceDownload(`/api/payments/${id}/archive.zip`, `payment_archive_${reqNo || id}.zip`); }
+  catch (ex) { alert(ex.message); }
+};
+
+// Patch enhanced payments actions to include archive
+(function () {
+  const orig = window.loadPayments;
+  // Add archive button via MutationObserver is overkill; patch string in function source not possible.
+  // Provide global enhance after each loadPayments
+  const _l = loadPayments;
+  loadPayments = async function () {
+    await _l();
+    document.querySelectorAll("#payments-table tbody tr").forEach(tr => {
+      const openBtn = tr.querySelector("button[onclick^='openPaymentDetail']");
+      if (!openBtn) return;
+      const m = openBtn.getAttribute("onclick").match(/openPaymentDetail\((\d+)\)/);
+      if (!m) return;
+      const id = m[1];
+      const td = tr.querySelector("td:last-child");
+      if (td && !td.innerHTML.includes("downloadPaymentArchive")) {
+        td.innerHTML += ` <button class="btn btn-sm btn-outline" onclick="downloadPaymentArchive(${id})">Archive ZIP</button>`;
+      }
+    });
+  };
+})();

@@ -435,3 +435,126 @@ class StoredReport(Base):
     synced = Column(Boolean, default=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProcurementService(Base):
+    """Service / item line for procurement RFQ."""
+    __tablename__ = "procurement_services"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    code = Column(String(50), nullable=False)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, default="")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProcurementRFQ(Base):
+    """Request for quotation."""
+    __tablename__ = "procurement_rfqs"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_no = Column(String(50), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    service_id = Column(Integer, ForeignKey("procurement_services.id"), nullable=True)
+    committee_id = Column(Integer, ForeignKey("procurement_committees.id"), nullable=True)
+    description = Column(Text, default="")
+    status = Column(String(30), default="open")  # open | evaluation | awarded | closed
+    requesting_officer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProcurementQuote(Base):
+    """Vendor quotation against an RFQ."""
+    __tablename__ = "procurement_quotes"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("procurement_rfqs.id"), nullable=False, index=True)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    vendor_name = Column(String(200), default="")
+    amount = Column(Float, default=0.0)
+    tax_amount = Column(Float, default=0.0)
+    total_amount = Column(Float, default=0.0)
+    delivery_days = Column(Integer, default=0)
+    notes = Column(Text, default="")
+    system_score = Column(Float, default=0.0)  # price/docs 40%
+    committee_score = Column(Float, default=0.0)  # 60%
+    final_score = Column(Float, default=0.0)
+    status = Column(String(30), default="submitted")  # submitted | scored | winner | rejected
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProcurementCommittee(Base):
+    """Named evaluation committee for procurement."""
+    __tablename__ = "procurement_committees"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    name = Column(String(200), nullable=False)
+    description = Column(Text, default="")
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProcurementCommitteeMember(Base):
+    __tablename__ = "procurement_committee_members"
+    id = Column(Integer, primary_key=True, index=True)
+    committee_id = Column(Integer, ForeignKey("procurement_committees.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    member_name = Column(String(200), nullable=False)
+    role_title = Column(String(100), default="Member")  # Chair, Secretary, Member
+    is_active = Column(Boolean, default=True)
+
+
+class QuoteMemberScore(Base):
+    """Individual committee member score on a quote (part of 60%)."""
+    __tablename__ = "quote_member_scores"
+    id = Column(Integer, primary_key=True, index=True)
+    quote_id = Column(Integer, ForeignKey("procurement_quotes.id"), nullable=False, index=True)
+    member_id = Column(Integer, ForeignKey("procurement_committee_members.id"), nullable=False)
+    score = Column(Float, default=0.0)  # 0-60 personal score
+    comment = Column(Text, default="")
+    scored_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PurchaseOrder(Base):
+    """PO created after committee awards winning vendor."""
+    __tablename__ = "purchase_orders"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    po_no = Column(String(50), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("procurement_rfqs.id"), nullable=True)
+    quote_id = Column(Integer, ForeignKey("procurement_quotes.id"), nullable=True)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True)
+    vendor_name = Column(String(200), default="")
+    amount = Column(Float, default=0.0)
+    description = Column(Text, default="")
+    status = Column(String(30), default="pending_officer")  # pending_officer | submitted_payment | paid | cancelled
+    requesting_officer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=True)
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ProcurementDocument(Base):
+    """Archive documents attached to RFQ / PO / quote."""
+    __tablename__ = "procurement_documents"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("procurement_rfqs.id"), nullable=True, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True, index=True)
+    quote_id = Column(Integer, ForeignKey("procurement_quotes.id"), nullable=True)
+    filename = Column(String(255), nullable=False)
+    stored_path = Column(String(500), nullable=False)
+    content_type = Column(String(100), default="application/octet-stream")
+    size_bytes = Column(Integer, default=0)
+    doc_type = Column(String(50), default="support")  # support | committee_report | po | other
+    uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

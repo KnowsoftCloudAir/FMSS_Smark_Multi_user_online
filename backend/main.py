@@ -17,6 +17,8 @@ def _migrate_schema(engine):
         ("bank_statement_sessions", "approved_by", "INTEGER"),
         ("bank_statement_sessions", "approved_at", "TIMESTAMP"),
         ("bank_statement_sessions", "approver_stamp", "VARCHAR(120)"),
+        ("procurement_rfqs", "committee_id", "INTEGER"),
+        ("procurement_rfqs", "requesting_officer_id", "INTEGER"),
     ]
     with engine.begin() as conn:
         for table, col, typ in alters:
@@ -41,7 +43,7 @@ from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession, StoredReport, PaymentLineItem, ProjectCode
+    Vendor, AssetAccountingEntry, ProcurementService, ProcurementRFQ, ProcurementQuote, ProcurementCommittee, ProcurementCommitteeMember, QuoteMemberScore, PurchaseOrder, ProcurementDocument, BankReconState, CorrectionRequest, BankStatementSession, StoredReport, PaymentLineItem, ProjectCode
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -67,7 +69,8 @@ STATIC_DIR = Path(__file__).parent.parent / "static"
 IMAGES_DIR = STATIC_DIR / "images"
 UPLOADS_DIR = STATIC_DIR / "uploads"
 BACKUP_DIR = STATIC_DIR / "backups"
-for d in (IMAGES_DIR, UPLOADS_DIR, BACKUP_DIR):
+ARCHIVE_DIR = STATIC_DIR / "archives"
+for d in (IMAGES_DIR, UPLOADS_DIR, BACKUP_DIR, ARCHIVE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -395,6 +398,17 @@ def init_defaults(db: Session):
             a.credit_account_id = a.credit_account_id or coa_map.get("1000")
             a.useful_life = a.useful_life or 5.0
 
+        # Procurement sample services
+        # Sample committee
+        if not db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first():
+            cm = ProcurementCommittee(company_id=demo.id, name="Evaluation Committee", description="Default procurement evaluation panel")
+            db.add(cm); db.flush()
+            for mn, rt in [("Ada Chair", "Chair"), ("Bello Member", "Member"), ("Chidi Secretary", "Secretary")]:
+                db.add(ProcurementCommitteeMember(committee_id=cm.id, member_name=mn, role_title=rt))
+        for sc, sn in [("PROC-MED", "Medical supplies"), ("PROC-IT", "IT equipment"), ("PROC-TRN", "Training services")]:
+            if not db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first():
+                db.add(ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn))
+        db.commit()
         print("✅ Demo company seeded with COA, budgets, expenses, assets, payment workflow samples")
 
         # Second company still pending approval (for superadmin demo)
@@ -981,6 +995,7 @@ def public_settings(db: Session = Depends(get_db)):
 
 
 # ===================== FINANCE MASTERS =====================
+@app.get("/api/coa")
 @app.get("/api/finance/coa")
 def list_coa(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     return db.query(ChartOfAccount).filter(ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True).all()
@@ -2911,4 +2926,493 @@ def payment_resubmit(
     db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="resubmit", comment="Resubmitted after correction"))
     db.commit()
     return {"ok": True, "status": "submitted"}
+
+
+
+# ===================== PROCUREMENT (RFQ / quotes / scoring) =====================
+@app.get("/api/procurement/services")
+def list_proc_services(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(ProcurementService).filter(
+        ProcurementService.company_id == current_user.company_id, ProcurementService.is_active == True
+    ).order_by(ProcurementService.code).all()
+
+
+@app.post("/api/procurement/services")
+def create_proc_service(
+    code: str = Form(...), name: str = Form(...), description: str = Form(""),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    row = ProcurementService(company_id=current_user.company_id, code=code, name=name, description=description)
+    db.add(row); db.commit(); db.refresh(row)
+    return row
+
+
+@app.get("/api/procurement/rfqs")
+def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == current_user.company_id).order_by(ProcurementRFQ.id.desc()).all()
+    out = []
+    for r in rows:
+        svc = db.query(ProcurementService).filter(ProcurementService.id == r.service_id).first() if r.service_id else None
+        da = db.query(ChartOfAccount).filter(ChartOfAccount.id == r.debit_account_id).first() if r.debit_account_id else None
+        ca = db.query(ChartOfAccount).filter(ChartOfAccount.id == r.credit_account_id).first() if r.credit_account_id else None
+        out.append({
+            "id": r.id, "rfq_no": r.rfq_no, "title": r.title, "status": r.status,
+            "description": r.description, "service": f"{svc.code} — {svc.name}" if svc else "",
+            "debit_account": f"{da.code} — {da.name}" if da else "",
+            "credit_account": f"{ca.code} — {ca.name}" if ca else "",
+            "debit_account_id": r.debit_account_id, "credit_account_id": r.credit_account_id,
+            "project_code_id": r.project_code_id, "created_at": str(r.created_at) if r.created_at else None,
+        })
+    return out
+
+
+@app.post("/api/procurement/rfqs")
+def create_rfq(
+    title: str = Form(...),
+    description: str = Form(""),
+    service_id: Optional[int] = Form(None),
+    committee_id: Optional[int] = Form(None),
+    debit_account_id: Optional[int] = Form(None),
+    credit_account_id: Optional[int] = Form(None),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin", "program")),
+    db: Session = Depends(get_db),
+):
+    n = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == current_user.company_id).count() + 1
+    row = ProcurementRFQ(
+        company_id=current_user.company_id,
+        rfq_no=f"RFQ-{n:04d}",
+        title=title, description=description, service_id=service_id,
+        committee_id=committee_id,
+        requesting_officer_id=current_user.id,
+        debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+        project_code_id=project_code_id, created_by=current_user.id, status="open",
+    )
+    db.add(row); db.commit(); db.refresh(row)
+    return row
+
+
+@app.get("/api/procurement/rfqs/{rid}/quotes")
+def list_quotes(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(ProcurementQuote).filter(
+        ProcurementQuote.company_id == current_user.company_id, ProcurementQuote.rfq_id == rid
+    ).order_by(ProcurementQuote.final_score.desc()).all()
+
+
+@app.post("/api/procurement/rfqs/{rid}/quotes")
+def submit_quote(
+    rid: int,
+    vendor_id: Optional[int] = Form(None),
+    vendor_name: str = Form(""),
+    amount: float = Form(...),
+    tax_amount: float = Form(0),
+    delivery_days: int = Form(0),
+    notes: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    total = float(amount) + float(tax_amount or 0)
+    # system score: lower price ranks higher among quotes later recalculated
+    q = ProcurementQuote(
+        company_id=current_user.company_id, rfq_id=rid, vendor_id=vendor_id,
+        vendor_name=vendor_name, amount=amount, tax_amount=tax_amount, total_amount=total,
+        delivery_days=delivery_days, notes=notes, status="submitted",
+    )
+    db.add(q); db.commit(); db.refresh(q)
+    _rescore_rfq(db, rid)
+    return q
+
+
+def _rescore_rfq(db, rid):
+    quotes = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).all()
+    if not quotes:
+        return
+    totals = [q.total_amount or 0 for q in quotes]
+    mn, mx = min(totals), max(totals)
+    for q in quotes:
+        if mx > mn:
+            # cheaper = higher system score out of 40
+            price_score = 40 * (1 - ((q.total_amount or 0) - mn) / (mx - mn))
+        else:
+            price_score = 40.0
+        q.system_score = round(price_score, 2)
+        q.final_score = round((q.system_score or 0) + (q.committee_score or 0), 2)
+        db.add(q)
+    db.commit()
+
+
+@app.post("/api/procurement/quotes/{qid}/committee-score")
+def committee_score(
+    qid: int,
+    score: float = Form(...),  # 0-60
+    current_user: User = Depends(require_roles("finance", "company_admin", "program")),
+    db: Session = Depends(get_db),
+):
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404)
+    q.committee_score = max(0, min(60, float(score)))
+    q.final_score = round((q.system_score or 0) + (q.committee_score or 0), 2)
+    q.status = "scored"
+    db.add(q); db.commit()
+    _rescore_rfq(db, q.rfq_id)
+    return {"ok": True, "final_score": q.final_score}
+
+
+@app.post("/api/procurement/rfqs/{rid}/award")
+def award_rfq(
+    rid: int,
+    quote_id: int = Form(...),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == quote_id, ProcurementQuote.rfq_id == rid).first()
+    if not rfq or not q:
+        raise HTTPException(404)
+    for other in db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).all():
+        other.status = "winner" if other.id == quote_id else "rejected"
+        db.add(other)
+    rfq.status = "awarded"
+    db.add(rfq)
+    # post commitment if accounts set
+    if rfq.debit_account_id and rfq.credit_account_id and (q.total_amount or 0) > 0:
+        post_double_entry(
+            db, current_user.company_id, current_user.id, "vendor", q.vendor_id,
+            f"Award {rfq.rfq_no}", q.vendor_name or rfq.title,
+            rfq.debit_account_id, rfq.credit_account_id, q.total_amount, rfq.project_code_id,
+        )
+    db.commit()
+    return {"ok": True, "message": f"Awarded to {q.vendor_name}"}
+
+
+@app.get("/api/finance/coa/options")
+def coa_options(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Lightweight list for all dropdowns: id, label with code."""
+    rows = db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == current_user.company_id,
+        ChartOfAccount.is_active == True,
+    ).order_by(ChartOfAccount.code).all()
+    return [{"id": a.id, "code": a.code, "name": a.name, "type": a.account_type,
+             "label": f"{a.code} — {a.name} ({a.account_type})"} for a in rows]
+
+
+
+# ===================== COMMITTEE + PO + ARCHIVES =====================
+@app.get("/api/procurement/committees")
+def list_committees(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(ProcurementCommittee).filter(
+        ProcurementCommittee.company_id == current_user.company_id, ProcurementCommittee.is_active == True
+    ).order_by(ProcurementCommittee.name).all()
+    out = []
+    for c in rows:
+        members = db.query(ProcurementCommitteeMember).filter(
+            ProcurementCommitteeMember.committee_id == c.id, ProcurementCommitteeMember.is_active == True
+        ).all()
+        out.append({
+            "id": c.id, "name": c.name, "description": c.description or "",
+            "members": [{"id": m.id, "name": m.member_name, "role": m.role_title, "user_id": m.user_id} for m in members],
+        })
+    return out
+
+
+@app.post("/api/procurement/committees")
+def create_committee(
+    name: str = Form(...), description: str = Form(""),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    c = ProcurementCommittee(company_id=current_user.company_id, name=name, description=description)
+    db.add(c); db.commit(); db.refresh(c)
+    return c
+
+
+@app.post("/api/procurement/committees/{cid}/members")
+def add_committee_member(
+    cid: int,
+    member_name: str = Form(...),
+    role_title: str = Form("Member"),
+    user_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    c = db.query(ProcurementCommittee).filter(ProcurementCommittee.id == cid, ProcurementCommittee.company_id == current_user.company_id).first()
+    if not c:
+        raise HTTPException(404)
+    m = ProcurementCommitteeMember(committee_id=cid, member_name=member_name, role_title=role_title, user_id=user_id)
+    db.add(m); db.commit(); db.refresh(m)
+    return m
+
+
+@app.post("/api/procurement/quotes/{qid}/member-score")
+def member_score_quote(
+    qid: int,
+    member_id: int = Form(...),
+    score: float = Form(...),
+    comment: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404)
+    sc = max(0.0, min(60.0, float(score)))
+    existing = db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id == qid, QuoteMemberScore.member_id == member_id).first()
+    if existing:
+        existing.score = sc; existing.comment = comment; existing.scored_at = datetime.utcnow()
+        db.add(existing)
+    else:
+        db.add(QuoteMemberScore(quote_id=qid, member_id=member_id, score=sc, comment=comment))
+    db.commit()
+    # average member scores → committee_score (0-60)
+    scores = db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id == qid).all()
+    if scores:
+        avg = sum(s.score or 0 for s in scores) / len(scores)
+        q.committee_score = round(avg, 2)
+        q.final_score = round((q.system_score or 0) + (q.committee_score or 0), 2)
+        q.status = "scored"
+        db.add(q); db.commit()
+    return {"ok": True, "committee_score": q.committee_score, "final_score": q.final_score, "members_scored": len(scores)}
+
+
+@app.post("/api/procurement/rfqs/{rid}/award-with-po")
+def award_with_po(
+    rid: int,
+    quote_id: int = Form(...),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Committee approval: award winner, create PO for requesting officer review."""
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == quote_id, ProcurementQuote.rfq_id == rid).first()
+    if not rfq or not q:
+        raise HTTPException(404)
+    for other in db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).all():
+        other.status = "winner" if other.id == quote_id else "rejected"
+        db.add(other)
+    rfq.status = "awarded"
+    db.add(rfq)
+    n = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == current_user.company_id).count() + 1
+    po = PurchaseOrder(
+        company_id=current_user.company_id,
+        po_no=f"PO-{n:04d}",
+        rfq_id=rid, quote_id=quote_id,
+        vendor_id=q.vendor_id, vendor_name=q.vendor_name or "",
+        amount=q.total_amount or q.amount or 0,
+        description=f"{rfq.title} — {rfq.rfq_no}",
+        status="pending_officer",
+        requesting_officer_id=rfq.requesting_officer_id or rfq.created_by,
+        debit_account_id=rfq.debit_account_id, credit_account_id=rfq.credit_account_id,
+        project_code_id=rfq.project_code_id,
+        approved_at=datetime.utcnow(), created_by=current_user.id,
+    )
+    db.add(po); db.commit(); db.refresh(po)
+    return {"ok": True, "po_id": po.id, "po_no": po.po_no, "message": f"PO {po.po_no} created for requesting officer"}
+
+
+@app.get("/api/procurement/purchase-orders")
+def list_pos(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    q = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == current_user.company_id)
+    # officers see theirs; finance/admin see all
+    if current_user.role not in ("finance", "company_admin", "superadmin"):
+        q = q.filter(
+            (PurchaseOrder.requesting_officer_id == current_user.id) | (PurchaseOrder.created_by == current_user.id)
+        )
+    rows = q.order_by(PurchaseOrder.id.desc()).all()
+    return [{
+        "id": p.id, "po_no": p.po_no, "vendor_name": p.vendor_name, "amount": p.amount,
+        "description": p.description, "status": p.status, "rfq_id": p.rfq_id,
+        "payment_request_id": p.payment_request_id,
+        "created_at": str(p.created_at) if p.created_at else None,
+    } for p in rows]
+
+
+@app.post("/api/procurement/purchase-orders/{poid}/submit-payment")
+def po_submit_payment(
+    poid: int,
+    budget_code_id: int = Form(...),
+    expense_code_id: int = Form(...),
+    designated_approver_id: int = Form(...),
+    narration: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Requesting officer reviews PO and submits into payment approval workflow."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == poid, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404)
+    if po.status not in ("pending_officer",):
+        raise HTTPException(400, "PO already submitted or closed")
+    if po.requesting_officer_id and po.requesting_officer_id != current_user.id and current_user.role not in ("finance", "company_admin"):
+        raise HTTPException(403, "Only the requesting officer can submit this PO")
+    n = db.query(PaymentRequest).filter(PaymentRequest.company_id == current_user.company_id).count() + 1
+    words = amount_to_words(po.amount or 0)
+    pr = PaymentRequest(
+        company_id=current_user.company_id,
+        request_no=f"PR-PO-{n:04d}",
+        requester_id=current_user.id,
+        budget_code_id=budget_code_id,
+        expense_code_id=expense_code_id,
+        project_code_id=po.project_code_id,
+        amount=po.amount or 0,
+        amount_in_words=words,
+        narration=narration or po.description or "",
+        payee_name=po.vendor_name or "",
+        debit_account_id=po.debit_account_id,
+        credit_account_id=po.credit_account_id,
+        designated_approver_id=designated_approver_id,
+        status="submitted",
+    )
+    db.add(pr); db.commit(); db.refresh(pr)
+    po.status = "submitted_payment"
+    po.payment_request_id = pr.id
+    db.add(po)
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="submit_from_po", comment=f"From {po.po_no}"))
+    db.commit()
+    return {"ok": True, "payment_request_id": pr.id, "request_no": pr.request_no, "message": "Submitted to payment approval workflow"}
+
+
+@app.get("/api/procurement/rfqs/{rid}/committee-report")
+def committee_report(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    quotes = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).order_by(ProcurementQuote.final_score.desc()).all()
+    committee = None
+    members = []
+    if getattr(rfq, "committee_id", None):
+        committee = db.query(ProcurementCommittee).filter(ProcurementCommittee.id == rfq.committee_id).first()
+        members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == rfq.committee_id).all()
+    detail = []
+    for q in quotes:
+        ms = db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id == q.id).all()
+        detail.append({
+            "quote_id": q.id, "vendor": q.vendor_name, "total": q.total_amount,
+            "system_score": q.system_score, "committee_score": q.committee_score,
+            "final_score": q.final_score, "status": q.status,
+            "member_scores": [{"member_id": s.member_id, "score": s.score, "comment": s.comment} for s in ms],
+        })
+    return {
+        "rfq": {"id": rfq.id, "rfq_no": rfq.rfq_no, "title": rfq.title, "status": rfq.status},
+        "committee": {"id": committee.id, "name": committee.name} if committee else None,
+        "members": [{"id": m.id, "name": m.member_name, "role": m.role_title} for m in members],
+        "quotes": detail,
+    }
+
+
+@app.get("/api/procurement/rfqs/{rid}/committee-report/pdf")
+def committee_report_pdf(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = committee_report(rid, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Vendor", "Total", "System 40", "Committee 60", "Final", "Status"]
+    rows = [[q["vendor"], f"{q['total']:,.2f}", q["system_score"], q["committee_score"], q["final_score"], q["status"]] for q in data["quotes"]]
+    foot = [
+        f"RFQ: {data['rfq']['rfq_no']} — {data['rfq']['title']}",
+        f"Committee: {(data['committee'] or {}).get('name') or '—'}",
+        "Member scores form the committee component (average, max 60).",
+    ]
+    buf = build_pdf(co, "PROCUREMENT COMMITTEE REPORT", headers, rows, code, sym, True, foot,
+                    kpis=_dashboard_kpis(db, current_user.company_id))
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename=committee_report_{data['rfq']['rfq_no']}.pdf"})
+
+
+@app.post("/api/procurement/rfqs/{rid}/documents")
+async def upload_proc_doc(
+    rid: int,
+    file: UploadFile = File(...),
+    doc_type: str = Form("support"),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    data = await file.read()
+    dest_dir = ARCHIVE_DIR / f"rfq_{rid}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = f"{secrets.token_hex(4)}_{file.filename}"
+    path = dest_dir / safe
+    path.write_bytes(data)
+    doc = ProcurementDocument(
+        company_id=current_user.company_id, rfq_id=rid, filename=file.filename,
+        stored_path=str(path), content_type=file.content_type or "application/octet-stream",
+        size_bytes=len(data), doc_type=doc_type, uploaded_by=current_user.id,
+    )
+    db.add(doc); db.commit(); db.refresh(doc)
+    return {"id": doc.id, "filename": doc.filename}
+
+
+@app.get("/api/procurement/rfqs/{rid}/archive.zip")
+def procurement_archive(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """ZIP of all documents for this procurement + committee report PDF."""
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        docs = db.query(ProcurementDocument).filter(ProcurementDocument.rfq_id == rid).all()
+        for d in docs:
+            p = Path(d.stored_path)
+            if p.exists():
+                zf.write(p, arcname=f"documents/{d.filename}")
+        # embed committee report
+        try:
+            from reports import build_pdf
+            data = committee_report(rid, current_user, db)
+            co, code, sym = _company_and_currency(db, current_user)
+            headers = ["Vendor", "Total", "System", "Committee", "Final", "Status"]
+            rows = [[q["vendor"], q["total"], q["system_score"], q["committee_score"], q["final_score"], q["status"]] for q in data["quotes"]]
+            pdfbuf = build_pdf(co, "COMMITTEE REPORT", headers, rows, code, sym, True, kpis=_dashboard_kpis(db, current_user.company_id))
+            zf.writestr(f"committee_report_{rfq.rfq_no}.pdf", pdfbuf.getvalue())
+        except Exception as e:
+            zf.writestr("committee_report_error.txt", str(e))
+        # PO if any
+        pos = db.query(PurchaseOrder).filter(PurchaseOrder.rfq_id == rid).all()
+        for po in pos:
+            zf.writestr(f"po_{po.po_no}.txt", f"PO {po.po_no}\nVendor: {po.vendor_name}\nAmount: {po.amount}\nStatus: {po.status}\n{po.description}")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip",
+                             headers={"Content-Disposition": f"attachment; filename=procurement_archive_{rfq.rfq_no}.zip"})
+
+
+@app.get("/api/payments/{pid}/archive.zip")
+def payment_archive(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """ZIP: payment voucher PDF + all support attachments."""
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # voucher
+        try:
+            co, code, sym = _company_and_currency(db, current_user)
+            approvers = {}
+            if pr.program_approved_by:
+                u = db.query(User).filter(User.id == pr.program_approved_by).first()
+                approvers["Program"] = (u.full_name or u.username) if u else str(pr.program_approved_by)
+            if pr.finance_approved_by:
+                u = db.query(User).filter(User.id == pr.finance_approved_by).first()
+                approvers["Finance"] = (u.full_name or u.username) if u else str(pr.finance_approved_by)
+            vbuf = build_payment_voucher_pdf(co, pr, approvers, code, sym, _dashboard_kpis(db, current_user.company_id))
+            zf.writestr(f"voucher_{pr.request_no}.pdf", vbuf.getvalue())
+        except Exception as e:
+            zf.writestr("voucher_error.txt", str(e))
+        atts = db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id == pid).all()
+        for a in atts:
+            p = Path(a.stored_path)
+            if p.exists():
+                zf.writestr(f"attachments/{a.filename}", p.read_bytes())
+            else:
+                # try relative
+                p2 = UPLOADS_DIR / Path(a.stored_path).name
+                if p2.exists():
+                    zf.writestr(f"attachments/{a.filename}", p2.read_bytes())
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip",
+                             headers={"Content-Disposition": f"attachment; filename=payment_archive_{pr.request_no}.zip"})
 
