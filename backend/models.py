@@ -251,7 +251,11 @@ class ProjectCode(Base):
     code = Column(String(50), nullable=False)
     name = Column(String(200), nullable=False)
     description = Column(Text, default="")
+    budget_amount = Column(Float, default=0.0)
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
     is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 class JournalEntry(Base):

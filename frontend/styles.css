@@ -708,3 +708,82 @@ fieldset label { display: block; margin: 6px 0; font-size: 0.9rem; }
   font-size: 0.8rem;
 }
 .demo-credentials p { margin: 0 0 10px 0; }
+
+
+/* Clean auth card */
+.auth-card {
+  max-width: 400px;
+  margin: 0 auto;
+  padding: 2rem 1.75rem;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.97);
+  box-shadow: 0 12px 40px rgba(13, 59, 102, 0.18);
+  border: 1px solid rgba(26, 107, 154, 0.12);
+}
+.auth-card-header {
+  text-align: center;
+  margin-bottom: 1.5rem;
+}
+.auth-card-header h2 {
+  margin: 0 0 0.35rem 0;
+  font-size: 1.5rem;
+  color: #0D3B66;
+  font-weight: 700;
+}
+.auth-card .auth-hint {
+  margin: 0;
+  font-size: 0.9rem;
+  color: #5a6a7a;
+}
+.auth-form .form-group {
+  margin-bottom: 1.1rem;
+}
+.auth-form label {
+  display: block;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 0.35rem;
+}
+.auth-form input {
+  width: 100%;
+  padding: 0.7rem 0.85rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  font-size: 0.95rem;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  box-sizing: border-box;
+}
+.auth-form input:focus {
+  outline: none;
+  border-color: #1A6B9A;
+  box-shadow: 0 0 0 3px rgba(26, 107, 154, 0.15);
+}
+.auth-form .field-hint {
+  display: block;
+  margin-top: 0.3rem;
+  font-size: 0.75rem;
+  color: #94a3b8;
+}
+.auth-form .btn-block {
+  width: 100%;
+  margin-top: 0.5rem;
+  padding: 0.75rem 1rem;
+  font-weight: 600;
+  border-radius: 10px;
+}
+.auth-card .auth-switch {
+  text-align: center;
+  margin: 1.25rem 0 0 0;
+  font-size: 0.9rem;
+  color: #64748b;
+}
+.auth-card .auth-switch a {
+  color: #1A6B9A;
+  font-weight: 600;
+  text-decoration: none;
+}
+.auth-card .auth-switch a:hover {
+  text-decoration: underline;
+}
+.demo-credentials, .demo-hint { display: none !important; }

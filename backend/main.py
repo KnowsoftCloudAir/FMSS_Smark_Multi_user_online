@@ -1,3 +1,30 @@
+
+def _migrate_schema(engine):
+    """Add new columns if missing (SQLite / Postgres safe try)."""
+    from sqlalchemy import text
+    alters = [
+        ("project_codes", "budget_amount", "FLOAT DEFAULT 0"),
+        ("project_codes", "start_date", "DATE"),
+        ("project_codes", "end_date", "DATE"),
+        ("payment_requests", "project_code_id", "INTEGER"),
+        ("payment_requests", "amount_in_words", "VARCHAR(500)"),
+        ("payment_requests", "line_items_json", "TEXT"),
+        ("bank_statement_sessions", "bank_charges", "FLOAT DEFAULT 0"),
+        ("bank_statement_sessions", "bank_charges_note", "TEXT"),
+        ("bank_statement_sessions", "unpresented_cheques", "FLOAT DEFAULT 0"),
+        ("bank_statement_sessions", "deposits_in_transit", "FLOAT DEFAULT 0"),
+        ("bank_statement_sessions", "status", "VARCHAR(20) DEFAULT 'draft'"),
+        ("bank_statement_sessions", "approved_by", "INTEGER"),
+        ("bank_statement_sessions", "approved_at", "TIMESTAMP"),
+        ("bank_statement_sessions", "approver_stamp", "VARCHAR(120)"),
+    ]
+    with engine.begin() as conn:
+        for table, col, typ in alters:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
+            except Exception:
+                pass
+
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -31,6 +58,7 @@ from auth import (
 )
 
 Base.metadata.create_all(bind=engine)
+_migrate_schema(engine)
 
 app = FastAPI(title="Knowsoft FMSS ERP", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -59,6 +87,26 @@ def audit(db, company_id, user, action, details):
 
 
 def init_defaults(db: Session):
+    # Ensure new columns exist (SQLite)
+    try:
+        from sqlalchemy import text
+        for stmt in [
+            "ALTER TABLE project_codes ADD COLUMN budget_amount FLOAT DEFAULT 0",
+            "ALTER TABLE project_codes ADD COLUMN start_date DATE",
+            "ALTER TABLE project_codes ADD COLUMN end_date DATE",
+            "ALTER TABLE project_codes ADD COLUMN created_at DATETIME",
+            "ALTER TABLE payment_requests ADD COLUMN project_code_id INTEGER",
+            "ALTER TABLE payment_requests ADD COLUMN amount_in_words VARCHAR(500)",
+            "ALTER TABLE payment_requests ADD COLUMN line_items_json TEXT",
+        ]:
+            try:
+                db.execute(text(stmt))
+                db.commit()
+            except Exception:
+                db.rollback()
+    except Exception as e:
+        print("migrate note:", e)
+
     if not db.query(CompanySettings).first():
         db.add(CompanySettings(org_name="Knowsoft FMSS ERP"))
         db.commit()
@@ -335,7 +383,10 @@ def init_defaults(db: Session):
         # Project codes
         for code, name, bud in [("PRJ-HLT", "Health Outreach", 5000000), ("PRJ-EDU", "Education Support", 3500000), ("PRJ-OPS", "Operations", 1500000), ("PRJ-WASH", "Water & Sanitation", 2800000)]:
             if not db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first():
-                db.add(ProjectCode(company_id=demo.id, code=code, name=name, budget_amount=bud, description=name))
+                kwargs = dict(company_id=demo.id, code=code, name=name, description=name)
+                if hasattr(ProjectCode, "budget_amount"):
+                    kwargs["budget_amount"] = bud
+                db.add(ProjectCode(**kwargs))
 
         # Update assets with assigned_to and accounts
         for a in db.query(Asset).filter(Asset.company_id == demo.id).all():
