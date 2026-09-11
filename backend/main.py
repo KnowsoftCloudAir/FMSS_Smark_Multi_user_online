@@ -383,33 +383,289 @@ def init_defaults(db: Session):
                 debit_account_id=coa_map.get("5600"), credit_account_id=coa_map.get("2000"),
             ))
 
-        # Project codes
-        for code, name, bud in [("PRJ-HLT", "Health Outreach", 5000000), ("PRJ-EDU", "Education Support", 3500000), ("PRJ-OPS", "Operations", 1500000), ("PRJ-WASH", "Water & Sanitation", 2800000)]:
-            if not db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first():
+        # ---- Project codes (always refresh map) ----
+        proj_defs = [
+            ("PRJ-HLT", "Health Outreach 2026", 5000000),
+            ("PRJ-EDU", "Education Support 2026", 3500000),
+            ("PRJ-OPS", "Operations & Admin", 1500000),
+            ("PRJ-WASH", "Water & Sanitation", 2800000),
+            ("PRJ-CAP", "Capital / Equipment", 4200000),
+        ]
+        proj_map = {}
+        for code, name, bud in proj_defs:
+            pc = db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first()
+            if not pc:
                 kwargs = dict(company_id=demo.id, code=code, name=name, description=name)
                 if hasattr(ProjectCode, "budget_amount"):
                     kwargs["budget_amount"] = bud
-                db.add(ProjectCode(**kwargs))
+                pc = ProjectCode(**kwargs)
+                db.add(pc)
+                db.flush()
+            else:
+                if hasattr(pc, "budget_amount") and not (pc.budget_amount or 0):
+                    try:
+                        pc.budget_amount = bud
+                    except Exception:
+                        pass
+            proj_map[code] = pc.id
+        db.commit()
 
-        # Update assets with assigned_to and accounts
+        # Tag existing journal lines with projects where missing
+        jes = db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.project_code_id.is_(None)).all()
+        for i, j in enumerate(jes):
+            codes = list(proj_map.values())
+            j.project_code_id = codes[i % len(codes)]
+            db.add(j)
+
+        # Extra project-coded postings (income + expenses)
+        extra_jes = [
+            ("JE-PRJ-HLT-01", "1000", "4000", 2000000, "Grant received — Health", "PRJ-HLT"),
+            ("JE-PRJ-HLT-02", "5500", "1000", 450000, "Medical kits — field", "PRJ-HLT"),
+            ("JE-PRJ-EDU-01", "1000", "4000", 1500000, "Grant received — Education", "PRJ-EDU"),
+            ("JE-PRJ-EDU-02", "5300", "1000", 320000, "Teacher training workshop", "PRJ-EDU"),
+            ("JE-PRJ-WASH-01", "5500", "1000", 280000, "Water treatment supplies", "PRJ-WASH"),
+            ("JE-PRJ-OPS-01", "5100", "1000", 850000, "HQ rent allocation", "PRJ-OPS"),
+            ("JE-PRJ-CAP-01", "1510", "1000", 1250000, "Project laptops", "PRJ-CAP"),
+        ]
+        for eno, dr, cr, amt, desc, pcode in extra_jes:
+            if db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).first():
+                continue
+            pid = proj_map.get(pcode)
+            db.add(JournalEntry(
+                company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=5),
+                source_type="manual", account_id=coa_map[dr], project_code_id=pid,
+                description=desc, narration=f"Project {pcode}", debit=amt, credit=0, created_by=finance.id,
+            ))
+            db.add(JournalEntry(
+                company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=5),
+                source_type="manual", account_id=coa_map[cr], project_code_id=pid,
+                description=desc, narration=f"Project {pcode}", debit=0, credit=amt, created_by=finance.id,
+            ))
+        db.commit()
+
+        # Update assets with project + accounts
         for a in db.query(Asset).filter(Asset.company_id == demo.id).all():
             a.assigned_to = a.assigned_to or "Head Office Pool"
             a.debit_account_id = a.debit_account_id or coa_map.get("1510")
             a.credit_account_id = a.credit_account_id or coa_map.get("1000")
             a.useful_life = a.useful_life or 5.0
+            if not a.project_code_id:
+                a.project_code_id = proj_map.get("PRJ-CAP") or proj_map.get("PRJ-OPS")
 
-        # Procurement sample services
-        # Sample committee
-        if not db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first():
+        # ---- Inventory with project-linked postings ----
+        inv_samples = [
+            ("INV-MED-001", "ORS Sachets (box)", "Medical", 2500, 40, "PRJ-HLT"),
+            ("INV-MED-002", "First aid kits", "Medical", 15000, 25, "PRJ-HLT"),
+            ("INV-EDU-001", "Exercise books (carton)", "Education", 8000, 30, "PRJ-EDU"),
+            ("INV-WASH-001", "Water purification tablets", "WASH", 4500, 50, "PRJ-WASH"),
+            ("INV-OPS-001", "Office stationery pack", "Admin", 3500, 20, "PRJ-OPS"),
+        ]
+        for code, name, cat, cost, qty, pcode in inv_samples:
+            if db.query(InventoryItem).filter(InventoryItem.company_id == demo.id, InventoryItem.item_code == code).first():
+                continue
+            total = cost * qty
+            item = InventoryItem(
+                company_id=demo.id, item_code=code, item_name=name, category=cat,
+                cost_price=cost, qty_received=qty, balance_qty=qty, total_value=total,
+                department="Programmes", funding_source="Grant",
+                debit_account_id=coa_map.get("5500"), credit_account_id=coa_map.get("1000"),
+                project_code_id=proj_map.get(pcode),
+            )
+            db.add(item); db.flush()
+            db.add(InventoryMovement(
+                company_id=demo.id, item_id=item.id, movement_type="receive",
+                quantity=qty, unit_cost=cost, total=total, narration=f"Opening stock {pcode}",
+                debit_account_id=coa_map.get("5500"), credit_account_id=coa_map.get("1000"),
+                project_code_id=proj_map.get(pcode), created_by=finance.id,
+            ))
+            eno = f"JE-INV-{code}"
+            if not db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).first():
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=3),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["5500"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=total, credit=0, created_by=finance.id,
+                ))
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=3),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["1000"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=0, credit=total, created_by=finance.id,
+                ))
+            # partial issue for one item
+            if code == "INV-MED-001":
+                issue_qty = 10
+                issue_total = issue_qty * cost
+                item.qty_issued = issue_qty
+                item.balance_qty = qty - issue_qty
+                item.total_value = item.balance_qty * cost
+                db.add(InventoryMovement(
+                    company_id=demo.id, item_id=item.id, movement_type="issue",
+                    quantity=issue_qty, unit_cost=cost, total=issue_total,
+                    narration="Issued to Kano outreach", debit_account_id=coa_map.get("5500"),
+                    credit_account_id=coa_map.get("1000"), project_code_id=proj_map.get(pcode), created_by=program.id,
+                ))
+                eno2 = f"JE-ISS-{code}"
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno2, entry_date=date.today() - _td(days=1),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["5500"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock issue {code}", narration="Kano outreach", debit=issue_total, credit=0, created_by=program.id,
+                ))
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno2, entry_date=date.today() - _td(days=1),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["1000"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock issue {code}", narration="Kano outreach", debit=0, credit=issue_total, created_by=program.id,
+                ))
+        db.commit()
+
+        # ---- Procurement: committee, services, RFQs at multiple stages ----
+        cm = db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first()
+        if not cm:
             cm = ProcurementCommittee(company_id=demo.id, name="Evaluation Committee", description="Default procurement evaluation panel")
             db.add(cm); db.flush()
             for mn, rt in [("Ada Chair", "Chair"), ("Bello Member", "Member"), ("Chidi Secretary", "Secretary")]:
                 db.add(ProcurementCommitteeMember(committee_id=cm.id, member_name=mn, role_title=rt))
+            db.flush()
+        members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == cm.id).all()
+
+        svc_map = {}
         for sc, sn in [("PROC-MED", "Medical supplies"), ("PROC-IT", "IT equipment"), ("PROC-TRN", "Training services")]:
-            if not db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first():
-                db.add(ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn))
+            s = db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first()
+            if not s:
+                s = ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn)
+                db.add(s); db.flush()
+            svc_map[sc] = s.id
+
+        # Vendors map by number
+        vmap = {}
+        for v in db.query(Vendor).filter(Vendor.company_id == demo.id).all():
+            vmap[v.vendor_number] = v
+
+        def ensure_rfq(rfq_no, title, svc, status, pcode, debit, credit):
+            r = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id, ProcurementRFQ.rfq_no == rfq_no).first()
+            if r:
+                return r
+            r = ProcurementRFQ(
+                company_id=demo.id, rfq_no=rfq_no, title=title,
+                service_id=svc_map.get(svc), committee_id=cm.id,
+                description=title, status=status,
+                requesting_officer_id=program.id, created_by=program.id,
+                debit_account_id=coa_map.get(debit), credit_account_id=coa_map.get(credit),
+                project_code_id=proj_map.get(pcode),
+            )
+            db.add(r); db.flush()
+            return r
+
+        # 1) OPEN — still collecting quotes
+        rfq_open = ensure_rfq("RFQ-0001", "ORS and first-aid kits for outreach", "PROC-MED", "open", "PRJ-HLT", "5500", "2000")
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_open.id).first():
+            db.add(ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_open.id,
+                vendor_id=vmap.get("V-001").id if vmap.get("V-001") else None,
+                vendor_name="MedSupply Co", amount=980000, tax_amount=73500, total_amount=1053500,
+                delivery_days=14, notes="Includes delivery to Kano", system_score=40, status="submitted",
+            ))
+
+        # 2) EVALUATION — quotes scored, not yet awarded
+        rfq_eval = ensure_rfq("RFQ-0002", "Teacher training venue and materials", "PROC-TRN", "evaluation", "PRJ-EDU", "5300", "2000")
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_eval.id).first():
+            q1 = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_eval.id,
+                vendor_id=vmap.get("V-003").id if vmap.get("V-003") else None,
+                vendor_name="Training Hub Ltd", amount=750000, tax_amount=56250, total_amount=806250,
+                delivery_days=7, system_score=40, committee_score=48, final_score=88, status="scored",
+            )
+            q2 = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_eval.id,
+                vendor_name="LearnRight Services", amount=820000, tax_amount=61500, total_amount=881500,
+                delivery_days=10, system_score=32, committee_score=42, final_score=74, status="scored",
+            )
+            db.add_all([q1, q2]); db.flush()
+            if members:
+                for m in members:
+                    db.add(QuoteMemberScore(quote_id=q1.id, member_id=m.id, score=48 + (m.id % 3), comment="Good capacity"))
+                    db.add(QuoteMemberScore(quote_id=q2.id, member_id=m.id, score=40 + (m.id % 4), comment="Higher price"))
+
+        # 3) AWARDED + PO pending officer (workflow not completed)
+        rfq_aw = ensure_rfq("RFQ-0003", "Project laptops for field teams", "PROC-IT", "awarded", "PRJ-CAP", "1510", "2000")
+        q_win = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id, ProcurementQuote.status == "winner").first()
+        if not q_win:
+            q_win = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_aw.id,
+                vendor_id=vmap.get("V-002").id if vmap.get("V-002") else None,
+                vendor_name="TechMart Nigeria", amount=2400000, tax_amount=180000, total_amount=2580000,
+                delivery_days=21, system_score=40, committee_score=52, final_score=92, status="winner",
+            )
+            q_lose = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_aw.id,
+                vendor_name="ByteStore Ltd", amount=2650000, tax_amount=198750, total_amount=2848750,
+                delivery_days=28, system_score=28, committee_score=45, final_score=73, status="rejected",
+            )
+            db.add_all([q_win, q_lose]); db.flush()
+            if members:
+                for m in members:
+                    db.add(QuoteMemberScore(quote_id=q_win.id, member_id=m.id, score=50, comment="Best value"))
+        po = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0001").first()
+        if not po and q_win:
+            po = PurchaseOrder(
+                company_id=demo.id, po_no="PO-0001", rfq_id=rfq_aw.id, quote_id=q_win.id,
+                vendor_id=q_win.vendor_id, vendor_name=q_win.vendor_name,
+                amount=q_win.total_amount, description=rfq_aw.title,
+                status="pending_officer", requesting_officer_id=program.id,
+                debit_account_id=coa_map.get("1510"), credit_account_id=coa_map.get("2000"),
+                project_code_id=proj_map.get("PRJ-CAP"),
+                approved_at=datetime.utcnow() - _td(days=1), created_by=finance.id,
+            )
+            db.add(po)
+
+        # 4) AWARDED + PO already submitted into payment workflow (still in payment approval)
+        rfq_pay = ensure_rfq("RFQ-0004", "Office furniture top-up", "PROC-IT", "awarded", "PRJ-OPS", "1500", "2000")
+        qf = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first()
+        if not qf:
+            qf = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_pay.id,
+                vendor_name="Property Holdings Ltd", amount=600000, tax_amount=45000, total_amount=645000,
+                delivery_days=14, system_score=40, committee_score=50, final_score=90, status="winner",
+            )
+            db.add(qf); db.flush()
+        po2 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0002").first()
+        if not po2:
+            # payment request in program_approved stage from PO
+            npr = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() + 1
+            exp = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).first()
+            if not exp:
+                exp = ExpenseCode(company_id=demo.id, code="EXP-FURN", description="Furniture", budget_code_id=bud_map["BUD-OPS-2026"],
+                                  default_debit_account_id=coa_map.get("1500"), default_credit_account_id=coa_map.get("2000"))
+                db.add(exp); db.flush()
+            pr = PaymentRequest(
+                company_id=demo.id, request_no=f"PR-PO-{npr:04d}",
+                requester_id=program.id, budget_code_id=bud_map["BUD-OPS-2026"],
+                expense_code_id=exp.id,
+                project_code_id=proj_map.get("PRJ-OPS"),
+                amount=645000, amount_in_words="Six Hundred and Forty Five Thousand Naira Only",
+                narration="Office furniture top-up from PO-0002", payee_name="Property Holdings Ltd",
+                debit_account_id=coa_map.get("1500"), credit_account_id=coa_map.get("2000"),
+                designated_approver_id=program.id, status="program_approved",
+                program_approved_by=program.id, program_approved_at=datetime.utcnow() - _td(hours=6),
+            )
+            db.add(pr); db.flush()
+            po2 = PurchaseOrder(
+                company_id=demo.id, po_no="PO-0002", rfq_id=rfq_pay.id, quote_id=qf.id,
+                vendor_name=qf.vendor_name, amount=qf.total_amount, description=rfq_pay.title,
+                status="submitted_payment", requesting_officer_id=program.id,
+                payment_request_id=pr.id,
+                debit_account_id=coa_map.get("1500"), credit_account_id=coa_map.get("2000"),
+                project_code_id=proj_map.get("PRJ-OPS"),
+                approved_at=datetime.utcnow() - _td(days=2), created_by=finance.id,
+            )
+            db.add(po2)
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="submit_from_po", comment="From PO-0002"))
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="program_approve", comment="Program OK"))
+
         db.commit()
-        print("✅ Demo company seeded with COA, budgets, expenses, assets, payment workflow samples")
+        print("✅ Demo seeded: projects, inventory postings, procurement (open / evaluation / PO pending / payment in workflow)")
 
         # Second company still pending approval (for superadmin demo)
         pending = db.query(Company).filter(Company.slug == "sunrise-ngo").first()
@@ -446,14 +702,290 @@ def init_defaults(db: Session):
 
 
 @app.on_event("startup")
+
+
+def ensure_demo_extended_samples(db: Session):
+    """Idempotent: fill projects, inventory JE, procurement stages for demo company."""
+    demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        return
+    finance = db.query(User).filter(User.company_id == demo.id, User.username == "finance").first()
+    program = db.query(User).filter(User.company_id == demo.id, User.username == "program").first()
+    admin = db.query(User).filter(User.company_id == demo.id, User.username == "admin").first()
+    if not finance or not program:
+        return
+    coa = {a.code: a.id for a in db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).all()}
+    if not coa.get("1000"):
+        return
+
+    # Projects
+    proj_defs = [
+        ("PRJ-HLT", "Health Outreach 2026", 5000000),
+        ("PRJ-EDU", "Education Support 2026", 3500000),
+        ("PRJ-OPS", "Operations & Admin", 1500000),
+        ("PRJ-WASH", "Water & Sanitation", 2800000),
+        ("PRJ-CAP", "Capital / Equipment", 4200000),
+    ]
+    proj_map = {}
+    for code, name, bud in proj_defs:
+        pc = db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first()
+        if not pc:
+            kwargs = dict(company_id=demo.id, code=code, name=name, description=name)
+            if hasattr(ProjectCode, "budget_amount"):
+                kwargs["budget_amount"] = bud
+            pc = ProjectCode(**kwargs)
+            db.add(pc); db.flush()
+        proj_map[code] = pc.id
+
+    # Tag untagged journal lines
+    jes = db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.project_code_id.is_(None)).limit(200).all()
+    codes = list(proj_map.values())
+    for i, j in enumerate(jes):
+        j.project_code_id = codes[i % len(codes)]
+        db.add(j)
+
+    # Project-coded sample journals
+    extra_jes = [
+        ("JE-PRJ-HLT-01", "1000", "4000", 2000000, "Grant received — Health", "PRJ-HLT"),
+        ("JE-PRJ-HLT-02", "5500", "1000", 450000, "Medical kits — field", "PRJ-HLT"),
+        ("JE-PRJ-EDU-01", "1000", "4000", 1500000, "Grant received — Education", "PRJ-EDU"),
+        ("JE-PRJ-EDU-02", "5300", "1000", 320000, "Teacher training workshop", "PRJ-EDU"),
+        ("JE-PRJ-WASH-01", "5500", "1000", 280000, "Water treatment supplies", "PRJ-WASH"),
+        ("JE-PRJ-OPS-01", "5100", "1000", 850000, "HQ rent allocation", "PRJ-OPS"),
+        ("JE-PRJ-CAP-01", "1510", "1000", 1250000, "Project laptops", "PRJ-CAP"),
+        ("JE-PRJ-HLT-03", "5200", "1000", 175000, "Field travel — outreach", "PRJ-HLT"),
+        ("JE-PRJ-EDU-03", "5300", "1000", 210000, "School materials distribution", "PRJ-EDU"),
+    ]
+    for eno, dr, cr, amt, desc, pcode in extra_jes:
+        if eno in [x.entry_no for x in db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).limit(1).all()]:
+            continue
+        if dr not in coa or cr not in coa:
+            continue
+        pid = proj_map.get(pcode)
+        db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=5),
+            source_type="manual", account_id=coa[dr], project_code_id=pid,
+            description=desc, narration=f"Project {pcode}", debit=amt, credit=0, created_by=finance.id))
+        db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=5),
+            source_type="manual", account_id=coa[cr], project_code_id=pid,
+            description=desc, narration=f"Project {pcode}", debit=0, credit=amt, created_by=finance.id))
+
+    # Inventory items + movements + postings
+    inv_samples = [
+        ("INV-MED-001", "ORS Sachets (box)", "Medical", 2500, 40, 10, "PRJ-HLT"),
+        ("INV-MED-002", "First aid kits", "Medical", 15000, 25, 5, "PRJ-HLT"),
+        ("INV-EDU-001", "Exercise books (carton)", "Education", 8000, 30, 8, "PRJ-EDU"),
+        ("INV-EDU-002", "Chalk & markers pack", "Education", 3500, 50, 12, "PRJ-EDU"),
+        ("INV-WASH-001", "Water purification tabs", "WASH", 1200, 100, 20, "PRJ-WASH"),
+        ("INV-OPS-001", "Office stationery kit", "Admin", 4500, 15, 3, "PRJ-OPS"),
+    ]
+    for code, name, cat, cost, recv, issued, pcode in inv_samples:
+        item = db.query(InventoryItem).filter(InventoryItem.company_id == demo.id, InventoryItem.item_code == code).first()
+        if not item:
+            bal = recv - issued
+            item = InventoryItem(
+                company_id=demo.id, item_code=code, item_name=name, category=cat,
+                cost_price=cost, qty_received=recv, qty_issued=issued, balance_qty=bal,
+                total_value=bal * cost, department="Programme",
+                debit_account_id=coa.get("5500"), credit_account_id=coa.get("1000"),
+                project_code_id=proj_map.get(pcode), funding_source="Grant",
+            )
+            db.add(item); db.flush()
+            # receive movement + JE
+            eno = f"JE-INV-RCV-{code}"
+            if not db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).first():
+                total = recv * cost
+                db.add(InventoryMovement(
+                    company_id=demo.id, item_id=item.id, movement_type="receive",
+                    quantity=recv, unit_cost=cost, total=total, narration=f"Opening stock {code}",
+                    debit_account_id=coa.get("5500"), credit_account_id=coa.get("1000"),
+                    project_code_id=proj_map.get(pcode), created_by=finance.id,
+                ))
+                db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=10),
+                    source_type="inventory", source_id=item.id, account_id=coa["5500"], project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=total, credit=0, created_by=finance.id))
+                db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=10),
+                    source_type="inventory", source_id=item.id, account_id=coa["1000"], project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=0, credit=total, created_by=finance.id))
+            if issued > 0:
+                eno2 = f"JE-INV-ISS-{code}"
+                if not db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno2).first():
+                    itotal = issued * cost
+                    db.add(InventoryMovement(
+                        company_id=demo.id, item_id=item.id, movement_type="issue",
+                        quantity=issued, unit_cost=cost, total=itotal, narration="Field distribution",
+                        debit_account_id=coa.get("5500"), credit_account_id=coa.get("1000"),
+                        project_code_id=proj_map.get(pcode), created_by=program.id,
+                    ))
+                    db.add(JournalEntry(company_id=demo.id, entry_no=eno2, entry_date=date.today() - timedelta(days=2),
+                        source_type="inventory", source_id=item.id, account_id=coa["5500"], project_code_id=proj_map.get(pcode),
+                        description=f"Stock issue {code}", narration="Field distribution", debit=itotal, credit=0, created_by=program.id))
+                    db.add(JournalEntry(company_id=demo.id, entry_no=eno2, entry_date=date.today() - timedelta(days=2),
+                        source_type="inventory", source_id=item.id, account_id=coa["1000"], project_code_id=proj_map.get(pcode),
+                        description=f"Stock issue {code}", narration="Field distribution", debit=0, credit=itotal, created_by=program.id))
+
+    # Committee
+    cm = db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first()
+    if not cm:
+        cm = ProcurementCommittee(company_id=demo.id, name="Evaluation Committee", description="Default procurement evaluation panel")
+        db.add(cm); db.flush()
+        for mn, rt in [("Ada Chair", "Chair"), ("Bello Member", "Member"), ("Chidi Secretary", "Secretary")]:
+            db.add(ProcurementCommitteeMember(committee_id=cm.id, member_name=mn, role_title=rt))
+        db.flush()
+    members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == cm.id).all()
+
+    svc_map = {}
+    for sc, sn in [("PROC-MED", "Medical supplies"), ("PROC-IT", "IT equipment"), ("PROC-TRN", "Training services")]:
+        s = db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first()
+        if not s:
+            s = ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn)
+            db.add(s); db.flush()
+        svc_map[sc] = s.id
+
+    vmap = {v.vendor_number: v for v in db.query(Vendor).filter(Vendor.company_id == demo.id).all()}
+
+    def ensure_rfq(rfq_no, title, svc, status, pcode, debit, credit):
+        r = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id, ProcurementRFQ.rfq_no == rfq_no).first()
+        if r:
+            return r
+        r = ProcurementRFQ(
+            company_id=demo.id, rfq_no=rfq_no, title=title,
+            service_id=svc_map.get(svc), committee_id=cm.id,
+            description=title, status=status,
+            requesting_officer_id=program.id, created_by=program.id,
+            debit_account_id=coa.get(debit), credit_account_id=coa.get(credit),
+            project_code_id=proj_map.get(pcode),
+        )
+        db.add(r); db.flush()
+        return r
+
+    # OPEN — incomplete
+    rfq_open = ensure_rfq("RFQ-0001", "ORS and first-aid kits for outreach", "PROC-MED", "open", "PRJ-HLT", "5500", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_open.id).first():
+        db.add(ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_open.id,
+            vendor_id=vmap["V-001"].id if vmap.get("V-001") else None,
+            vendor_name="MedSupply Co", amount=980000, tax_amount=73500, total_amount=1053500,
+            delivery_days=14, notes="Includes delivery to Kano", system_score=40, status="submitted",
+        ))
+
+    # EVALUATION — in committee scoring, not awarded
+    rfq_eval = ensure_rfq("RFQ-0002", "Teacher training venue and materials", "PROC-TRN", "evaluation", "PRJ-EDU", "5300", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_eval.id).first():
+        q1 = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_eval.id,
+            vendor_id=vmap["V-003"].id if vmap.get("V-003") else None,
+            vendor_name="Training Hub Ltd", amount=750000, tax_amount=56250, total_amount=806250,
+            delivery_days=7, system_score=40, committee_score=48, final_score=88, status="scored",
+        )
+        q2 = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_eval.id,
+            vendor_name="LearnRight Services", amount=820000, tax_amount=61500, total_amount=881500,
+            delivery_days=10, system_score=32, committee_score=42, final_score=74, status="scored",
+        )
+        db.add_all([q1, q2]); db.flush()
+        for m in members:
+            db.add(QuoteMemberScore(quote_id=q1.id, member_id=m.id, score=46 + (m.id % 5), comment="Adequate"))
+            db.add(QuoteMemberScore(quote_id=q2.id, member_id=m.id, score=40 + (m.id % 4), comment="Higher price"))
+
+    # AWARDED + PO pending officer (not submitted to payment)
+    rfq_aw = ensure_rfq("RFQ-0003", "Project laptops for field teams", "PROC-IT", "awarded", "PRJ-CAP", "1510", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id).first():
+        qw = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_aw.id,
+            vendor_id=vmap["V-002"].id if vmap.get("V-002") else None,
+            vendor_name="TechMart Nigeria", amount=2500000, tax_amount=187500, total_amount=2687500,
+            delivery_days=21, system_score=40, committee_score=52, final_score=92, status="winner",
+        )
+        ql = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_aw.id,
+            vendor_name="ByteSoft Ltd", amount=2750000, tax_amount=206250, total_amount=2956250,
+            delivery_days=30, system_score=28, committee_score=40, final_score=68, status="rejected",
+        )
+        db.add_all([qw, ql]); db.flush()
+        for m in members:
+            db.add(QuoteMemberScore(quote_id=qw.id, member_id=m.id, score=50 + (m.id % 3), comment="Preferred"))
+    else:
+        qw = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id, ProcurementQuote.status == "winner").first()
+        if not qw:
+            qw = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id).first()
+
+    po1 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0001").first()
+    if not po1 and qw:
+        db.add(PurchaseOrder(
+            company_id=demo.id, po_no="PO-0001", rfq_id=rfq_aw.id, quote_id=qw.id,
+            vendor_id=qw.vendor_id, vendor_name=qw.vendor_name or "TechMart Nigeria",
+            amount=qw.total_amount or 2687500, description=rfq_aw.title,
+            status="pending_officer", requesting_officer_id=program.id,
+            debit_account_id=coa.get("1510"), credit_account_id=coa.get("2000"),
+            project_code_id=proj_map.get("PRJ-CAP"),
+            approved_at=datetime.utcnow() - timedelta(days=1), created_by=finance.id,
+        ))
+
+    # AWARDED + PO submitted → payment still in workflow (program_approved, awaiting finance)
+    rfq_pay = ensure_rfq("RFQ-0004", "Office furniture top-up", "PROC-IT", "awarded", "PRJ-OPS", "1500", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first():
+        qf = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_pay.id,
+            vendor_id=vmap["V-004"].id if vmap.get("V-004") else None,
+            vendor_name="Property Holdings Ltd", amount=850000, tax_amount=63750, total_amount=913750,
+            delivery_days=14, system_score=40, committee_score=50, final_score=90, status="winner",
+        )
+        db.add(qf); db.flush()
+    else:
+        qf = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first()
+
+    po2 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0002").first()
+    if not po2 and qf:
+        # budget / expense maps
+        bud = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).first()
+        exp = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).first()
+        if bud and exp:
+            pr = PaymentRequest(
+                company_id=demo.id, request_no="PR-PO-0002",
+                requester_id=program.id, budget_code_id=bud.id, expense_code_id=exp.id,
+                project_code_id=proj_map.get("PRJ-OPS"),
+                amount=qf.total_amount or 913750,
+                amount_in_words=amount_to_words(qf.total_amount or 913750),
+                narration="Office furniture top-up from PO-0002", payee_name=qf.vendor_name or "Property Holdings Ltd",
+                debit_account_id=coa.get("1500"), credit_account_id=coa.get("2000"),
+                designated_approver_id=program.id, status="program_approved",
+                program_approved_by=program.id, program_approved_at=datetime.utcnow() - timedelta(hours=6),
+            )
+            db.add(pr); db.flush()
+            db.add(PurchaseOrder(
+                company_id=demo.id, po_no="PO-0002", rfq_id=rfq_pay.id, quote_id=qf.id,
+                vendor_name=qf.vendor_name, amount=qf.total_amount, description=rfq_pay.title,
+                status="submitted_payment", requesting_officer_id=program.id,
+                payment_request_id=pr.id,
+                debit_account_id=coa.get("1500"), credit_account_id=coa.get("2000"),
+                project_code_id=proj_map.get("PRJ-OPS"),
+                approved_at=datetime.utcnow() - timedelta(days=2), created_by=finance.id,
+            ))
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="submit_from_po", comment="From PO-0002"))
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="program_approve", comment="Program OK"))
+
+    # Tag sample payments with projects where missing
+    pays = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id, PaymentRequest.project_code_id.is_(None)).all()
+    for i, p in enumerate(pays):
+        p.project_code_id = codes[i % len(codes)]
+        db.add(p)
+
+    db.commit()
+    print("✅ Extended demo samples: projects, inventory JE, procurement open/evaluation/PO pending/payment in workflow")
+
+
 def on_startup():
     db = next(get_db())
     try:
         init_defaults(db)
+        ensure_demo_extended_samples(db)
         try:
             cleanup_disposed_assets(db)
         except Exception as e:
             print("cleanup_disposed_assets:", e)
+    except Exception as e:
+        print("on_startup error:", e)
+        raise
     finally:
         db.close()
 
