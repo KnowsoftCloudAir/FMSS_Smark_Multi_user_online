@@ -3255,15 +3255,56 @@ def bank_recon_pdf_std(
 
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
+def _public_html(name: str):
+    p = FRONTEND_DIR / "public" / name
+    if p.exists():
+        return FileResponse(str(p), media_type="text/html")
+    return None
+
+@app.get("/quote/{token}")
+def vendor_quote_portal(token: str):
+    """Standalone vendor quotation portal (no ERP chrome)."""
+    resp = _public_html("quote.html")
+    if resp:
+        return resp
+    raise HTTPException(404, "Vendor portal page missing on server")
+
+@app.get("/po-result/{token}")
+def vendor_po_result_portal(token: str):
+    resp = _public_html("po-result.html")
+    if resp:
+        return resp
+    raise HTTPException(404, "Result page missing")
+
+@app.get("/committee-score/{token}")
+def committee_score_portal(token: str):
+    resp = _public_html("committee-score.html")
+    if resp:
+        return resp
+    raise HTTPException(404, "Committee page missing")
+
 @app.get("/")
 def serve_index():
     index = FRONTEND_DIR / "index.html"
     return FileResponse(index) if index.exists() else {"msg": "API up"}
 
+@app.get("/styles.css")
+def serve_css():
+    p = FRONTEND_DIR / "styles.css"
+    return FileResponse(p) if p.exists() else HTTPException(404)
+
+@app.get("/app.js")
+def serve_js():
+    p = FRONTEND_DIR / "app.js"
+    return FileResponse(p) if p.exists() else HTTPException(404)
+
 @app.get("/{full_path:path}")
 def serve_frontend(full_path: str):
     if full_path.startswith("api/"):
         raise HTTPException(404)
+    # never swallow vendor portals
+    if full_path.startswith("quote/") or full_path.startswith("po-result/") or full_path.startswith("committee-score/"):
+        raise HTTPException(404, "Use the dedicated portal route")
     fp = FRONTEND_DIR / full_path
     if fp.exists() and fp.is_file():
         return FileResponse(fp)

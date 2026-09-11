@@ -2362,7 +2362,10 @@ window.createInvite = async function (rfqId) {
     });
     var data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed");
-    alert("Share this link with the vendor:\n" + (data.url || data.link || JSON.stringify(data)));
+    var url = data.url || data.link || ((location.origin || "") + (data.link_path || ("/quote/" + (data.token || ""))));
+    if (url && url.indexOf("http") !== 0) url = location.origin + (url.charAt(0) === "/" ? url : "/" + url);
+    try { await navigator.clipboard.writeText(url); } catch (e) {}
+    alert("Vendor portal link copied:\n" + url);
     openRfq(rfqId);
   } catch (ex) { alert(ex.message); }
 };
