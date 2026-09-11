@@ -1611,7 +1611,18 @@ async def restore_company_backup(
 # ===================== USERS (company scoped) =====================
 @app.get("/api/admin/users", response_model=list[UserOut])
 def list_users(current_user: User = Depends(get_company_admin), db: Session = Depends(get_db)):
+    """Company admin: users in their firm. Superadmin: all users (or filter company_id)."""
+    if current_user.role == "superadmin":
+        return db.query(User).order_by(User.company_id, User.id).all()
+    if not current_user.company_id:
+        raise HTTPException(400, "No company context")
     return db.query(User).filter(User.company_id == current_user.company_id).order_by(User.id).all()
+
+
+@app.get("/api/superadmin/users", response_model=list[UserOut])
+def superadmin_list_users(current_user: User = Depends(get_superadmin), db: Session = Depends(get_db)):
+    return db.query(User).order_by(User.company_id, User.id).all()
+
 
 
 @app.get("/api/admin/approvers")
@@ -1626,6 +1637,8 @@ def list_approvers(current_user: User = Depends(get_current_active_user), db: Se
 
 @app.post("/api/admin/users", response_model=UserOut)
 def create_user(user_in: UserCreate, current_user: User = Depends(get_company_admin), db: Session = Depends(get_db)):
+    if current_user.role == "superadmin" and not current_user.company_id:
+        raise HTTPException(400, "Superadmin: manage users from a company context, or use company admin login")
     if db.query(User).filter(User.company_id == current_user.company_id, User.username == user_in.username).first():
         raise HTTPException(400, "Username already exists in your company")
     role = user_in.role if user_in.role in (
@@ -3275,24 +3288,6 @@ def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user),
 
 
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-
-@app.get("/")
-def serve_index():
-    index = FRONTEND_DIR / "index.html"
-    return FileResponse(index) if index.exists() else {"msg": "API up"}
-
-@app.get("/{full_path:path}")
-def serve_frontend(full_path: str):
-    if full_path.startswith("api/"):
-        raise HTTPException(404)
-    fp = FRONTEND_DIR / full_path
-    if fp.exists() and fp.is_file():
-        return FileResponse(fp)
-    index = FRONTEND_DIR / "index.html"
-    return FileResponse(index) if index.exists() else HTTPException(404)
-
-
 # ===================== PROJECTS & FINANCIAL STATEMENTS =====================
 @app.get("/api/projects")
 def list_projects(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
@@ -4155,4 +4150,23 @@ def payment_archive(pid: int, current_user: User = Depends(get_current_active_us
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/zip",
                              headers={"Content-Disposition": f"attachment; filename=payment_archive_{pr.request_no}.zip"})
+
+# ===== SPA (must be last routes) =====
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+@app.get("/")
+def serve_index():
+    index = FRONTEND_DIR / "index.html"
+    return FileResponse(index) if index.exists() else {"msg": "API up"}
+
+@app.get("/{full_path:path}")
+def serve_frontend(full_path: str):
+    if full_path.startswith("api/") or full_path.startswith("static/"):
+        raise HTTPException(404, "Not found")
+    fp = FRONTEND_DIR / full_path
+    if fp.exists() and fp.is_file():
+        return FileResponse(fp)
+    index = FRONTEND_DIR / "index.html"
+    return FileResponse(index) if index.exists() else HTTPException(404)
 

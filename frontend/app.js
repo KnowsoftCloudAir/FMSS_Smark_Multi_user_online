@@ -354,10 +354,19 @@ document.getElementById("menu-toggle")?.addEventListener("click", () => {
 /* ---------- Users ---------- */
 async function loadUsers() {
   try {
-    const users = await api("/api/admin/users");
+    let users;
+    try {
+      users = await api("/api/admin/users");
+    } catch (e1) {
+      if (currentUser && currentUser.role === "superadmin") {
+        users = await api("/api/superadmin/users");
+      } else throw e1;
+    }
     const tbody = document.querySelector("#users-table tbody");
+    if (!tbody) return;
     tbody.innerHTML = "";
-    document.getElementById("kpi-users").textContent = users.length;
+    const kpi = document.getElementById("kpi-users");
+    if (kpi) kpi.textContent = users.length;
     users.forEach(u => {
       const perms = [];
       if (u.can_access_finance) perms.push("Finance");
@@ -369,6 +378,7 @@ async function loadUsers() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${u.id}</td>
+        <td>${u.company_id != null ? u.company_id : "—"}</td>
         <td><strong>${u.username}</strong></td>
         <td>${u.full_name || "—"}</td>
         <td>${u.email}</td>
