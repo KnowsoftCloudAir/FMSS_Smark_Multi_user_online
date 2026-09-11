@@ -1,12 +1,12 @@
 # Knowsoft FMSS ERP (Web)
 
-Multi-company financial management: payments, COA, bank reconciliation, inventory, assets, vendors, procurement (committee → PO → payment), projects, and branded PDF reports.
+## Render deploy (important)
 
-## Render deploy
+This is a **FastAPI** app (not Flask). Do **not** use `gunicorn app:app`.
 
-This is a **FastAPI** app.
+### Option A — Native Python (simplest)
 
-### Settings
+In Render Dashboard → your Web Service → **Settings**:
 
 | Setting | Value |
 |---------|--------|
@@ -14,36 +14,19 @@ This is a **FastAPI** app.
 | Build Command | `pip install -r requirements.txt` |
 | Start Command | `cd backend && uvicorn main:app --host 0.0.0.0 --port $PORT` |
 
-Or use **Docker** with the included `Dockerfile`.
+### Option B — Docker
 
-**Clear build cache** after large updates. Pin uses `bcrypt==4.0.1` (required for passlib).
+- Environment: **Docker**
+- Dockerfile path: `./Dockerfile`
+- Start command: leave empty (uses Dockerfile CMD)
 
-## Demo logins (seeded on startup)
-
-```
-demo/program  / Program@Knowsoft1!
-demo/finance  / Finance@Knowsoft1!
-demo/admin    / Admin@Knowsoft1!
-superadmin    / Knowsoft@Super0160!
-```
-
-Company users use `company-slug/username`. Login page shows the program manager demo only.
-
-On first start (and when demo COA is empty), the app seeds chart of accounts, budgets, payments, inventory, projects, vendors, and procurement at multiple workflow stages.
-
-## Local run
-
-```bash
-pip install -r requirements.txt
-cd backend && uvicorn main:app --reload --port 8000
-```
-
-Open http://127.0.0.1:8000
-
-## Project layout
+### Demo logins
 
 ```
-backend/     FastAPI API, models, reports, seed
-frontend/    SPA (index.html, app.js, styles.css)
-static/      logos and uploads
+superadmin / Knowsoft@Super0160!
+demo/admin / Admin@Knowsoft1!
+demo/finance / Finance@Knowsoft1!
+demo/program / Program@Knowsoft1!
 ```
+
+Delete any old SQLite DB after schema changes so tables recreate on startup.

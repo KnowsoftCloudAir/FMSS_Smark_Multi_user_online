@@ -181,24 +181,16 @@ class ExpenseCodeIn(BaseModel):
     default_credit_account_id: Optional[int] = None
 
 
-class PaymentLineIn(BaseModel):
-    description: str = ""
-    quantity: float = 1
-    unit_cost: float = 0
-    amount: float = 0
-
 class PaymentRequestIn(BaseModel):
     budget_code_id: int
     expense_code_id: int
     amount: float = Field(..., gt=0)
     narration: str = ""
     payee_name: str = ""
+    project_code_id: Optional[int] = None
     debit_account_id: Optional[int] = None
     credit_account_id: Optional[int] = None
     designated_approver_id: int
-    project_code_id: Optional[int] = None  # preferred; required in UI
-    line_items: List[PaymentLineIn] = []
-    amount_in_words: Optional[str] = None
 
 
 class PaymentAction(BaseModel):

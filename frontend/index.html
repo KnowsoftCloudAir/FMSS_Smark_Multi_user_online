@@ -71,11 +71,11 @@
         <!-- LOGIN CARD -->
         <div class="auth-card" id="login-card">
           <h2>Sign In</h2>
-          <p class="auth-hint">Use <code>company-slug/username</code> for firm users</p>
+          <p class="auth-hint">Use <code>company-slug/username</code> or just username if unique</p>
           <form id="login-form">
             <div class="form-group">
               <label>Company / Username</label>
-              <input type="text" id="username" required placeholder="demo/program" autocomplete="username" />
+              <input type="text" id="username" required placeholder="demo/admin  or  superadmin" autocomplete="username" />
             </div>
             <div class="form-group">
               <label>Password</label>
@@ -85,12 +85,21 @@
             <div id="login-error" class="error-msg" style="display:none;"></div>
           </form>
           <div class="demo-credentials">
-            <p class="demo-title">Demo login — Program Manager</p>
-            <p><strong>Username:</strong> <code>demo/program</code><br/>
-               <strong>Password:</strong> <code>Program@Knowsoft1!</code></p>
-            <p class="demo-note">Format: <code>company-slug/username</code> for firm users.</p>
+            <p class="demo-title">Demo login credentials</p>
+            <p><strong>Company admin</strong><br/>
+              Username: <code>demo/admin</code><br/>
+              Password: <code>Admin@Knowsoft1!</code></p>
+            <p><strong>Finance</strong> — <code>demo/finance</code> / <code>Finance@Knowsoft1!</code><br/>
+               <strong>Program</strong> — <code>demo/program</code> / <code>Program@Knowsoft1!</code></p>
+            <p><strong>Platform superadmin</strong><br/>
+              Username: <code>superadmin</code><br/>
+              Password: <code>Knowsoft@Super0160!</code></p>
+            <p class="demo-note">Use format <code>company-slug/username</code> for firm users.</p>
           </div>
           <p class="auth-switch">New firm? <a href="#" id="switch-to-register">Register company</a></p>
+          <p class="demo-hint">Demo company (full data): <code>demo/admin</code> · <code>Admin@Knowsoft1!</code>
+            · finance <code>Finance@Knowsoft1!</code> · program <code>Program@Knowsoft1!</code><br/>
+            Superadmin: <code>superadmin</code> · <code>Knowsoft@Super0160!</code></p>
         </div>
 
         <!-- REGISTER CARD -->
@@ -161,7 +170,6 @@
         <div class="nav-divider" id="admin-divider" style="display:none;"></div>
         
         <a href="#" class="nav-item" data-view="payments"><span class="icon">💳</span> Payment Requests</a>
-        <a href="#" class="nav-item" data-view="corrections"><span class="icon">✏️</span> Corrections</a>
         <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
         <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
@@ -219,7 +227,7 @@
               <table class="data-table" id="users-table">
                 <thead>
                   <tr>
-                    <th>ID</th><th>Co.</th><th>Username</th><th>Full Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th>
+                    <th>ID</th><th>Username</th><th>Full Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -271,8 +279,6 @@
               </div>
             </div>
             <form id="payment-form" class="form-grid" style="display:none;margin-bottom:20px;">
-              <div class="form-group"><label>Project code</label>
-                <select id="pay-project" required><option value="">— Select project * —</option></select></div>
               <div class="form-group">
                 <label>Budget Code *</label>
                 <select id="pay-budget" required></select>
@@ -287,13 +293,7 @@
               </div>
               <div class="form-group">
                 <label>Amount *</label>
-                <input type="number" id="pay-amount" step="0.01" min="0.01" required readonly title="Auto total from lines" />
-                <p class="hint" id="pay-amount-words" style="grid-column:1/-1;font-style:italic;color:#1A6B9A"></p>
-              <div style="grid-column:1/-1" class="card">
-                <h4>Expense lines (description · qty · unit cost)</h4>
-                <div id="pay-lines"></div>
-                <button type="button" class="btn btn-sm btn-outline" id="btn-add-pay-line">+ Add line</button>
-              </div>
+                <input type="number" id="pay-amount" step="0.01" min="0.01" required />
               </div>
               <div class="form-group">
                 <label>Payee Name</label>
@@ -306,6 +306,10 @@
               <div class="form-group">
                 <label>Credit Account (optional)</label>
                 <select id="pay-credit"><option value="">— Use finance default —</option></select>
+              </div>
+              <div class="form-group">
+                <label>Project Code</label>
+                <select id="pay-project"><option value="">— Select project —</option></select>
               </div>
               <div class="form-group full-width">
                 <label>Who should approve this budget line? *</label>
@@ -402,9 +406,7 @@
               <div class="form-group"><label>Status</label>
                 <select id="ast-status"><option value="active">Active</option><option value="under_repair">Under Repair</option></select>
               </div>
-              <div class="form-group"><label>Debit account</label><select id="ast-debit"><option value="">— Select —</option></select></div>
-              <div class="form-group"><label>Credit account</label><select id="ast-credit"><option value="">— Select —</option></select></div>
-              <div class="form-group"><label>Project</label><select id="ast-project"><option value="">— Optional —</option></select></div>
+              <div class="form-group"><label>Debit Account ID</label><input id="ast-debit" type="number" /></div>
               <div class="form-group"><label>Credit Account ID</label><input id="ast-credit" type="number" /></div>
               <div class="form-group full-width">
                 <button type="submit" class="btn btn-accent">Save Asset</button>
@@ -421,12 +423,6 @@
         </section>
 
         <section id="view-superadmin" class="view">
-          <div class="card" style="margin-bottom:1rem">
-            <h3>Demo data</h3>
-            <p class="hint">If finance tables are empty, reload sample COA, budgets, payments, inventory and procurement.</p>
-            <button type="button" class="btn btn-accent" onclick="reseedDemoData()">Reseed demo company data</button>
-          </div>
-
           <div class="card">
             <div class="card-header">
               <h3>Registered Firms</h3>
@@ -442,6 +438,16 @@
         </section>
 
         <section id="view-security" class="view">
+          <div class="card">
+            <h3>My Signature (for payment vouchers)</h3>
+            <p class="hint">Upload a clear signature image (PNG/JPG, max 500KB). Used on printable payment vouchers when you review or approve.</p>
+            <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+              <input type="file" id="sig-file" accept="image/png,image/jpeg,image/webp" />
+              <button type="button" class="btn btn-primary" id="btn-upload-sig">Upload Signature</button>
+              <img id="sig-preview" alt="Signature" style="max-height:60px;display:none;border:1px solid #ccc;padding:4px;background:#fff;" />
+            </div>
+          </div>
+
           <div class="card">
             <h3>Change Password</h3>
             <form id="pwd-form" class="form-grid">
@@ -525,24 +531,7 @@
           </div>
         </section>
 
-        <section id="view-corrections" class="view">
-          <div class="page-header"><h2>Correction requests</h2>
-            <p class="hint">Messages asking you to correct a posting. Open the transaction, amend, and resubmit.</p></div>
-          <div id="corrections-list" class="table-responsive"></div>
-          <div id="correction-edit-panel" style="display:none;margin-top:1rem" class="card">
-            <h3>Correct &amp; resubmit</h3>
-            <input type="hidden" id="corr-edit-id" />
-            <input type="hidden" id="corr-edit-jid" />
-            <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">
-              <div class="form-group"><label>Debit</label><input type="number" step="0.01" id="corr-edit-debit" /></div>
-              <div class="form-group"><label>Credit</label><input type="number" step="0.01" id="corr-edit-credit" /></div>
-              <div class="form-group" style="grid-column:1/-1"><label>Description</label><input type="text" id="corr-edit-desc" /></div>
-            </div>
-            <button type="button" class="btn btn-primary" id="btn-resubmit-corr">Resubmit correction</button>
-          </div>
-        </section>
         <section id="view-bank-recon" class="view">
-            <!-- Bank recon: statement balance → cashbook; bank charges; approve stamp; PDF sync -->
           <div class="card">
             <div class="card-header">
               <h3>🏦 Bank Reconciliation Statement</h3>
@@ -642,8 +631,8 @@
               <div class="form-group"><label>Bank</label><input id="ven-bank" /></div>
               <div class="form-group"><label>Amount</label><input id="ven-amt" type="number" step="0.01" /></div>
               <div class="form-group"><label>Description</label><input id="ven-desc" /></div>
-              <div class="form-group"><label>Debit Account ID</label><select id="ven-debit" class="coa-select"><option value="">— COA —</option></select><!-- class="coa-select" type="number" /></div>
-              <div class="form-group"><label>Credit account</label><select id="ven-credit" class="coa-select"></select></div>
+              <div class="form-group"><label>Debit Account ID</label><input id="ven-debit" type="number" /></div>
+              <div class="form-group"><label>Credit Account ID</label><input id="ven-credit" type="number" /></div>
               <div class="form-group full-width"><button class="btn btn-accent" type="submit">Save Vendor</button></div>
             </form>
             <div class="table-responsive">
@@ -657,112 +646,38 @@
 
         <section id="view-inventory" class="view"><div class="card"><h3>Inventory</h3><p>Redirecting…</p><button class="btn btn-primary" onclick="showView('inventory-full')">Open Inventory Register</button></div></section>
         <section id="view-assets" class="view"><div class="card"><h3>Fixed Assets</h3><p>Redirecting…</p><button class="btn btn-primary" onclick="showView('assets-reg')">Open Asset Register</button></div></section>
-        <section id="view-procurement" class="view">
-          <div class="page-header"><h2>Procurement</h2>
-            <p class="hint">Committees score quotes (avg → 60%). Award creates a Purchase Order for the requesting officer, who submits it into payment approval. Archives download all documents.</p></div>
-          <div class="card" style="margin-bottom:1rem">
-            <h3>Procurement committee</h3>
-            <div style="display:flex;flex-wrap:gap:.5rem;align-items:end">
-              <div class="form-group"><label>Committee name</label><input id="cm-name" placeholder="Evaluation Committee" /></div>
-              <button type="button" class="btn btn-secondary" id="btn-create-committee">Create committee</button>
-            </div>
-            <div id="committee-list" style="margin-top:.75rem"></div>
-            <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:.5rem;margin-top:.5rem">
-              <div class="form-group"><label>Committee</label><select id="cm-pick"></select></div>
-              <div class="form-group"><label>Member name</label><input id="cm-member" /></div>
-              <div class="form-group"><label>Role</label><select id="cm-role"><option>Member</option><option>Chair</option><option>Secretary</option></select></div>
-              <button type="button" class="btn btn-sm btn-outline" id="btn-add-member">Add member</button>
-            </div>
-          </div>
-          <div class="card" style="margin-bottom:1rem">
-            <h3>Purchase orders (requesting officer)</h3>
-            <div id="po-list" class="table-responsive"></div>
-          </div>
-          <div class="card" style="margin-bottom:1rem">
-            <h3>New RFQ</h3>
-              <div class="form-group"><label>Committee</label><select id="rfq-committee"></select></div>
-            <div class="form-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:.6rem">
-              <div class="form-group"><label>Title *</label><input id="rfq-title" /></div>
-              <div class="form-group"><label>Service</label><select id="rfq-service"></select></div>
-              <div class="form-group"><label>Debit account</label><select id="rfq-debit" class="coa-select"></select></div>
-              <div class="form-group"><label>Credit account</label><select id="rfq-credit" class="coa-select"></select></div>
-              <div class="form-group"><label>Project</label><select id="rfq-project"></select></div>
-              <div class="form-group" style="grid-column:1/-1"><label>Description</label><input id="rfq-desc" /></div>
-            </div>
-            <button type="button" class="btn btn-primary" id="btn-create-rfq">Create RFQ</button>
-          </div>
-          <div id="rfq-list" class="table-responsive"></div>
-          <div id="rfq-detail" class="card" style="display:none;margin-top:1rem">
-            <h3 id="rfq-detail-title">Quotes</h3>
-            <div class="form-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:.5rem;margin-bottom:.75rem">
-              <div class="form-group"><label>Vendor</label><select id="quote-vendor"></select></div>
-              <div class="form-group"><label>Or vendor name</label><input id="quote-vname" /></div>
-              <div class="form-group"><label>Amount</label><input type="number" step="0.01" id="quote-amt" /></div>
-              <div class="form-group"><label>Tax</label><input type="number" step="0.01" id="quote-tax" value="0" /></div>
-              <div class="form-group"><label>Delivery days</label><input type="number" id="quote-days" value="0" /></div>
-            </div>
-            <button type="button" class="btn btn-sm btn-secondary" id="btn-add-quote">Add quote</button>
-            <div style="display:flex;gap:.5rem;margin-top:.5rem;flex-wrap:wrap">
-              <button type="button" class="btn btn-sm btn-outline" id="btn-committee-report">Committee report PDF</button>
-              <button type="button" class="btn btn-sm btn-outline" id="btn-proc-archive">Download archive (ZIP)</button>
-              <label class="btn btn-sm btn-secondary">Upload doc<input type="file" id="rfq-doc-file" style="display:none" /></label>
-            </div>
-            <div id="quote-list" class="table-responsive" style="margin-top:.75rem"></div>
-          </div>
-        </section>
         <section id="view-vendors" class="view"><div class="card"><h3>Vendors</h3><p>Redirecting…</p><button class="btn btn-primary" onclick="showView('vendors-full')">Open Vendor Register</button></div></section>
         <section id="view-reports" class="view">
           <div class="card">
-            <h3>Financial Reports</h3>
-            <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px;">
-              <button class="btn btn-primary" id="btn-load-tb">Trial Balance</button>
-              <button class="btn btn-secondary" id="btn-load-ledger">General Ledger</button>
-              <a class="btn btn-outline" href="/api/reports/trial-balance/export" data-auth-dl>TB Excel/CSV</a>
-              <a class="btn btn-outline" href="/api/reports/trial-balance/pdf" data-auth-dl>TB PDF</a>
-              <a class="btn btn-outline" href="/api/reports/ledger/pdf" data-auth-dl>Ledger PDF</a>
-              <a class="btn btn-outline" href="/api/reports/budget-variance/pdf" data-auth-dl>Variance PDF</a>
-              <a class="btn btn-outline" href="/api/reports/bank-recon/pdf" data-auth-dl>Bank Recon PDF</a>
-              <a class="btn btn-outline" href="/api/reports/ledger/export">Ledger CSV</a>
-              <a class="btn btn-outline" href="/api/payments/export">Payments CSV</a>
-              <a class="btn btn-outline" href="/api/assets/export">Assets CSV</a>
-              <a class="btn btn-outline" href="/api/inventory/export">Inventory CSV</a>
-              <a class="btn btn-outline" href="/api/vendors/export">Vendors CSV</a>
-            </div>
-            <div id="stored-reports-panel">
-              <h3>Synchronised reports (internal memory)</h3>
-              <div id="stored-reports-list"></div>
-              <button type="button" class="btn btn-sm btn-outline" id="btn-refresh-stored">Refresh stored</button>
-            </div>
-            <div class="card" style="margin-bottom:1rem">
-              <h3>Project report</h3>
-              <div style="display:flex;flex-wrap:gap:.5rem;align-items:end">
-                <div class="form-group"><label>Project</label><select id="rpt-project"></select></div>
-                <div class="form-group"><label>From</label><input type="date" id="rpt-proj-from" /></div>
-                <div class="form-group"><label>To</label><input type="date" id="rpt-proj-to" /></div>
-                <button type="button" class="btn btn-primary" id="btn-load-project-rpt">View</button>
-                <a class="btn btn-outline" id="btn-pdf-project-rpt" href="#">PDF</a>
+            <h3>Financial &amp; Management Reports</h3>
+            <p class="hint">Select a report, load to view on screen, then download PDF or Excel. All PDFs include company name, address, logo and reporting currency. IFRS statements show the applicable standard on each line.</p>
+            <div class="form-grid" style="margin:12px 0;">
+              <div class="form-group full-width">
+                <label>Report</label>
+                <select id="report-select">
+                  <option value="">— Select report —</option>
+                  <option value="trial-balance">Trial Balance</option>
+                  <option value="ledger">General Ledger</option>
+                  <option value="budget-variance">Budget &amp; Variance (by project)</option>
+                  <option value="ifrs-position">Statement of Financial Position (IAS 1)</option>
+                  <option value="ifrs-performance">Statement of Financial Performance (IAS 1 / IFRS 15)</option>
+                  <option value="ifrs-cashflow">Statement of Cash Flows (IAS 7)</option>
+                  <option value="payments">Payment Requests Register</option>
+                  <option value="assets">Fixed Asset Register</option>
+                  <option value="inventory">Inventory Register</option>
+                  <option value="vendors">Vendor / Procurement Register</option>
+                  <option value="bank-recon">Bank Reconciliation</option>
+                </select>
               </div>
-              <div id="project-report-out" class="table-responsive"></div>
-            </div>
-            <div class="card" style="margin-bottom:1rem">
-              <h3>Financial statements</h3>
-              <p class="hint">Set period (or year) then view. Figures trail to journal source; request correction from trail.</p>
-              <div style="display:flex;flex-wrap:gap:.5rem;align-items:end">
-                <div class="form-group"><label>From</label><input type="date" id="fs-from" /></div>
-                <div class="form-group"><label>To</label><input type="date" id="fs-to" /></div>
-                <div class="form-group"><label>Or year</label><input type="number" id="fs-year" placeholder="2026" min="2000" max="2100" /></div>
+              <div class="form-group">
+                <button type="button" class="btn btn-primary" id="btn-load-report">Load / View</button>
               </div>
-              <div style="display:flex;flex-wrap:gap:.5rem;margin-top:.5rem">
-                <button type="button" class="btn btn-secondary" id="btn-load-sfp">Statement of Financial Position</button>
-                <button type="button" class="btn btn-secondary" id="btn-load-sfpn">Statement of Financial Performance</button>
-                <button type="button" class="btn btn-secondary" id="btn-load-scf">Statement of Cash Flows</button>
+              <div class="form-group">
+                <button type="button" class="btn btn-secondary" id="btn-dl-report-pdf">Download PDF</button>
               </div>
-              <div style="display:flex;flex-wrap:gap:.5rem;margin-top:.5rem">
-                <a class="btn btn-outline btn-sm" id="btn-pdf-sfp" href="#">SFP PDF</a>
-                <a class="btn btn-outline btn-sm" id="btn-pdf-sfpn" href="#">Performance PDF</a>
-                <a class="btn btn-outline btn-sm" id="btn-pdf-scf" href="#">Cash Flow PDF</a>
+              <div class="form-group">
+                <button type="button" class="btn btn-outline" id="btn-dl-report-csv">Download Excel/CSV</button>
               </div>
-              <div id="fs-report-out" class="table-responsive" style="margin-top:1rem"></div>
             </div>
             <div id="report-output" class="table-responsive"></div>
           </div>

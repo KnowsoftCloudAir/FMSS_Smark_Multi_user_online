@@ -1,62 +1,3 @@
-
-/** Force file download (browser still chooses folder once; avoids opening PDF in tab). */
-async function loadCoaOptions() {
-  try {
-    let rows = await api("/api/finance/coa/options");
-    if (!rows || !rows.length) rows = await api("/api/finance/coa");
-    return (rows || []).map(a => ({
-      id: a.id,
-      label: a.label || (`${a.code} — ${a.name}`),
-      code: a.code, name: a.name,
-    }));
-  } catch (e) {
-    try {
-      const rows = await api("/api/finance/coa");
-      return (rows || []).map(a => ({ id: a.id, label: `${a.code} — ${a.name}`, code: a.code, name: a.name }));
-    } catch (e2) { return []; }
-  }
-}
-
-async function fillCoaSelect(sel, selectedId) {
-  if (!sel) return;
-  const opts = await loadCoaOptions();
-  const cur = selectedId != null ? String(selectedId) : (sel.value || "");
-  sel.innerHTML = `<option value="">— Select account —</option>` +
-    opts.map(o => `<option value="${o.id}">${o.label}</option>`).join("");
-  if (cur) sel.value = cur;
-}
-
-async function loadAllCoaSelects(root) {
-  const scope = root || document;
-  const nodes = scope.querySelectorAll("select.coa-select, #pay-debit, #pay-credit, #pd-debit, #pd-credit, #ast-debit, #ast-credit, #ven-debit, #ven-credit, #rfq-debit, #rfq-credit, #corr-debit, #corr-credit");
-  const opts = await loadCoaOptions();
-  nodes.forEach(sel => {
-    const cur = sel.value;
-    sel.innerHTML = `<option value="">— Select account —</option>` +
-      opts.map(o => `<option value="${o.id}">${o.label}</option>`).join("");
-    if (cur) sel.value = cur;
-  });
-}
-
-async function forceDownload(url, filename) {
-  const res = await fetch(url.startsWith("http") ? url : (API + url), {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (!res.ok) {
-    let msg = "Download failed";
-    try { const j = await res.json(); msg = j.detail || msg; } catch (e) {}
-    throw new Error(msg);
-  }
-  const blob = await res.blob();
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename || "report.pdf";
-  a.style.display = "none";
-  document.body.appendChild(a);
-  a.click();
-  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
-}
-
 const API = "";
 let token = localStorage.getItem("km_token");
 let currentUser = JSON.parse(localStorage.getItem("km_user") || "null");
@@ -354,19 +295,10 @@ document.getElementById("menu-toggle")?.addEventListener("click", () => {
 /* ---------- Users ---------- */
 async function loadUsers() {
   try {
-    let users;
-    try {
-      users = await api("/api/admin/users");
-    } catch (e1) {
-      if (currentUser && currentUser.role === "superadmin") {
-        users = await api("/api/superadmin/users");
-      } else throw e1;
-    }
+    const users = await api("/api/admin/users");
     const tbody = document.querySelector("#users-table tbody");
-    if (!tbody) return;
     tbody.innerHTML = "";
-    const kpi = document.getElementById("kpi-users");
-    if (kpi) kpi.textContent = users.length;
+    document.getElementById("kpi-users").textContent = users.length;
     users.forEach(u => {
       const perms = [];
       if (u.can_access_finance) perms.push("Finance");
@@ -378,7 +310,6 @@ async function loadUsers() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${u.id}</td>
-        <td>${u.company_id != null ? u.company_id : "—"}</td>
         <td><strong>${u.username}</strong></td>
         <td>${u.full_name || "—"}</td>
         <td>${u.email}</td>
@@ -880,10 +811,7 @@ async function loadPaymentFormData() {
     fill("pay-debit", coa, r => `${r.code} - ${r.name}`);
     fill("pay-credit", coa, r => `${r.code} - ${r.name}`);
     fill("pay-approver", approvers, r => `${r.full_name || r.username} (${r.role})`);
-  } catch (ex) {
-    console.warn(ex);
-    alert("Could not load payment form lists: " + (ex.message || ex) + "\nLog in as demo/finance and ensure demo data is seeded (superadmin → Reseed demo).");
-  }
+  } catch (ex) { console.warn(ex); }
 }
 
 document.getElementById("pay-expense")?.addEventListener("change", function () {
@@ -938,10 +866,6 @@ async function loadPayments() {
     const role = currentUser.role;
     tbody.innerHTML = rows.map(p => {
       let actions = "";
-      if ((p.status === "submitted" || p.status === "program_approved") && ["finance", "company_admin"].includes(role)) {
-        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
-        actions += `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Edit accounts</button> `;
-      }
       if (p.status === "submitted" && ["program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-success" onclick="actPay(${p.id},'program-approve')">Program Approve</button> `;
       }
@@ -950,11 +874,6 @@ async function loadPayments() {
       }
       if (p.status === "finance_approved" && ["finance", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-accent" onclick="actPay(${p.id},'pay')">Mark Paid</button> `;
-        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
-        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
-      }
-      if (p.status === "paid") {
-        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
       }
       if (["submitted", "program_approved"].includes(p.status) && ["finance", "program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-danger" onclick="actPay(${p.id},'reject')">Reject</button>`;
@@ -1231,10 +1150,6 @@ loadPayments = async function () {
     const role = currentUser.role;
     tbody.innerHTML = rows.map(p => {
       let actions = `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Open</button> `;
-      if ((p.status === "submitted" || p.status === "program_approved") && ["finance", "company_admin"].includes(role)) {
-        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
-        actions += `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Edit accounts</button> `;
-      }
       if (p.status === "submitted" && ["program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-success" onclick="actPay(${p.id},'program-approve')">Program Approve</button> `;
       }
@@ -1243,11 +1158,6 @@ loadPayments = async function () {
       }
       if (p.status === "finance_approved" && ["finance", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-accent" onclick="actPay(${p.id},'pay')">Mark Paid</button> `;
-        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
-        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
-      }
-      if (p.status === "paid") {
-        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
       }
       if (["submitted", "program_approved"].includes(p.status) && ["finance", "program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-danger" onclick="actPay(${p.id},'reject')">Reject</button>`;
@@ -1405,8 +1315,6 @@ if (origAssetSubmit) {
           useful_life: parseFloat(document.getElementById("ast-life")?.value || 0),
           status: document.getElementById("ast-status")?.value || "active",
           debit_account_id: document.getElementById("ast-debit")?.value ? parseInt(document.getElementById("ast-debit").value) : null,
-          credit_account_id: document.getElementById("ast-credit")?.value ? parseInt(document.getElementById("ast-credit").value) : null,
-          project_code_id: document.getElementById("ast-project")?.value ? parseInt(document.getElementById("ast-project").value) : null,
           credit_account_id: document.getElementById("ast-credit")?.value ? parseInt(document.getElementById("ast-credit").value) : null,
         }),
       });
@@ -1916,13 +1824,6 @@ showView = function (name) {
 };
 
 // Voucher PDF from payment detail
-document.addEventListener("click", (e) => {
-  if (e.target && e.target.id === "btn-print-voucher") {
-    const pid = document.getElementById("payment-detail-modal")?.dataset?.pid;
-    if (pid) printVoucher(pid);
-  }
-});
-
 window.downloadVoucher = async function (id) {
   try { await authDownload(`/api/reports/voucher/${id}/pdf`, `voucher_${id}.pdf`); }
   catch (ex) { alert(ex.message); }
@@ -1993,909 +1894,274 @@ window.downloadVoucher = async function (id) {
     startApp();
   }
 })();
+/* ---- Project codes on payment + finance account dropdowns + reports dropdown + signature ---- */
 
-/* ===== Bank recon session, stamp, sync, corrections resubmit ===== */
-let _lastBrSessionId = null;
-let _lastStoredMeta = null;
-
-document.getElementById("btn-save-br-session")?.addEventListener("click", async () => {
-  const acc = document.getElementById("br-account")?.value || document.getElementById("bank-rec-account")?.value;
-  const form = new FormData();
-  form.append("account_id", acc || "0");
-  form.append("statement_balance", document.getElementById("br-statement-balance")?.value || "0");
-  form.append("book_balance", document.getElementById("br-book-balance")?.value || "0");
-  form.append("bank_charges", document.getElementById("br-bank-charges")?.value || "0");
-  form.append("bank_charges_note", document.getElementById("br-charges-note")?.value || "");
-  form.append("unpresented_cheques", document.getElementById("br-unpresented")?.value || "0");
-  form.append("deposits_in_transit", document.getElementById("br-deposits")?.value || "0");
-  try {
-    const res = await fetch(API + "/api/finance/bank-recon/session", {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Save failed");
-    _lastBrSessionId = data.id;
-    document.getElementById("br-session-info").textContent =
-      `Session #${data.id} saved (draft). Statement ${data.statement_balance} → Cashbook ${data.book_balance}. Approve when ready.`;
-    loadBrSessions();
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-approve-br")?.addEventListener("click", async () => {
-  if (!_lastBrSessionId) {
-    alert("Save recon figures first");
-    return;
-  }
-  try {
-    const res = await fetch(API + `/api/finance/bank-recon/session/${_lastBrSessionId}/approve`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` },
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Approve failed");
-    document.getElementById("br-session-info").textContent =
-      `APPROVED — Stamp: ${data.stamp}. You can download the PDF.`;
-    loadBrSessions();
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-dl-br-pdf")?.addEventListener("click", async (e) => {
-  e.preventDefault();
-  const q = _lastBrSessionId ? `?session_id=${_lastBrSessionId}` : "";
-  try {
-    const res = await fetch(API + "/api/reports/bank-recon/pdf" + q, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) throw new Error("Download failed");
-    const blob = await res.blob();
-    const stored = res.headers.get("X-Stored-Path") || "";
-    const rtype = res.headers.get("X-Report-Type") || "bank_recon";
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `bank_reconciliation_${_lastBrSessionId || "current"}.pdf`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    _lastStoredMeta = {
-      report_type: rtype,
-      title: "Bank Reconciliation",
-      filename: a.download,
-      file_path: stored,
-    };
-    const syncBtn = document.getElementById("btn-sync-br-pdf");
-    if (syncBtn) syncBtn.style.display = "inline-block";
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-sync-br-pdf")?.addEventListener("click", async () => {
-  if (!_lastStoredMeta) { alert("Download a report first"); return; }
-  const form = new FormData();
-  form.append("report_type", _lastStoredMeta.report_type);
-  form.append("title", _lastStoredMeta.title);
-  form.append("filename", _lastStoredMeta.filename);
-  form.append("file_path", _lastStoredMeta.file_path || "");
-  try {
-    const res = await fetch(API + "/api/reports/stored/sync", {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Sync failed");
-    alert(data.message || "Synchronised");
-    document.getElementById("btn-sync-br-pdf").style.display = "none";
-    loadStoredReports();
-  } catch (ex) { alert(ex.message); }
-});
-
-async function loadBrSessions() {
-  try {
-    const rows = await api("/api/finance/bank-recon/sessions");
-    const el = document.getElementById("br-sessions");
-    if (!el) return;
-    let h = `<table class="data-table"><thead><tr><th>ID</th><th>Statement</th><th>Cashbook</th><th>Charges</th><th>Status</th><th>Stamp</th><th></th></tr></thead><tbody>`;
-    (rows || []).forEach(s => {
-      h += `<tr><td>${s.id}</td><td>${Number(s.statement_balance).toLocaleString()}</td>
-        <td>${Number(s.book_balance).toLocaleString()}</td>
-        <td>${Number(s.bank_charges||0).toLocaleString()}</td>
-        <td>${s.status}</td><td>${s.approver_stamp || "—"}</td>
-        <td><button class="btn btn-sm btn-outline" onclick="_lastBrSessionId=${s.id};document.getElementById('br-session-info').textContent='Selected session #${s.id}'">Select</button></td></tr>`;
-    });
-    h += "</tbody></table>";
-    el.innerHTML = h;
-  } catch (e) {}
-}
-
-async function loadStoredReports() {
-  try {
-    const rows = await api("/api/reports/stored");
-    const el = document.getElementById("stored-reports-list");
-    if (!el) return;
-    if (!rows.length) { el.innerHTML = "<p class='hint'>No synchronised reports yet.</p>"; return; }
-    let h = `<table class="data-table"><thead><tr><th>Title</th><th>Type</th><th>File</th><th>Date</th><th></th></tr></thead><tbody>`;
-    rows.forEach(r => {
-      h += `<tr><td>${r.title}</td><td>${r.report_type}</td><td>${r.filename}</td><td>${r.created_at||""}</td>
-        <td><a class="btn btn-sm btn-outline" href="${API}/api/reports/stored/${r.id}/download" data-auth-dl>View</a></td></tr>`;
-    });
-    h += "</tbody></table>";
-    el.innerHTML = h;
-  } catch (e) {}
-}
-document.getElementById("btn-refresh-stored")?.addEventListener("click", loadStoredReports);
-
-async function loadCorrectionsInbox() {
-  try {
-    const rows = await api("/api/finance/correction-requests");
-    const el = document.getElementById("corrections-list");
-    if (!el) return;
-    let h = `<table class="data-table"><thead><tr><th>From</th><th>Message</th><th>JE</th><th>Status</th><th></th></tr></thead><tbody>`;
-    (rows || []).forEach(c => {
-      h += `<tr><td>${c.from_user || c.from_user_id || ""}</td><td>${c.message || ""}</td>
-        <td>${c.journal_entry_id || ""}</td><td>${c.status}</td>
-        <td>${c.status === "open" || c.status === "in_progress" ?
-          `<button class="btn btn-sm btn-primary" onclick="openCorrectionEdit(${c.id},${c.journal_entry_id||0})">Open & correct</button>` : "—"}</td></tr>`;
-    });
-    h += "</tbody></table>";
-    el.innerHTML = h;
-  } catch (ex) {
-    const el = document.getElementById("corrections-list");
-    if (el) el.innerHTML = `<p class="hint">${ex.message}</p>`;
-  }
-}
-
-window.openCorrectionEdit = function (cid, jid) {
-  document.getElementById("correction-edit-panel").style.display = "block";
-  document.getElementById("corr-edit-id").value = cid;
-  document.getElementById("corr-edit-jid").value = jid;
-};
-
-document.getElementById("btn-resubmit-corr")?.addEventListener("click", async () => {
-  const cid = document.getElementById("corr-edit-id").value;
-  const form = new FormData();
-  form.append("debit", document.getElementById("corr-edit-debit").value || "0");
-  form.append("credit", document.getElementById("corr-edit-credit").value || "0");
-  form.append("description", document.getElementById("corr-edit-desc").value || "");
-  try {
-    const res = await fetch(API + `/api/finance/correction-request/${cid}/resubmit`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert(data.message);
-    document.getElementById("correction-edit-panel").style.display = "none";
-    loadCorrectionsInbox();
-  } catch (ex) { alert(ex.message); }
-});
-
-const _showViewBr = typeof showView === "function" ? showView : null;
-if (typeof showView === "function") {
-  const _sv = showView;
-  window.showView = function (name) {
-    _sv(name);
-    if (name === "bank-recon") { loadBankRecon(); loadBrSessions(); }
-    if (name === "corrections") loadCorrectionsInbox();
-    if (name === "reports") loadStoredReports();
+(function enhancePaymentFormData() {
+  const orig = loadPaymentFormData;
+  if (typeof orig !== "function") return;
+  loadPaymentFormData = async function () {
+    await orig();
+    try {
+      const projects = await api("/api/finance/projects");
+      const el = document.getElementById("pay-project");
+      if (el) {
+        el.innerHTML = '<option value="">— Select project —</option>';
+        projects.forEach(function (p) {
+          const o = document.createElement("option");
+          o.value = p.id;
+          o.textContent = p.code + " — " + p.name;
+          el.appendChild(o);
+        });
+      }
+    } catch (e) { console.warn(e); }
   };
-}
+})();
 
-
-/* ===== Payment lines, project, amount in words, FS reports ===== */
-function numberToWordsSimple(n) {
-  // Client-side mirror; server stores authoritative amount_in_words
-  n = Math.abs(Number(n) || 0);
-  if (!n) return "Zero Naira Only";
-  return "Amount: " + n.toLocaleString(undefined, {minimumFractionDigits: 2}) + " (see voucher for words)";
-}
-
-function ensurePayLines() {
-  const box = document.getElementById("pay-lines");
-  if (!box || box.children.length) return;
-  addPayLine();
-}
-
-function addPayLine(desc="", qty=1, unit=0) {
-  const box = document.getElementById("pay-lines");
-  if (!box) return;
-  const row = document.createElement("div");
-  row.className = "pay-line";
-  row.style.cssText = "display:grid;grid-template-columns:2fr 1fr 1fr 1fr auto;gap:.4rem;margin-bottom:.4rem";
-  row.innerHTML = `
-    <input class="pl-desc" placeholder="Description" value="${desc}" />
-    <input class="pl-qty" type="number" step="0.01" min="0" value="${qty}" />
-    <input class="pl-unit" type="number" step="0.01" min="0" value="${unit}" />
-    <input class="pl-amt" type="number" step="0.01" readonly value="${(qty*unit).toFixed(2)}" />
-    <button type="button" class="btn btn-sm btn-outline pl-remove">×</button>`;
-  box.appendChild(row);
-  const recalc = () => {
-    const q = parseFloat(row.querySelector(".pl-qty").value) || 0;
-    const u = parseFloat(row.querySelector(".pl-unit").value) || 0;
-    row.querySelector(".pl-amt").value = (q * u).toFixed(2);
-    sumPayLines();
-  };
-  row.querySelector(".pl-qty").addEventListener("input", recalc);
-  row.querySelector(".pl-unit").addEventListener("input", recalc);
-  row.querySelector(".pl-remove").addEventListener("click", () => { row.remove(); sumPayLines(); });
-}
-
-function sumPayLines() {
-  let total = 0;
-  document.querySelectorAll("#pay-lines .pl-amt").forEach(el => { total += parseFloat(el.value) || 0; });
-  const amt = document.getElementById("pay-amount");
-  if (amt) amt.value = total.toFixed(2);
-  const w = document.getElementById("pay-amount-words");
-  if (w) w.textContent = total ? numberToWordsSimple(total) : "";
-}
-
-document.getElementById("btn-add-pay-line")?.addEventListener("click", () => addPayLine());
-
-const _loadPayForm = loadPaymentFormData;
-loadPaymentFormData = async function () {
-  await _loadPayForm();
-  ensurePayLines();
-  try {
-    const projects = await api("/api/projects");
-    const sel = document.getElementById("pay-project");
-    if (sel) {
-      sel.innerHTML = `<option value="">— Select project —</option>` +
-        projects.map(p => `<option value="${p.id}">${p.code} — ${p.name}</option>`).join("");
-    }
-  } catch (e) {}
-};
-
-// Override payment submit to include lines + project
-document.getElementById("payment-form")?.addEventListener("submit", async (e) => {
-  // handled by existing listener - we patch by replacing is hard; use capture
+// Patch payment submit to include project_code_id
+document.getElementById("payment-form")?.addEventListener("submit", async function (e) {
+  // additional listener — primary may already exist; this won't double-submit if prevented
 }, true);
 
-// Replace submit handler by cloning
-(function () {
-  const form = document.getElementById("payment-form");
+// Override openPaymentDetail with finance dropdowns + voucher + rich audit
+window.openPaymentDetail = async function (id) {
+  try {
+    const p = await api("/api/payments/" + id);
+    document.getElementById("pd-title").textContent = p.request_no + " — " + (p.status || "");
+    var coaOpts = (p.chart_of_accounts || []).map(function (a) {
+      return '<option value="' + a.id + '"' + (a.id === p.debit_account_id ? " selected" : "") + ">" + a.label + "</option>";
+    }).join("");
+    var coaOptsCr = (p.chart_of_accounts || []).map(function (a) {
+      return '<option value="' + a.id + '"' + (a.id === p.credit_account_id ? " selected" : "") + ">" + a.label + "</option>";
+    }).join("");
+    var acctBlock = "";
+    if (p.can_edit_accounts) {
+      acctBlock =
+        '<div class="form-grid" style="margin-top:12px;border-top:1px solid #ddd;padding-top:12px;">' +
+        "<h4>Posting accounts (Finance)</h4>" +
+        '<div class="form-group"><label>Debit account</label><select id="pd-debit"><option value="">— Select —</option>' + coaOpts + "</select></div>" +
+        '<div class="form-group"><label>Credit account</label><select id="pd-credit"><option value="">— Select —</option>' + coaOptsCr + "</select></div>" +
+        "</div>";
+    } else {
+      acctBlock = "<p><strong>Debit:</strong> " + (p.debit_account || "—") + "</p><p><strong>Credit:</strong> " + (p.credit_account || "—") + "</p>";
+    }
+    var hist = (p.history || []).map(function (h) {
+      return "<li><strong>" + h.action + "</strong> by " + (h.actor || "") +
+        " — " + (h.comment || "") +
+        (h.amount_snapshot != null ? " · amt " + h.amount_snapshot : "") +
+        (h.debit_account_id ? " · Dr#" + h.debit_account_id : "") +
+        (h.credit_account_id ? " · Cr#" + h.credit_account_id : "") +
+        " <small>" + (h.at || "") + "</small></li>";
+    }).join("");
+    document.getElementById("pd-body").innerHTML =
+      "<p><strong>Payee:</strong> " + (p.payee_name || "—") + "</p>" +
+      "<p><strong>Amount:</strong> " + Number(p.amount).toLocaleString() + "</p>" +
+      "<p><strong>In words:</strong> " + (p.amount_in_words || "") + "</p>" +
+      "<p><strong>Budget:</strong> " + (p.budget_code || "") + " — " + (p.budget_description || "") + "</p>" +
+      "<p><strong>Expense:</strong> " + (p.expense_code || "") + " — " + (p.expense_description || "") + "</p>" +
+      "<p><strong>Project:</strong> " + (p.project_code || "—") + " " + (p.project_name || "") + "</p>" +
+      "<p><strong>Requester:</strong> " + (p.requester || "—") + "</p>" +
+      "<p><strong>Approver:</strong> " + (p.designated_approver || "—") + "</p>" +
+      "<p><strong>Narration:</strong> " + (p.narration || "—") + "</p>" +
+      acctBlock +
+      "<p style='margin-top:12px;'><button class='btn btn-sm btn-secondary' onclick='downloadVoucher(" + p.id + ")'>Print PDF Voucher</button></p>" +
+      "<h4>Attachments</h4><ul>" +
+      ((p.attachments || []).map(function (a) {
+        return '<li><a href="' + a.url + '" target="_blank">' + a.filename + "</a> (" + a.size_bytes + " bytes)</li>";
+      }).join("") || "<li>None</li>") +
+      "</ul><h4>Audit trail</h4><ul>" + (hist || "<li>None</li>") + "</ul>";
+    document.getElementById("payment-detail-modal").dataset.pid = id;
+    document.getElementById("payment-detail-modal").classList.add("open");
+  } catch (ex) { alert(ex.message); }
+};
+
+// Finance approve uses dropdown values from detail modal when present
+window.actPay = async function (id, action) {
+  var body = { comment: "" };
+  if (action === "finance-approve") {
+    var d = document.getElementById("pd-debit");
+    var c = document.getElementById("pd-credit");
+    if (d && d.value) body.debit_account_id = parseInt(d.value, 10);
+    if (c && c.value) body.credit_account_id = parseInt(c.value, 10);
+    if (!body.debit_account_id || !body.credit_account_id) {
+      // try open detail first
+      try {
+        await openPaymentDetail(id);
+        alert("Select Debit and Credit accounts in the payment detail, then click Finance Approve again.");
+        return;
+      } catch (e) {}
+      var debit = prompt("Debit account ID (required):");
+      var credit = prompt("Credit account ID (required):");
+      if (!debit || !credit) { alert("Debit and credit accounts are required"); return; }
+      body.debit_account_id = parseInt(debit, 10);
+      body.credit_account_id = parseInt(credit, 10);
+    }
+    body.comment = prompt("Comment (optional):") || "Accounts confirmed";
+  } else if (action === "reject") {
+    body.comment = prompt("Rejection reason:") || "Rejected";
+  }
+  try {
+    await api("/api/payments/" + id + "/" + action, { method: "POST", body: JSON.stringify(body) });
+    loadPayments();
+    try { openPaymentDetail(id); } catch (e) {}
+  } catch (ex) { alert(ex.message); }
+};
+
+// Include project on new payment — intercept by wrapping form submit after load
+document.addEventListener("DOMContentLoaded", function () {
+  var form = document.getElementById("payment-form");
   if (!form) return;
-  const clone = form.cloneNode(true);
-  form.parentNode.replaceChild(clone, form);
-  // re-bind add line on clone
-  document.getElementById("btn-add-pay-line")?.addEventListener("click", () => addPayLine());
-  document.getElementById("payment-form")?.addEventListener("submit", async (e) => {
+  form.addEventListener("submit", async function (e) {
+    // If default handler already ran, this is extra - we need one handler only
+  });
+});
+
+// Rebuild payment form submit cleanly
+(function () {
+  var form = document.getElementById("payment-form");
+  if (!form) return;
+  form.onsubmit = async function (e) {
     e.preventDefault();
-    const lines = [];
-    document.querySelectorAll("#pay-lines .pay-line").forEach(row => {
-      const description = row.querySelector(".pl-desc").value;
-      const quantity = parseFloat(row.querySelector(".pl-qty").value) || 0;
-      const unit_cost = parseFloat(row.querySelector(".pl-unit").value) || 0;
-      const amount = quantity * unit_cost;
-      if (description || amount) lines.push({ description, quantity, unit_cost, amount });
-    });
-    sumPayLines();
-    const debit = document.getElementById("pay-debit")?.value;
-    const credit = document.getElementById("pay-credit")?.value;
-    const project = document.getElementById("pay-project")?.value;
+    var debit = document.getElementById("pay-debit")?.value;
+    var credit = document.getElementById("pay-credit")?.value;
+    var proj = document.getElementById("pay-project")?.value;
     try {
-      if (!project) { alert("Project code is required"); return; }
       await api("/api/payments/request", {
         method: "POST",
         body: JSON.stringify({
-          budget_code_id: parseInt(document.getElementById("pay-budget").value),
-          expense_code_id: parseInt(document.getElementById("pay-expense").value),
-          project_code_id: parseInt(project),
+          budget_code_id: parseInt(document.getElementById("pay-budget").value, 10),
+          expense_code_id: parseInt(document.getElementById("pay-expense").value, 10),
           amount: parseFloat(document.getElementById("pay-amount").value),
           payee_name: document.getElementById("pay-payee").value,
           narration: document.getElementById("pay-narration").value,
-          debit_account_id: debit ? parseInt(debit) : null,
-          credit_account_id: credit ? parseInt(credit) : null,
-          designated_approver_id: parseInt(document.getElementById("pay-approver").value),
-          line_items: lines,
+          project_code_id: proj ? parseInt(proj, 10) : null,
+          debit_account_id: debit ? parseInt(debit, 10) : null,
+          credit_account_id: credit ? parseInt(credit, 10) : null,
+          designated_approver_id: parseInt(document.getElementById("pay-approver").value, 10),
         }),
       });
       alert("Payment request submitted");
-      e.target.reset();
-      document.getElementById("pay-lines").innerHTML = "";
-      document.getElementById("payment-form").style.display = "none";
+      form.reset();
+      form.style.display = "none";
       loadPayments();
     } catch (ex) { alert(ex.message); }
-  });
-  document.getElementById("btn-new-payment")?.addEventListener("click", () => {
-    document.getElementById("payment-form").style.display = "grid";
-    loadPaymentFormData();
-  });
-  document.getElementById("btn-cancel-payment")?.addEventListener("click", () => {
-    document.getElementById("payment-form").style.display = "none";
-  });
-})();
-
-function fsQuery() {
-  const from = document.getElementById("fs-from")?.value;
-  const to = document.getElementById("fs-to")?.value;
-  const year = document.getElementById("fs-year")?.value;
-  const q = new URLSearchParams();
-  if (year) q.set("year", year);
-  else {
-    if (from) q.set("start_date", from);
-    if (to) q.set("end_date", to);
-  }
-  return q.toString() ? "?" + q.toString() : "";
-}
-
-async function loadProjectsInto(selId) {
-  const projects = await api("/api/projects");
-  const sel = document.getElementById(selId);
-  if (!sel) return projects;
-  sel.innerHTML = projects.map(p => `<option value="${p.id}">${p.code} — ${p.name}</option>`).join("");
-  return projects;
-}
-
-document.getElementById("btn-load-project-rpt")?.addEventListener("click", async () => {
-  const id = document.getElementById("rpt-project")?.value;
-  if (!id) return alert("Select a project");
-  const from = document.getElementById("rpt-proj-from")?.value;
-  const to = document.getElementById("rpt-proj-to")?.value;
-  let url = `/api/reports/project/${id}`;
-  const q = [];
-  if (from) q.push("start_date=" + from);
-  if (to) q.push("end_date=" + to);
-  if (q.length) url += "?" + q.join("&");
-  try {
-    const d = await api(url);
-    let h = `<p><strong>${d.project.code}</strong> — ${d.project.name} | Budget: ${Number(d.totals.budget).toLocaleString()} | Payments: ${Number(d.totals.payments).toLocaleString()} | Variance: ${Number(d.totals.variance).toLocaleString()}</p>`;
-    h += `<table class="data-table"><thead><tr><th>Date</th><th>Entry</th><th>Description</th><th>Debit</th><th>Credit</th><th>Trail</th></tr></thead><tbody>`;
-    (d.lines || []).forEach(L => {
-      h += `<tr><td>${L.date}</td><td>${L.entry_no}</td><td>${L.description||""}</td>
-        <td>${Number(L.debit||0).toLocaleString()}</td><td>${Number(L.credit||0).toLocaleString()}</td>
-        <td><button class="btn btn-sm btn-outline" onclick="openTrail(${L.id})">Trail</button></td></tr>`;
-    });
-    h += `</tbody></table>`;
-    document.getElementById("project-report-out").innerHTML = h;
-    const pdf = document.getElementById("btn-pdf-project-rpt");
-    if (pdf) pdf.href = API + `/api/reports/project/${id}/pdf` + (q.length ? "?" + q.join("&") : "");
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-load-sfp")?.addEventListener("click", async () => {
-  try {
-    const d = await api("/api/reports/financial-position" + fsQuery());
-    let h = `<h4>Statement of Financial Position as at ${d.as_at}</h4>`;
-    h += `<p><strong>Total assets:</strong> ${Number(d.total_assets).toLocaleString()} · <strong>Liabilities:</strong> ${Number(d.total_liabilities).toLocaleString()} · <strong>Equity:</strong> ${Number(d.total_equity).toLocaleString()}</p>`;
-    h += `<table class="data-table"><thead><tr><th>Code</th><th>Account</th><th>Balance</th><th></th></tr></thead><tbody>`;
-    [["Assets", d.assets], ["Liabilities", d.liabilities], ["Equity", d.equity]].forEach(([label, rows]) => {
-      h += `<tr><td colspan="4"><strong>${label}</strong></td></tr>`;
-      (rows || []).forEach(a => {
-        h += `<tr><td>${a.code}</td><td>${a.name}</td><td>${Number(a.balance).toLocaleString()}</td>
-          <td class="hint">Trail via ledger / COA ${a.code}</td></tr>`;
-      });
-    });
-    h += `</tbody></table>`;
-    document.getElementById("fs-report-out").innerHTML = h;
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-load-sfpn")?.addEventListener("click", async () => {
-  try {
-    const d = await api("/api/reports/financial-performance" + fsQuery());
-    let h = `<h4>Statement of Financial Performance</h4>
-      <p>Income: ${Number(d.total_income).toLocaleString()} · Expenses: ${Number(d.total_expenses).toLocaleString()} · Surplus/(Deficit): ${Number(d.surplus_deficit).toLocaleString()}</p>
-      <table class="data-table"><thead><tr><th>Code</th><th>Account</th><th>Amount</th></tr></thead><tbody>`;
-    h += `<tr><td colspan="3"><strong>Income</strong></td></tr>`;
-    (d.income||[]).forEach(a => { h += `<tr><td>${a.code}</td><td>${a.name}</td><td>${Number(a.balance).toLocaleString()}</td></tr>`; });
-    h += `<tr><td colspan="3"><strong>Expenses</strong></td></tr>`;
-    (d.expenses||[]).forEach(a => { h += `<tr><td>${a.code}</td><td>${a.name}</td><td>${Number(a.balance).toLocaleString()}</td></tr>`; });
-    h += `</tbody></table>`;
-    document.getElementById("fs-report-out").innerHTML = h;
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-load-scf")?.addEventListener("click", async () => {
-  try {
-    const d = await api("/api/reports/cash-flow" + fsQuery());
-    let h = `<h4>Statement of Cash Flows</h4>
-      <p>Operating: ${Number(d.operating).toLocaleString()} · Investing: ${Number(d.investing).toLocaleString()} · Financing: ${Number(d.financing).toLocaleString()} · Net: ${Number(d.net_change).toLocaleString()}</p>
-      <table class="data-table"><thead><tr><th>Date</th><th>Entry</th><th>Description</th><th>Net</th><th>Bucket</th><th>Trail</th></tr></thead><tbody>`;
-    (d.lines||[]).forEach(L => {
-      h += `<tr><td>${L.date}</td><td>${L.entry_no}</td><td>${L.description||""}</td>
-        <td>${Number(L.net).toLocaleString()}</td><td>${L.bucket}</td>
-        <td><button class="btn btn-sm btn-outline" onclick="openTrail(${L.id})">Trail</button></td></tr>`;
-    });
-    h += `</tbody></table>`;
-    document.getElementById("fs-report-out").innerHTML = h;
-  } catch (ex) { alert(ex.message); }
-});
-
-function bindFsPdf(btnId, path) {
-  document.getElementById(btnId)?.addEventListener("click", (e) => {
-    e.preventDefault();
-    window.open(API + path + fsQuery(), "_blank");
-  });
-}
-bindFsPdf("btn-pdf-sfp", "/api/reports/financial-position/pdf");
-bindFsPdf("btn-pdf-sfpn", "/api/reports/financial-performance/pdf");
-bindFsPdf("btn-pdf-scf", "/api/reports/cash-flow/pdf");
-
-// Load projects when opening reports
-const _sv2 = window.showView;
-if (typeof _sv2 === "function") {
-  window.showView = function (name) {
-    _sv2(name);
-    if (name === "reports") {
-      loadProjectsInto("rpt-project");
-      loadStoredReports();
-    }
-  };
-}
-
-/* Finance panel on payment detail */
-const _openPay = window.openPaymentDetail;
-window.openPaymentDetail = async function (id) {
-  if (typeof _openPay === "function") await _openPay(id);
-  const panel = document.getElementById("pd-finance-panel");
-  if (!panel) return;
-  const role = currentUser?.role;
-  if (["finance", "company_admin"].includes(role)) {
-    panel.style.display = "block";
-    try {
-      const accounts = await api("/api/finance/coa");
-      const fill = (selId) => {
-        const s = document.getElementById(selId);
-        if (!s) return;
-        s.innerHTML = (accounts || []).map(a => `<option value="${a.id}">${a.code} — ${a.name}</option>`).join("");
-      };
-      fill("pd-debit"); fill("pd-credit");
-      await loadProjectsInto("pd-project");
-    } catch (e) {}
-  } else {
-    panel.style.display = "none";
-  }
-};
-
-document.getElementById("btn-pd-save-accounts")?.addEventListener("click", async () => {
-  const pid = document.getElementById("payment-detail-modal")?.dataset?.pid;
-  if (!pid) return;
-  const form = new FormData();
-  form.append("debit_account_id", document.getElementById("pd-debit").value);
-  form.append("credit_account_id", document.getElementById("pd-credit").value);
-  form.append("project_code_id", document.getElementById("pd-project").value || "");
-  try {
-    const res = await fetch(API + `/api/payments/${pid}/accounts`, {
-      method: "PATCH", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert("Account codes updated");
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-pd-request-corr")?.addEventListener("click", async () => {
-  const pid = document.getElementById("payment-detail-modal")?.dataset?.pid;
-  const msg = document.getElementById("pd-corr-msg")?.value;
-  if (!pid || !msg) return alert("Enter a message");
-  const form = new FormData();
-  form.append("message", msg);
-  try {
-    const res = await fetch(API + `/api/payments/${pid}/request-correction`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert(data.message);
-    loadPayments();
-  } catch (ex) { alert(ex.message); }
-});
-
-
-async function loadAssetAccountDropdowns() {
-  try {
-    const accounts = await api("/api/finance/coa");
-    for (const id of ["ast-debit", "ast-credit"]) {
-      const s = document.getElementById(id);
-      if (!s) continue;
-      s.innerHTML = `<option value="">— Select —</option>` +
-        (accounts || []).map(a => `<option value="${a.id}">${a.code} — ${a.name}</option>`).join("");
-    }
-    await loadProjectsInto("ast-project");
-  } catch (e) {}
-}
-document.getElementById("btn-new-asset")?.addEventListener("click", () => loadAssetAccountDropdowns());
-
-document.addEventListener("click", async (e) => {
-  const a = e.target.closest("a[data-auth-dl]");
-  if (!a) return;
-  e.preventDefault();
-  const href = a.getAttribute("href") || "";
-  if (!href || href === "#") return;
-  const name = (href.split("/").pop() || "report.pdf").split("?")[0] || "report.pdf";
-  try { await forceDownload(href, name.endsWith(".pdf") ? name : name + ".pdf"); }
-  catch (ex) { alert(ex.message); }
-});
-
-
-window.printVoucher = async function (id) {
-  try {
-    await forceDownload(`/api/reports/voucher/${id}/pdf`, `payment_voucher_${id}.pdf`);
-  } catch (ex) { alert(ex.message); }
-};
-
-window.financeCorrectPayment = async function (id) {
-  const msg = prompt("Message to originator (required corrections):");
-  if (!msg) return;
-  const form = new FormData();
-  form.append("message", msg);
-  try {
-    const res = await fetch(API + `/api/payments/${id}/request-correction`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert(data.message || "Originator notified");
-    loadPayments();
-  } catch (ex) { alert(ex.message); }
-};
-
-
-/* COA interconnection + Procurement */
-const _showViewCoa = window.showView;
-if (typeof _showViewCoa === "function") {
-  window.showView = function (name) {
-    _showViewCoa(name);
-    if (["payments", "assets", "vendors", "bank-recon", "procurement", "corrections", "reports"].includes(name)) {
-      loadAllCoaSelects();
-    }
-    if (name === "procurement") loadProcurement();
-    if (name === "vendors") loadAllCoaSelects();
-  };
-}
-
-document.getElementById("btn-new-payment")?.addEventListener("click", () => setTimeout(loadAllCoaSelects, 200));
-document.getElementById("btn-new-asset")?.addEventListener("click", () => setTimeout(loadAllCoaSelects, 200));
-
-async function loadProcurement() {
-  try {
-    await loadAllCoaSelects();
-    const services = await api("/api/procurement/services");
-    const ssel = document.getElementById("rfq-service");
-    if (ssel) ssel.innerHTML = `<option value="">— Service —</option>` + (services||[]).map(s => `<option value="${s.id}">${s.code} — ${s.name}</option>`).join("");
-    try { await loadProjectsInto("rfq-project"); } catch (e) {}
-    const vendors = await api("/api/vendors");
-    const vsel = document.getElementById("quote-vendor");
-    if (vsel) vsel.innerHTML = `<option value="">— Vendor —</option>` + (vendors||[]).map(v => `<option value="${v.id}">${v.vendor_number || ""} ${v.name}</option>`).join("");
-    const rfqs = await api("/api/procurement/rfqs");
-    const el = document.getElementById("rfq-list");
-    if (!el) return;
-    let h = `<table class="data-table"><thead><tr><th>RFQ</th><th>Title</th><th>Service</th><th>Debit</th><th>Credit</th><th>Status</th><th></th></tr></thead><tbody>`;
-    (rfqs||[]).forEach(r => {
-      h += `<tr><td>${r.rfq_no}</td><td>${r.title}</td><td>${r.service||""}</td><td>${r.debit_account||""}</td><td>${r.credit_account||""}</td>
-        <td>${r.status}</td>
-        <td><button class="btn btn-sm btn-outline" onclick="openRfq(${r.id},'${(r.title||"").replace(/'/g,"")}')">Quotes</button></td></tr>`;
-    });
-    h += `</tbody></table>`;
-    el.innerHTML = h;
-  } catch (ex) {
-    const el = document.getElementById("rfq-list");
-    if (el) el.innerHTML = `<p class="hint">${ex.message}</p>`;
-  }
-}
-
-document.getElementById("btn-create-rfq")?.addEventListener("click", async () => {
-  const form = new FormData();
-  form.append("title", document.getElementById("rfq-title").value);
-  form.append("description", document.getElementById("rfq-desc").value || "");
-  if (document.getElementById("rfq-service").value) form.append("service_id", document.getElementById("rfq-service").value);
-  if (document.getElementById("rfq-debit").value) form.append("debit_account_id", document.getElementById("rfq-debit").value);
-  if (document.getElementById("rfq-credit").value) form.append("credit_account_id", document.getElementById("rfq-credit").value);
-  if (document.getElementById("rfq-project").value) form.append("project_code_id", document.getElementById("rfq-project").value);
-  try {
-    const res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert("RFQ created: " + (data.rfq_no || ""));
-    loadProcurement();
-  } catch (ex) { alert(ex.message); }
-});
-
-window._currentRfq = null;
-window.openRfq = async function (id, title) {
-  window._currentRfq = id;
-  document.getElementById("rfq-detail").style.display = "block";
-  document.getElementById("rfq-detail-title").textContent = "Quotes — " + (title || id);
-  try {
-    const quotes = await api(`/api/procurement/rfqs/${id}/quotes`);
-    let h = `<table class="data-table"><thead><tr><th>Vendor</th><th>Amount</th><th>Tax</th><th>Total</th><th>System (40)</th><th>Committee (60)</th><th>Final</th><th>Status</th><th></th></tr></thead><tbody>`;
-    (quotes||[]).forEach(q => {
-      h += `<tr><td>${q.vendor_name||""}</td><td>${Number(q.amount||0).toLocaleString()}</td>
-        <td>${Number(q.tax_amount||0).toLocaleString()}</td><td>${Number(q.total_amount||0).toLocaleString()}</td>
-        <td>${q.system_score||0}</td><td>${q.committee_score||0}</td><td><strong>${q.final_score||0}</strong></td><td>${q.status}</td>
-        <td>
-          <button class="btn btn-sm btn-outline" onclick="scoreQuote(${q.id})">Committee score</button>
-          <button class="btn btn-sm btn-success" onclick="awardQuote(${id},${q.id})">Award</button>
-        </td></tr>`;
-    });
-    h += `</tbody></table>`;
-    document.getElementById("quote-list").innerHTML = h;
-  } catch (ex) { alert(ex.message); }
-};
-
-document.getElementById("btn-add-quote")?.addEventListener("click", async () => {
-  if (!window._currentRfq) return;
-  const form = new FormData();
-  if (document.getElementById("quote-vendor").value) form.append("vendor_id", document.getElementById("quote-vendor").value);
-  form.append("vendor_name", document.getElementById("quote-vname").value || document.getElementById("quote-vendor").selectedOptions[0]?.text || "");
-  form.append("amount", document.getElementById("quote-amt").value || "0");
-  form.append("tax_amount", document.getElementById("quote-tax").value || "0");
-  form.append("delivery_days", document.getElementById("quote-days").value || "0");
-  try {
-    const res = await fetch(API + `/api/procurement/rfqs/${window._currentRfq}/quotes`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    openRfq(window._currentRfq, document.getElementById("rfq-detail-title").textContent);
-  } catch (ex) { alert(ex.message); }
-});
-
-window.scoreQuote = async function (qid) {
-  const score = prompt("Committee score (0–60):", "40");
-  if (score == null) return;
-  const form = new FormData();
-  form.append("score", score);
-  try {
-    const res = await fetch(API + `/api/procurement/quotes/${qid}/committee-score`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    if (window._currentRfq) openRfq(window._currentRfq, "");
-  } catch (ex) { alert(ex.message); }
-};
-
-window.awardQuote = async function (rid, qid) {
-  if (!confirm("Award this quote and post commitment to ledger (if accounts set)?")) return;
-  const form = new FormData();
-  form.append("quote_id", qid);
-  try {
-    const res = await fetch(API + `/api/procurement/rfqs/${rid}/award`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert(data.message || "Awarded");
-    loadProcurement();
-  } catch (ex) { alert(ex.message); }
-};
-
-// Enhance trail / correction to show COA codes on journal lines
-const _openTrail = window.openTrail;
-window.openTrail = async function (jid) {
-  if (typeof _openTrail === "function") {
-    await _openTrail(jid);
-  }
-  try {
-    const t = await api(`/api/finance/transaction-trail/${jid}`);
-    const box = document.querySelector(".trail-box");
-    if (!box || !t.paired_entries) return;
-    const opts = await loadCoaOptions();
-    const byId = Object.fromEntries(opts.map(o => [String(o.id), o.label]));
-    let extra = "<h4>Accounts (Chart of Accounts)</h4><ul>";
-    (t.paired_entries || []).forEach(p => {
-      extra += `<li>${byId[String(p.account_id)] || ("Account #" + p.account_id)} — Dr ${p.debit||0} / Cr ${p.credit||0}</li>`;
-    });
-    extra += "</ul>";
-    // correction account change for finance
-    if (currentUser && ["finance", "company_admin"].includes(currentUser.role)) {
-      extra += `<div class="card" style="margin-top:.5rem"><p class="hint">Correct posting amounts and resubmit via Corrections inbox, or adjust account on the payment request.</p></div>`;
-    }
-    box.insertAdjacentHTML("beforeend", extra);
-  } catch (e) {}
-};
-
-
-/* ===== Full committee, PO, archives ===== */
-async function loadCommittees() {
-  try {
-    const rows = await api("/api/procurement/committees");
-    const el = document.getElementById("committee-list");
-    const pick = document.getElementById("cm-pick");
-    const rfqC = document.getElementById("rfq-committee");
-    let h = "<ul>";
-    (rows||[]).forEach(c => {
-      h += `<li><strong>${c.name}</strong> — ${(c.members||[]).map(m => m.name + " (" + m.role + ")").join(", ") || "no members"}</li>`;
-    });
-    h += "</ul>";
-    if (el) el.innerHTML = h;
-    const opts = `<option value="">— Committee —</option>` + (rows||[]).map(c => `<option value="${c.id}">${c.name}</option>`).join("");
-    if (pick) pick.innerHTML = opts;
-    if (rfqC) rfqC.innerHTML = opts;
-  } catch (e) {}
-}
-
-document.getElementById("btn-create-committee")?.addEventListener("click", async () => {
-  const form = new FormData();
-  form.append("name", document.getElementById("cm-name").value || "Evaluation Committee");
-  try {
-    const res = await fetch(API + "/api/procurement/committees", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    loadCommittees();
-  } catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-add-member")?.addEventListener("click", async () => {
-  const cid = document.getElementById("cm-pick").value;
-  if (!cid) return alert("Select committee");
-  const form = new FormData();
-  form.append("member_name", document.getElementById("cm-member").value);
-  form.append("role_title", document.getElementById("cm-role").value);
-  try {
-    const res = await fetch(API + `/api/procurement/committees/${cid}/members`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    loadCommittees();
-  } catch (ex) { alert(ex.message); }
-});
-
-async function loadPurchaseOrders() {
-  try {
-    const rows = await api("/api/procurement/purchase-orders");
-    const el = document.getElementById("po-list");
-    if (!el) return;
-    let h = `<table class="data-table"><thead><tr><th>PO</th><th>Vendor</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody>`;
-    (rows||[]).forEach(p => {
-      let act = "";
-      if (p.status === "pending_officer") {
-        act = `<button class="btn btn-sm btn-primary" onclick="submitPoPayment(${p.id})">Review & submit to payment</button>`;
-      } else if (p.payment_request_id) {
-        act = `Payment #${p.payment_request_id}`;
-      }
-      h += `<tr><td>${p.po_no}</td><td>${p.vendor_name||""}</td><td>${Number(p.amount||0).toLocaleString()}</td><td>${p.status}</td><td>${act}</td></tr>`;
-    });
-    h += `</tbody></table>`;
-    el.innerHTML = h;
-  } catch (e) {}
-}
-
-window.submitPoPayment = async function (poid) {
-  try {
-    const budgets = await api("/api/finance/budget-codes").catch(() => api("/api/budgets").catch(() => []));
-  } catch (e) {}
-  let budget_code_id = prompt("Budget code ID (from Finance → Budget):");
-  let expense_code_id = prompt("Expense code ID:");
-  let designated_approver_id = prompt("Designated approver user ID:");
-  if (!budget_code_id || !expense_code_id || !designated_approver_id) return;
-  const form = new FormData();
-  form.append("budget_code_id", budget_code_id);
-  form.append("expense_code_id", expense_code_id);
-  form.append("designated_approver_id", designated_approver_id);
-  form.append("narration", "Submitted from purchase order");
-  try {
-    const res = await fetch(API + `/api/procurement/purchase-orders/${poid}/submit-payment`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert(data.message + " (" + data.request_no + ")");
-    loadPurchaseOrders();
-    if (typeof loadPayments === "function") loadPayments();
-  } catch (ex) { alert(ex.message); }
-};
-
-// Patch create RFQ to include committee
-const _btnRfq = document.getElementById("btn-create-rfq");
-if (_btnRfq) {
-  _btnRfq.addEventListener("click", async (e) => {
-    // existing handler may also fire - ensure committee appended via form in our new flow
-  });
-}
-
-// Override RFQ create to include committee_id - patch by replacing listener is hard; extend form append
-document.getElementById("btn-create-rfq")?.addEventListener("click", async () => {
-  /* second listener: no-op if first already works; committee added in re-bind below */
-}, true);
-
-// Re-bind create RFQ
-(function () {
-  const btn = document.getElementById("btn-create-rfq");
-  if (!btn) return;
-  btn.onclick = async () => {
-    const form = new FormData();
-    form.append("title", document.getElementById("rfq-title").value);
-    form.append("description", document.getElementById("rfq-desc")?.value || "");
-    if (document.getElementById("rfq-service")?.value) form.append("service_id", document.getElementById("rfq-service").value);
-    if (document.getElementById("rfq-committee")?.value) form.append("committee_id", document.getElementById("rfq-committee").value);
-    if (document.getElementById("rfq-debit")?.value) form.append("debit_account_id", document.getElementById("rfq-debit").value);
-    if (document.getElementById("rfq-credit")?.value) form.append("credit_account_id", document.getElementById("rfq-credit").value);
-    if (document.getElementById("rfq-project")?.value) form.append("project_code_id", document.getElementById("rfq-project").value);
-    try {
-      const res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || "Failed");
-      alert("RFQ created: " + (data.rfq_no || ""));
-      loadProcurement();
-    } catch (ex) { alert(ex.message); }
   };
 })();
 
-const _loadProc = typeof loadProcurement === "function" ? loadProcurement : null;
-window.loadProcurement = async function () {
-  if (_loadProc) await _loadProc();
-  await loadCommittees();
-  await loadPurchaseOrders();
-};
-
-// Award with PO instead of simple award
-window.awardQuote = async function (rid, qid) {
-  if (!confirm("Committee approve & create Purchase Order for requesting officer?")) return;
-  const form = new FormData();
-  form.append("quote_id", qid);
+document.getElementById("btn-upload-sig")?.addEventListener("click", async function () {
+  var f = document.getElementById("sig-file");
+  if (!f || !f.files.length) return alert("Choose a signature image");
+  var form = new FormData();
+  form.append("file", f.files[0]);
   try {
-    const res = await fetch(API + `/api/procurement/rfqs/${rid}/award-with-po`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    var res = await fetch(API + "/api/users/me/signature", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
-    alert(data.message || "PO created");
-    loadProcurement();
-  } catch (ex) { alert(ex.message); }
-};
-
-document.getElementById("btn-committee-report")?.addEventListener("click", async () => {
-  if (!window._currentRfq) return;
-  try { await forceDownload(`/api/procurement/rfqs/${window._currentRfq}/committee-report/pdf`, "committee_report.pdf"); }
-  catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("btn-proc-archive")?.addEventListener("click", async () => {
-  if (!window._currentRfq) return;
-  try { await forceDownload(`/api/procurement/rfqs/${window._currentRfq}/archive.zip`, "procurement_archive.zip"); }
-  catch (ex) { alert(ex.message); }
-});
-
-document.getElementById("rfq-doc-file")?.addEventListener("change", async (e) => {
-  if (!window._currentRfq || !e.target.files.length) return;
-  const form = new FormData();
-  form.append("file", e.target.files[0]);
-  form.append("doc_type", "support");
-  try {
-    const res = await fetch(API + `/api/procurement/rfqs/${window._currentRfq}/documents`, {
-      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
-    });
-    const data = await res.json();
+    var data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Upload failed");
-    alert("Document archived: " + data.filename);
+    var img = document.getElementById("sig-preview");
+    if (img) { img.src = data.signature_path; img.style.display = "block"; }
+    alert("Signature saved");
   } catch (ex) { alert(ex.message); }
 });
 
-// Payment archive in table
-const _lp = loadPayments;
-if (typeof loadPayments === "function") {
-  // enhance actions after load - wrap openPaymentDetail actions
-}
-window.downloadPaymentArchive = async function (id, reqNo) {
-  try { await forceDownload(`/api/payments/${id}/archive.zip`, `payment_archive_${reqNo || id}.zip`); }
-  catch (ex) { alert(ex.message); }
-};
-
-// Patch enhanced payments actions to include archive
-(function () {
-  const orig = window.loadPayments;
-  // Add archive button via MutationObserver is overkill; patch string in function source not possible.
-  // Provide global enhance after each loadPayments
-  const _l = loadPayments;
-  loadPayments = async function () {
-    await _l();
-    document.querySelectorAll("#payments-table tbody tr").forEach(tr => {
-      const openBtn = tr.querySelector("button[onclick^='openPaymentDetail']");
-      if (!openBtn) return;
-      const m = openBtn.getAttribute("onclick").match(/openPaymentDetail\((\d+)\)/);
-      if (!m) return;
-      const id = m[1];
-      const td = tr.querySelector("td:last-child");
-      if (td && !td.innerHTML.includes("downloadPaymentArchive")) {
-        td.innerHTML += ` <button class="btn btn-sm btn-outline" onclick="downloadPaymentArchive(${id})">Archive ZIP</button>`;
-      }
-    });
-  };
-})();
-
-
-/* Reseed demo data (superadmin) */
-async function reseedDemoData() {
-  if (!confirm("Reload all sample finance data for the demo company?")) return;
+// Reports dropdown
+window.__reportKey = "";
+document.getElementById("btn-load-report")?.addEventListener("click", async function () {
+  var key = document.getElementById("report-select")?.value;
+  if (!key) return alert("Select a report");
+  window.__reportKey = key;
+  var out = document.getElementById("report-output");
   try {
-    const data = await api("/api/superadmin/reseed-demo", { method: "POST", body: "{}" });
-    alert("Reseeded: " + JSON.stringify(data.counts || data));
-    if (typeof loadCompanies === "function") loadCompanies();
+    if (key === "trial-balance") {
+      var d = await api("/api/reports/trial-balance");
+      var h = "<table class='data-table'><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Project</th><th>Debit</th><th>Credit</th><th>Balance</th></tr></thead><tbody>";
+      (d.rows || []).forEach(function (r) {
+        h += "<tr><td>" + r.code + "</td><td>" + r.name + "</td><td>" + r.type + "</td><td>" + (r.project_code || "") + "</td><td>" + Number(r.debit).toLocaleString() + "</td><td>" + Number(r.credit).toLocaleString() + "</td><td>" + Number(r.balance).toLocaleString() + "</td></tr>";
+      });
+      h += "</tbody></table><p><strong>Total Dr:</strong> " + Number(d.total_debit).toLocaleString() + " · <strong>Cr:</strong> " + Number(d.total_credit).toLocaleString() + " · " + (d.balanced ? "Balanced" : "Out of balance") + "</p>";
+      out.innerHTML = h;
+    } else if (key === "ledger") {
+      var rows = await api("/api/reports/ledger");
+      var h = "<table class='data-table'><thead><tr><th>Entry</th><th>Date</th><th>Source</th><th>Account</th><th>Description</th><th>Debit</th><th>Credit</th></tr></thead><tbody>";
+      rows.forEach(function (r) {
+        h += "<tr><td>" + r.entry_no + "</td><td>" + r.date + "</td><td>" + r.source_type + "</td><td>" + r.account + "</td><td>" + (r.description || "") + "</td><td>" + Number(r.debit).toLocaleString() + "</td><td>" + Number(r.credit).toLocaleString() + "</td></tr>";
+      });
+      out.innerHTML = h + "</tbody></table>";
+    } else if (key === "budget-variance") {
+      var d = await api("/api/reports/budget-variance");
+      var h = "<table class='data-table'><thead><tr><th>Code</th><th>Description</th><th>Budgeted</th><th>Actual</th><th>Variance</th><th>Remark</th></tr></thead><tbody>";
+      (d.rows || []).forEach(function (r) {
+        h += "<tr><td>" + r.budget_code + "</td><td>" + r.description + "</td><td>" + Number(r.budgeted).toLocaleString() + "</td><td>" + Number(r.actual).toLocaleString() + "</td><td>" + Number(r.variance).toLocaleString() + "</td><td>" + r.remark + "</td></tr>";
+      });
+      out.innerHTML = h + "</tbody></table>";
+    } else if (key === "ifrs-position") {
+      var d = await api("/api/reports/ifrs/financial-position");
+      var h = "<p><em>" + d.standard + "</em></p><table class='data-table'><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Amount</th><th>IFRS</th></tr></thead><tbody>";
+      (d.rows || []).forEach(function (r) {
+        h += "<tr><td>" + r.code + "</td><td>" + r.name + "</td><td>" + r.type + "</td><td>" + Number(r.amount).toLocaleString() + "</td><td style='font-size:0.75rem'>" + r.ifrs + "</td></tr>";
+      });
+      out.innerHTML = h + "</tbody></table>";
+    } else if (key === "ifrs-performance") {
+      var d = await api("/api/reports/ifrs/financial-performance");
+      var h = "<p><em>" + d.standard + "</em></p><table class='data-table'><thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Amount</th><th>IFRS</th></tr></thead><tbody>";
+      (d.rows || []).forEach(function (r) {
+        h += "<tr><td>" + r.code + "</td><td>" + r.name + "</td><td>" + r.type + "</td><td>" + Number(r.amount).toLocaleString() + "</td><td style='font-size:0.75rem'>" + r.ifrs + "</td></tr>";
+      });
+      h += "</tbody></table><p><strong>Income:</strong> " + Number(d.total_income).toLocaleString() + " · <strong>Expense:</strong> " + Number(d.total_expense).toLocaleString() + " · <strong>Surplus/(Deficit):</strong> " + Number(d.surplus_deficit).toLocaleString() + "</p>";
+      out.innerHTML = h;
+    } else if (key === "ifrs-cashflow") {
+      var d = await api("/api/reports/ifrs/cash-flow");
+      var h = "<p><em>" + d.standard + "</em></p><table class='data-table'><thead><tr><th>Date</th><th>Entry</th><th>Description</th><th>Class</th><th>Amount</th><th>IFRS</th></tr></thead><tbody>";
+      (d.rows || []).forEach(function (r) {
+        h += "<tr><td>" + r.date + "</td><td>" + r.entry_no + "</td><td>" + (r.description || "") + "</td><td>" + r.classification + "</td><td>" + Number(r.amount).toLocaleString() + "</td><td style='font-size:0.75rem'>" + r.ifrs + "</td></tr>";
+      });
+      out.innerHTML = h + "</tbody></table><p><strong>Net change:</strong> " + Number(d.net_change).toLocaleString() + "</p>";
+    } else if (key === "payments") {
+      var rows = await api("/api/payments");
+      var h = "<table class='data-table'><thead><tr><th>No</th><th>Payee</th><th>Amount</th><th>Project</th><th>Status</th></tr></thead><tbody>";
+      rows.forEach(function (r) {
+        h += "<tr><td>" + r.request_no + "</td><td>" + (r.payee_name || "") + "</td><td>" + Number(r.amount).toLocaleString() + "</td><td>" + (r.project_code || "") + "</td><td>" + r.status + "</td></tr>";
+      });
+      out.innerHTML = h + "</tbody></table>";
+    } else {
+      out.innerHTML = "<p>Use Download PDF/CSV for register-style reports (" + key + "). Load is available for ledger-style reports above.</p>";
+    }
   } catch (ex) { alert(ex.message); }
-}
-window.reseedDemoData = reseedDemoData;
+});
+
+document.getElementById("btn-dl-report-pdf")?.addEventListener("click", async function () {
+  var key = window.__reportKey || document.getElementById("report-select")?.value;
+  if (!key) return alert("Select and load a report first");
+  var map = {
+    "trial-balance": "/api/reports/trial-balance/pdf",
+    "ledger": "/api/reports/ledger/pdf",
+    "budget-variance": "/api/reports/budget-variance/pdf",
+    "ifrs-position": "/api/reports/ifrs/financial-position/pdf",
+    "ifrs-performance": "/api/reports/ifrs/financial-performance/pdf",
+    "ifrs-cashflow": "/api/reports/ifrs/cash-flow/pdf",
+    "payments": "/api/reports/payments/pdf",
+    "assets": "/api/reports/assets/pdf",
+    "inventory": "/api/reports/inventory/pdf",
+    "vendors": "/api/reports/vendors/pdf",
+    "bank-recon": "/api/reports/bank-recon/pdf",
+  };
+  var url = map[key];
+  if (!url) return alert("PDF not available for this report");
+  try { await authDownload(url, key + ".pdf"); } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-dl-report-csv")?.addEventListener("click", async function () {
+  var key = window.__reportKey || document.getElementById("report-select")?.value;
+  var map = {
+    "trial-balance": "/api/reports/trial-balance/export",
+    "ledger": "/api/reports/ledger/export",
+    "payments": "/api/payments/export",
+    "assets": "/api/assets/export",
+    "inventory": "/api/inventory/export",
+    "vendors": "/api/vendors/export",
+  };
+  var url = map[key];
+  if (!url) return alert("CSV export not available for this report — use PDF");
+  try { await authDownload(url, key + ".csv"); } catch (ex) { alert(ex.message); }
+});
+
