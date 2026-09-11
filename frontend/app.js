@@ -2287,11 +2287,24 @@ document.getElementById("rfq-form")?.addEventListener("submit", async function (
   var form = new FormData();
   form.append("title", document.getElementById("rfq-title").value);
   form.append("description", document.getElementById("rfq-desc").value);
-  form.append("deadline", new Date(document.getElementById("rfq-deadline").value).toISOString());
+  var dl = document.getElementById("rfq-deadline").value;
+  form.append("deadline", dl ? new Date(dl).toISOString() : "");
+  var raw = (document.getElementById("rfq-items")?.value || "").trim().split("\n").filter(Boolean);
+  var items = raw.map(function (line) {
+    var p = line.split("|");
+    return { description: p[0] || "Item", quantity: parseFloat(p[1]) || 1, unit: p[2] || "unit", conditions: p[3] || "" };
+  });
+  form.append("items_json", JSON.stringify(items));
   try {
     var res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: "Bearer " + token }, body: form });
-    var data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Failed");
+    var text = await res.text();
+    var data = {};
+    try { data = JSON.parse(text); } catch (_) { throw new Error(text.slice(0, 200) || "Server error"); }
+    if (!res.ok) {
+      var msg = data.detail || data.message || text.slice(0, 200);
+      if (Array.isArray(msg)) msg = msg.map(function (x) { return x.msg || JSON.stringify(x); }).join(", ");
+      throw new Error(msg);
+    }
     alert("RFQ created: " + (data.rfq_no || data.id));
     e.target.reset();
     e.target.style.display = "none";

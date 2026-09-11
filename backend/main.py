@@ -2555,6 +2555,15 @@ def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_a
 
 
 
+
+def _rfq_no(db, cid):
+    n = db.query(RFQ).filter(RFQ.company_id == cid).count() + 1
+    return f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
+
+def _public_base():
+    import os
+    return (os.getenv("PUBLIC_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+
 @app.get("/api/procurement/rfqs")
 def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     if not (current_user.can_access_vendors or current_user.role in ("company_admin", "finance", "superadmin", "project_manager")):
@@ -2567,27 +2576,61 @@ def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session
 def create_rfq(
     title: str = Form(...),
     description: str = Form(""),
-    deadline: str = Form(...),  # ISO datetime or date
+    deadline: str = Form(...),
+    items_json: str = Form("[]"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    if not (current_user.can_access_vendors or current_user.role in ("company_admin", "superadmin")):
-        raise HTTPException(403, "Procurement officer / admin only")
+    if not current_user.company_id:
+        raise HTTPException(403, "Company users only")
+    if not (getattr(current_user, "can_access_vendors", False) or current_user.role in ("company_admin", "superadmin", "finance", "project_manager")):
+        raise HTTPException(403, "Procurement access required")
     try:
-        dl = datetime.fromisoformat(deadline.replace("Z", ""))
+        dl = datetime.fromisoformat(deadline.replace("Z", "+00:00").replace("+00:00", ""))
     except Exception:
-        dl = datetime.strptime(deadline[:10], "%Y-%m-%d").replace(hour=23, minute=59)
-    rfq = RFQ(
-        company_id=current_user.company_id,
-        rfq_no=_rfq_no(db, current_user.company_id),
-        title=title, description=description, deadline=dl,
-        status="open", created_by=current_user.id,
-    )
-    db.add(rfq)
-    db.commit()
-    db.refresh(rfq)
-    audit(db, current_user.company_id, current_user, "RFQ_CREATE", rfq.rfq_no)
-    return rfq
+        try:
+            dl = datetime.strptime(deadline[:16], "%Y-%m-%dT%H:%M")
+        except Exception:
+            try:
+                dl = datetime.strptime(deadline[:10], "%Y-%m-%d").replace(hour=23, minute=59)
+            except Exception:
+                raise HTTPException(400, "Invalid deadline format")
+    try:
+        rfq = RFQ(
+            company_id=current_user.company_id,
+            rfq_no=_rfq_no(db, current_user.company_id),
+            title=title.strip(), description=description or "", deadline=dl,
+            status="open", created_by=current_user.id,
+        )
+        db.add(rfq)
+        db.commit()
+        db.refresh(rfq)
+        import json as _json
+        try:
+            items = _json.loads(items_json or "[]")
+        except Exception:
+            items = []
+        for i, it in enumerate(items):
+            db.add(RFQLineItem(
+                rfq_id=rfq.id,
+                description=str(it.get("description") or "Item"),
+                quantity=float(it.get("quantity") or 1),
+                unit=str(it.get("unit") or "unit"),
+                conditions=str(it.get("conditions") or ""),
+                sort_order=i,
+            ))
+        db.commit()
+        audit(db, current_user.company_id, current_user, "RFQ_CREATE", rfq.rfq_no)
+        return {
+            "id": rfq.id, "rfq_no": rfq.rfq_no, "title": rfq.title,
+            "description": rfq.description, "deadline": rfq.deadline.isoformat() if rfq.deadline else None,
+            "status": rfq.status,
+        }
+    except HTTPException:
+        raise
+    except Exception as ex:
+        db.rollback()
+        raise HTTPException(500, f"Could not create RFQ: {ex}")
 
 
 @app.get("/api/procurement/rfqs/{rfq_id}")

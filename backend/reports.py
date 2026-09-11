@@ -61,11 +61,12 @@ def company_header(story, company, report_title, currency_code="NGN", currency_s
 
 
 def table_style():
+    # smaller fonts; long text should be Paragraphs in cells
     return TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F1C3A")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTSIZE", (0, 0), (-1, -1), 7),
         ("ALIGN", (0, 0), (-1, 0), "CENTER"),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#C5CED8")),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F0F4FA")]),

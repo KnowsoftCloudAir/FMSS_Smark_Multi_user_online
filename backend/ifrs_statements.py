@@ -11,13 +11,14 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 
 def _styles():
     s = getSampleStyleSheet()
-    s.add(ParagraphStyle(name="Co", fontSize=12, alignment=TA_CENTER, spaceAfter=2, textColor=colors.HexColor("#1A6B9A"), fontName="Helvetica-Bold"))
-    s.add(ParagraphStyle(name="Title", fontSize=11, alignment=TA_CENTER, spaceAfter=4, spaceBefore=6, fontName="Helvetica-Bold"))
-    s.add(ParagraphStyle(name="Sub", fontSize=9, alignment=TA_CENTER, spaceAfter=10, textColor=colors.HexColor("#555")))
-    s.add(ParagraphStyle(name="Sec", fontSize=9, fontName="Helvetica-Bold", spaceBefore=6, spaceAfter=2))
-    s.add(ParagraphStyle(name="Cell", fontSize=8, leading=10))
-    s.add(ParagraphStyle(name="BoldCell", fontSize=8, leading=10, fontName="Helvetica-Bold"))
-    s.add(ParagraphStyle(name="Foot", fontSize=7, textColor=colors.HexColor("#666"), spaceBefore=8))
+    s.add(ParagraphStyle(name="Co", fontSize=10, alignment=TA_CENTER, spaceAfter=2, textColor=colors.HexColor("#1A6B9A"), fontName="Helvetica-Bold"))
+    s.add(ParagraphStyle(name="Title", fontSize=9, alignment=TA_CENTER, spaceAfter=3, spaceBefore=4, fontName="Helvetica-Bold"))
+    s.add(ParagraphStyle(name="Sub", fontSize=7, alignment=TA_CENTER, spaceAfter=8, textColor=colors.HexColor("#555")))
+    s.add(ParagraphStyle(name="Sec", fontSize=7, fontName="Helvetica-Bold", spaceBefore=4, spaceAfter=1))
+    s.add(ParagraphStyle(name="Cell", fontSize=6.5, leading=8))
+    s.add(ParagraphStyle(name="BoldCell", fontSize=6.5, leading=8, fontName="Helvetica-Bold"))
+    s.add(ParagraphStyle(name="Foot", fontSize=6, textColor=colors.HexColor("#666"), spaceBefore=6))
+    s.add(ParagraphStyle(name="Note", fontSize=6, leading=7, textColor=colors.HexColor("#444")))
     return s
 
 
@@ -47,19 +48,43 @@ def _header(story, co, title, subtitle, styles):
     story.append(Paragraph("Prepared in accordance with IFRS (IAS 1 / IAS 7 as applicable)", styles["Foot"]))
 
 
-def _table(rows, col_widths=None):
-    t = Table(rows, colWidths=col_widths or [95*mm, 15*mm, 35*mm, 35*mm])
+def _P(text, style_name="Cell", styles=None):
+    if styles is None:
+        styles = _styles()
+    if hasattr(text, "text"):  # already Paragraph
+        return text
+    return Paragraph(str(text).replace("\n", "<br/>"), styles[style_name])
+
+
+def _table(rows, col_widths=None, styles=None):
+    styles = styles or _styles()
+    wrapped = []
+    for i, row in enumerate(rows):
+        new_row = []
+        for j, cell in enumerate(row):
+            if isinstance(cell, (int, float)):
+                new_row.append(str(cell))
+            elif hasattr(cell, "text"):
+                new_row.append(cell)
+            else:
+                st = "BoldCell" if i == 0 or (isinstance(cell, str) and cell.startswith("<b>")) else "Cell"
+                # Notes column smaller
+                if j == 1 and i > 0:
+                    st = "Note"
+                new_row.append(_P(cell, st if st in styles else "Cell", styles))
+        wrapped.append(new_row)
+    t = Table(wrapped, colWidths=col_widths or [100*mm, 18*mm, 28*mm, 28*mm])
     t.setStyle(TableStyle([
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTSIZE", (0, 0), (-1, -1), 6.5),
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF5")),
-        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#C5CED8")),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#C5CED8")),
         ("ALIGN", (2, 0), (-1, -1), "RIGHT"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 4),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
-        ("TOPPADDING", (0, 0), (-1, -1), 3),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 2),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+        ("TOPPADDING", (0, 0), (-1, -1), 2),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
     ]))
     return t
 
