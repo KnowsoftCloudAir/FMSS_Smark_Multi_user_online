@@ -2165,3 +2165,349 @@ document.getElementById("btn-dl-report-csv")?.addEventListener("click", async fu
   try { await authDownload(url, key + ".csv"); } catch (ex) { alert(ex.message); }
 });
 
+
+/* ========== Payment lines + Procurement RFQ + Public quote/result ========== */
+
+function addPayLineRow(desc, qty, unit) {
+  var tb = document.getElementById("pay-lines");
+  if (!tb) return;
+  var tr = document.createElement("tr");
+  tr.innerHTML =
+    '<td><input class="pl-desc" value="' + (desc || "") + '" style="width:100%" /></td>' +
+    '<td><input class="pl-qty" type="number" step="0.01" value="' + (qty != null ? qty : 1) + '" style="width:80px" /></td>' +
+    '<td><input class="pl-unit" type="number" step="0.01" value="' + (unit != null ? unit : 0) + '" style="width:100px" /></td>' +
+    '<td class="pl-amt">0.00</td>' +
+    '<td><button type="button" class="btn btn-sm btn-outline pl-del">×</button></td>';
+  tb.appendChild(tr);
+  function recalc() {
+    var q = parseFloat(tr.querySelector(".pl-qty").value) || 0;
+    var u = parseFloat(tr.querySelector(".pl-unit").value) || 0;
+    tr.querySelector(".pl-amt").textContent = (q * u).toFixed(2);
+    var total = 0;
+    document.querySelectorAll("#pay-lines tr").forEach(function (r) {
+      total += parseFloat(r.querySelector(".pl-amt").textContent) || 0;
+    });
+    var amt = document.getElementById("pay-amount");
+    if (amt) amt.value = total.toFixed(2);
+  }
+  tr.querySelector(".pl-qty").addEventListener("input", recalc);
+  tr.querySelector(".pl-unit").addEventListener("input", recalc);
+  tr.querySelector(".pl-del").addEventListener("click", function () { tr.remove(); recalc(); });
+  recalc();
+}
+document.getElementById("btn-add-pay-line")?.addEventListener("click", function () { addPayLineRow("", 1, 0); });
+
+// Ensure payment submit includes lines
+(function () {
+  var form = document.getElementById("payment-form");
+  if (!form) return;
+  var prev = form.onsubmit;
+  form.onsubmit = async function (e) {
+    e.preventDefault();
+    var lines = [];
+    document.querySelectorAll("#pay-lines tr").forEach(function (r) {
+      var d = r.querySelector(".pl-desc")?.value || "";
+      var q = parseFloat(r.querySelector(".pl-qty")?.value) || 0;
+      var u = parseFloat(r.querySelector(".pl-unit")?.value) || 0;
+      if (d) lines.push({ description: d, quantity: q, unit_cost: u, amount: q * u });
+    });
+    var debit = document.getElementById("pay-debit")?.value;
+    var credit = document.getElementById("pay-credit")?.value;
+    var proj = document.getElementById("pay-project")?.value;
+    var total = parseFloat(document.getElementById("pay-amount")?.value) || 0;
+    try {
+      await api("/api/payments/request", {
+        method: "POST",
+        body: JSON.stringify({
+          budget_code_id: parseInt(document.getElementById("pay-budget").value, 10),
+          expense_code_id: parseInt(document.getElementById("pay-expense").value, 10),
+          amount: total,
+          payee_name: document.getElementById("pay-payee").value,
+          narration: document.getElementById("pay-narration").value,
+          project_code_id: proj ? parseInt(proj, 10) : null,
+          debit_account_id: debit ? parseInt(debit, 10) : null,
+          credit_account_id: credit ? parseInt(credit, 10) : null,
+          designated_approver_id: parseInt(document.getElementById("pay-approver").value, 10),
+          lines: lines,
+        }),
+      });
+      alert("Payment request submitted");
+      form.reset();
+      document.getElementById("pay-lines").innerHTML = "";
+      form.style.display = "none";
+      loadPayments();
+    } catch (ex) { alert(ex.message); }
+  };
+})();
+
+document.getElementById("btn-new-payment")?.addEventListener("click", function () {
+  setTimeout(function () {
+    if (document.getElementById("pay-lines") && !document.getElementById("pay-lines").children.length) {
+      addPayLineRow("", 1, 0);
+    }
+  }, 100);
+});
+
+
+/* Procurement — aligned to RFQQuoteLink API */
+async function loadProcurement() {
+  try {
+    var rows = await api("/api/procurement/rfqs");
+    var tb = document.querySelector("#rfq-table tbody");
+    if (tb) {
+      tb.innerHTML = (rows || []).map(function (r) {
+        return "<tr><td>" + r.rfq_no + "</td><td>" + r.title + "</td><td>" + (r.deadline || "") +
+          "</td><td>" + r.status + "</td><td><button class='btn btn-sm btn-outline' onclick='openRfq(" + r.id + ")'>Open</button></td></tr>";
+      }).join("");
+    }
+    var pos = await api("/api/procurement/pos");
+    var pt = document.querySelector("#po-table tbody");
+    if (pt) {
+      pt.innerHTML = (pos || []).map(function (po) {
+        var share = "<button class='btn btn-sm btn-outline' onclick='copyPoResult(" + po.id + ")'>Share result link</button>";
+        var fin = (po.status === "accepted")
+          ? "<button class='btn btn-sm btn-primary' onclick='poToFinance(" + po.id + ")'>Send to Finance</button>"
+          : (po.payment_request_id ? ("PR #" + po.payment_request_id) : po.status);
+        return "<tr><td>" + po.po_no + "</td><td>" + (po.vendor_name || "") + "</td><td>" +
+          Number(po.amount || po.total_amount || 0).toLocaleString() + "</td><td>" + po.status +
+          "</td><td>" + share + "</td><td>" + fin + "</td></tr>";
+      }).join("");
+    }
+  } catch (ex) { console.warn(ex); }
+}
+
+document.getElementById("btn-new-rfq")?.addEventListener("click", function () {
+  var f = document.getElementById("rfq-form");
+  if (f) f.style.display = f.style.display === "none" ? "grid" : "none";
+});
+
+document.getElementById("rfq-form")?.addEventListener("submit", async function (e) {
+  e.preventDefault();
+  var form = new FormData();
+  form.append("title", document.getElementById("rfq-title").value);
+  form.append("description", document.getElementById("rfq-desc").value);
+  form.append("deadline", new Date(document.getElementById("rfq-deadline").value).toISOString());
+  try {
+    var res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: "Bearer " + token }, body: form });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert("RFQ created: " + (data.rfq_no || data.id));
+    e.target.reset();
+    e.target.style.display = "none";
+    loadProcurement();
+    if (data.id) openRfq(data.id);
+  } catch (ex) { alert(ex.message); }
+});
+
+window.openRfq = async function (id) {
+  try {
+    var d = await api("/api/procurement/rfqs/" + id);
+    document.getElementById("rfq-detail").style.display = "block";
+    document.getElementById("rfq-detail-title").textContent = d.rfq.rfq_no + " — " + d.rfq.title;
+    var links = (d.links || []).map(function (L) {
+      return "<tr><td>" + (L.vendor_name || "") + "</td><td>" + (L.vendor_email || "") + "</td><td>" + L.status +
+        "</td><td><a href='" + L.url + "' target='_blank'>" + L.url + "</a> " +
+        "<button class='btn btn-sm btn-outline' onclick='navigator.clipboard.writeText(\"" + L.url + "\")'>Copy</button></td></tr>";
+    }).join("");
+    var quotes = (d.quotes || []).map(function (q) {
+      return "<tr><td>" + q.vendor_name + "</td><td>" + Number(q.amount || 0).toLocaleString() + "</td><td>" +
+        Number(q.total_score || 0).toFixed(1) + "</td><td>" + q.status + "</td><td>" +
+        (q.status === "submitted" ? "<button class='btn btn-sm btn-success' onclick='markQuoteReceived(" + q.id + "," + id + ")'>Received</button> " : "") +
+        "<input type='number' min='0' max='100' id='sc-" + q.id + "' style='width:70px' /> " +
+        "<button class='btn btn-sm btn-primary' onclick='scoreQuote(" + q.id + "," + id + ")'>Score</button></td></tr>";
+    }).join("");
+    document.getElementById("rfq-detail-body").innerHTML =
+      "<p>" + (d.rfq.description || "") + " · Deadline: " + d.rfq.deadline + " · <strong>" + d.rfq.status + "</strong></p>" +
+      "<h4>Invite vendor (generate expiring quote link)</h4>" +
+      "<div class='form-grid'><div class='form-group'><input id='inv-name' placeholder='Vendor name' /></div>" +
+      "<div class='form-group'><input id='inv-email' placeholder='Email' /></div>" +
+      "<div class='form-group'><button type='button' class='btn btn-secondary' onclick='createInvite(" + id + ")'>Generate link</button></div></div>" +
+      "<table class='data-table'><thead><tr><th>Vendor</th><th>Email</th><th>Status</th><th>Link</th></tr></thead><tbody>" +
+      (links || "<tr><td colspan='4'>No links yet</td></tr>") + "</tbody></table>" +
+      "<h4>Add committee member (user ID)</h4>" +
+      "<input id='cm-uid' type='number' placeholder='User ID' /> <button class='btn btn-sm btn-outline' onclick='addCommittee(" + id + ")'>Add</button>" +
+      "<ul>" + (d.committee || []).map(function (m) { return "<li>#" + m.user_id + " " + (m.name || "") + " (" + m.role_label + ")</li>"; }).join("") + "</ul>" +
+      "<h4>Quotes</h4>" +
+      "<table class='data-table'><thead><tr><th>Vendor</th><th>Amount</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody>" +
+      (quotes || "<tr><td colspan='5'>No quotes</td></tr>") + "</tbody></table>" +
+      "<div style='margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;'>" +
+      "<button class='btn btn-accent' onclick='declareWinner(" + id + ")'>Declare winner + PO</button>" +
+      "<button class='btn btn-outline' onclick='authDownload(\"/api/procurement/rfqs/" + id + "/committee-report/pdf\",\"committee.pdf\")'>Committee PDF</button></div>";
+  } catch (ex) { alert(ex.message); }
+};
+
+window.createInvite = async function (rfqId) {
+  var form = new FormData();
+  form.append("vendor_name", document.getElementById("inv-name")?.value || "Vendor");
+  form.append("vendor_email", document.getElementById("inv-email")?.value || "");
+  try {
+    var res = await fetch(API + "/api/procurement/rfqs/" + rfqId + "/invite", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert("Share this link with the vendor:\n" + (data.url || data.link || JSON.stringify(data)));
+    openRfq(rfqId);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.markQuoteReceived = async function (quoteId, rfqId) {
+  try {
+    await api("/api/procurement/quotes/" + quoteId + "/receive", { method: "POST" });
+    alert("Marked received. Vendor link closed.");
+    openRfq(rfqId);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.addCommittee = async function (rfqId) {
+  var form = new FormData();
+  form.append("user_id", document.getElementById("cm-uid").value);
+  form.append("role_label", "Member");
+  try {
+    var res = await fetch(API + "/api/procurement/rfqs/" + rfqId + "/committee", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    openRfq(rfqId);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.scoreQuote = async function (quoteId, rfqId) {
+  var form = new FormData();
+  form.append("score", document.getElementById("sc-" + quoteId)?.value || "0");
+  form.append("comments", "");
+  try {
+    var res = await fetch(API + "/api/procurement/quotes/" + quoteId + "/score", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    openRfq(rfqId);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.declareWinner = async function (rfqId) {
+  if (!confirm("Declare highest score as winner and create purchase order?")) return;
+  try {
+    var data = await api("/api/procurement/rfqs/" + rfqId + "/declare-winner", { method: "POST" });
+    alert(data.message || "Awarded");
+    loadProcurement();
+    openRfq(rfqId);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.copyPoResult = async function (poId) {
+  try {
+    var d = await api("/api/procurement/pos/" + poId + "/result-link");
+    var url = d.url || d.result_url || "";
+    if (url) {
+      await navigator.clipboard.writeText(url);
+      alert("Copied: " + url);
+    } else alert(JSON.stringify(d));
+  } catch (ex) { alert(ex.message); }
+};
+
+window.poToFinance = async function (poId) {
+  var debit = prompt("Debit account ID (required)");
+  var credit = prompt("Credit account ID (required)");
+  if (!debit || !credit) return;
+  var form = new FormData();
+  form.append("debit_account_id", debit);
+  form.append("credit_account_id", credit);
+  try {
+    var res = await fetch(API + "/api/procurement/pos/" + poId + "/send-to-finance", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message || "Sent to finance");
+    loadProcurement();
+  } catch (ex) { alert(ex.message); }
+};
+
+
+/* Public routes */
+(function publicRoutes() {
+  var path = location.pathname || "";
+  var qm = path.match(/^\/quote\/([^\/]+)\/?$/);
+  var rm = path.match(/^\/po-result\/([^\/]+)\/?$/) || path.match(/^\/result\/([^\/]+)\/?$/);
+  if (!qm && !rm) return;
+  window.__userEnteredApp = true;
+  document.querySelectorAll(".page").forEach(function (pg) { pg.classList.remove("active"); });
+  try { hideSplash(); } catch (e) {}
+
+  if (qm) {
+    var qtoken = qm[1];
+    var page = document.getElementById("public-quote-page");
+    if (page) { page.classList.add("active"); page.style.display = "block"; }
+    fetch(API + "/api/public/quote/" + qtoken).then(function (r) { return r.json(); }).then(function (d) {
+      document.getElementById("pq-title").textContent = (d.rfq_no || "RFQ") + " — " + (d.title || "Quotation");
+      document.getElementById("pq-msg").textContent = d.message || d.description || "";
+      if (d.vendor_name) document.getElementById("pq-name").value = d.vendor_name;
+      var tb = document.getElementById("pq-lines");
+      if (tb) {
+        tb.innerHTML = "<tr><td colspan='3'>Enter total quotation amount below</td>" +
+          "<td><input type='number' step='0.01' id='pq-amount' style='width:120px' /></td></tr>";
+      }
+      if (d.already_submitted || d.received || d.message) {
+        var btn = document.getElementById("pq-submit");
+        if (btn && (d.received || d.already_submitted || (d.valid === false))) btn.disabled = true;
+      }
+    }).catch(function () {
+      document.getElementById("pq-msg").textContent = "Invalid or expired link";
+    });
+    document.getElementById("pq-submit")?.addEventListener("click", async function () {
+      var form = new FormData();
+      form.append("vendor_name", document.getElementById("pq-name").value);
+      form.append("vendor_email", document.getElementById("pq-email").value);
+      form.append("vendor_phone", document.getElementById("pq-phone").value);
+      form.append("notes", document.getElementById("pq-notes").value);
+      form.append("amount", document.getElementById("pq-amount")?.value || "0");
+      form.append("validity_days", "30");
+      try {
+        var res = await fetch(API + "/api/public/quote/" + qtoken, { method: "POST", body: form });
+        var data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed");
+        alert(data.message);
+        document.getElementById("pq-submit").disabled = true;
+      } catch (ex) { alert(ex.message); }
+    });
+  }
+
+  if (rm) {
+    var rtoken = rm[1];
+    var page = document.getElementById("public-result-page");
+    if (page) { page.classList.add("active"); page.style.display = "block"; }
+    function loadRes() {
+      fetch(API + "/api/public/po-result/" + rtoken).then(function (r) { return r.json(); }).then(function (d) {
+        document.getElementById("pr-msg").textContent = d.message || JSON.stringify(d);
+        document.getElementById("pr-actions").style.display = d.can_respond ? "flex" : "none";
+      }).catch(function () {
+        fetch(API + "/api/public/result/" + rtoken).then(function (r) { return r.json(); }).then(function (d) {
+          document.getElementById("pr-msg").textContent = d.message || "";
+          document.getElementById("pr-actions").style.display = d.can_respond ? "flex" : "none";
+        });
+      });
+    }
+    loadRes();
+    document.getElementById("pr-accept")?.addEventListener("click", async function () {
+      var form = new FormData(); form.append("response", "accepted");
+      await fetch(API + "/api/public/po-result/" + rtoken, { method: "POST", body: form });
+      loadRes();
+    });
+    document.getElementById("pr-reject")?.addEventListener("click", async function () {
+      var form = new FormData(); form.append("response", "rejected");
+      await fetch(API + "/api/public/po-result/" + rtoken, { method: "POST", body: form });
+      loadRes();
+    });
+  }
+})();
+
+(function () {
+  var prev = showView;
+  showView = function (name) {
+    prev(name);
+    if (name === "procurement") loadProcurement();
+  };
+})();

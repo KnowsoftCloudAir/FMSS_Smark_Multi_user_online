@@ -14,7 +14,8 @@ from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession
+    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession,
+    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -1029,13 +1030,22 @@ def submit_payment_request(
     debit_id = data.debit_account_id or exp.default_debit_account_id
     credit_id = data.credit_account_id or exp.default_credit_account_id
 
+    lines_in = getattr(data, "lines", None) or []
+    total_from_lines = 0.0
+    for ln in lines_in:
+        amt = ln.amount if ln.amount is not None else (float(ln.quantity or 0) * float(ln.unit_cost or 0))
+        total_from_lines += amt
+    final_amount = total_from_lines if lines_in else float(data.amount)
+    if final_amount <= 0:
+        raise HTTPException(400, "Amount must be greater than zero (add line items or amount)")
+
     pr = PaymentRequest(
         company_id=current_user.company_id,
         request_no=next_request_no(db, current_user.company_id),
         requester_id=current_user.id,
         budget_code_id=data.budget_code_id,
         expense_code_id=data.expense_code_id,
-        amount=data.amount,
+        amount=final_amount,
         narration=data.narration,
         payee_name=data.payee_name,
         project_code_id=getattr(data, "project_code_id", None),
@@ -1047,6 +1057,13 @@ def submit_payment_request(
     db.add(pr)
     db.commit()
     db.refresh(pr)
+    for i, ln in enumerate(lines_in):
+        amt = ln.amount if ln.amount is not None else (float(ln.quantity or 0) * float(ln.unit_cost or 0))
+        db.add(PaymentLine(
+            payment_request_id=pr.id, description=ln.description,
+            quantity=float(ln.quantity or 0), unit_cost=float(ln.unit_cost or 0),
+            amount=amt, sort_order=i,
+        ))
     import json as _json
     db.add(PaymentApprovalLog(
         payment_request_id=pr.id, actor_id=current_user.id, action="submit",
@@ -1381,6 +1398,7 @@ def get_payment_detail(pid: int, current_user: User = Depends(get_current_active
     proj = db.query(ProjectCode).filter(ProjectCode.id == pr.project_code_id).first() if pr.project_code_id else None
     atts = db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id == pr.id).all()
     logs = db.query(PaymentApprovalLog).filter(PaymentApprovalLog.payment_request_id == pr.id).order_by(PaymentApprovalLog.created_at).all()
+    pay_lines = db.query(PaymentLine).filter(PaymentLine.payment_request_id == pr.id).order_by(PaymentLine.sort_order).all()
     coa = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True).all()
     hist = []
     for l in logs:
@@ -1413,6 +1431,7 @@ def get_payment_detail(pid: int, current_user: User = Depends(get_current_active
         "program_approved_at": pr.program_approved_at.isoformat() if pr.program_approved_at else None,
         "finance_approved_at": pr.finance_approved_at.isoformat() if pr.finance_approved_at else None,
         "paid_at": pr.paid_at.isoformat() if pr.paid_at else None,
+        "lines": [{"id": L.id, "description": L.description, "quantity": L.quantity, "unit_cost": L.unit_cost, "amount": L.amount} for L in pay_lines],
         "attachments": [{"id": a.id, "filename": a.filename, "size_bytes": a.size_bytes, "url": a.stored_path} for a in atts],
         "history": hist,
         "chart_of_accounts": [{"id": a.id, "code": a.code, "name": a.name, "account_type": a.account_type, "label": f"{a.code} - {a.name}"} for a in coa],
@@ -2491,6 +2510,474 @@ def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_a
     buf = build_pdf(co, data["title"], headers, rows, code, sym, True, foot)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f"attachment; filename=ifrs_{report_type}.pdf"})
+
+
+
+
+# ===================== PROCUREMENT: RFQ → QUOTES → COMMITTEE → PO → FINANCE =====================
+
+def _rfq_no(db, company_id):
+    n = db.query(RFQ).filter(RFQ.company_id == company_id).count() + 1
+    return f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
+
+
+def _po_no(db, company_id):
+    n = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == company_id).count() + 1
+    return f"PO-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
+
+
+def _public_base():
+    return os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
+
+
+@app.get("/api/procurement/rfqs")
+def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    if not (current_user.can_access_vendors or current_user.role in ("company_admin", "finance", "superadmin", "project_manager")):
+        raise HTTPException(403, "No procurement access")
+    rows = db.query(RFQ).filter(RFQ.company_id == current_user.company_id).order_by(RFQ.id.desc()).all()
+    return rows
+
+
+@app.post("/api/procurement/rfqs")
+def create_rfq(
+    title: str = Form(...),
+    description: str = Form(""),
+    deadline: str = Form(...),  # ISO datetime or date
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if not (current_user.can_access_vendors or current_user.role in ("company_admin", "superadmin")):
+        raise HTTPException(403, "Procurement officer / admin only")
+    try:
+        dl = datetime.fromisoformat(deadline.replace("Z", ""))
+    except Exception:
+        dl = datetime.strptime(deadline[:10], "%Y-%m-%d").replace(hour=23, minute=59)
+    rfq = RFQ(
+        company_id=current_user.company_id,
+        rfq_no=_rfq_no(db, current_user.company_id),
+        title=title, description=description, deadline=dl,
+        status="open", created_by=current_user.id,
+    )
+    db.add(rfq)
+    db.commit()
+    db.refresh(rfq)
+    audit(db, current_user.company_id, current_user, "RFQ_CREATE", rfq.rfq_no)
+    return rfq
+
+
+@app.get("/api/procurement/rfqs/{rfq_id}")
+def get_rfq(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    links = db.query(RFQQuoteLink).filter(RFQQuoteLink.rfq_id == rfq.id).all()
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq.id).all()
+    members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq.id).all()
+    scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq.id).all()
+    pos = db.query(PurchaseOrder).filter(PurchaseOrder.rfq_id == rfq.id).all()
+    base = _public_base()
+    return {
+        "rfq": rfq,
+        "links": [{
+            "id": L.id, "token": L.token, "vendor_name": L.vendor_name, "vendor_email": L.vendor_email,
+            "status": L.status, "expires_at": L.expires_at.isoformat() if L.expires_at else None,
+            "url": f"{base}/quote/{L.token}" if base else f"/quote/{L.token}",
+        } for L in links],
+        "quotes": quotes,
+        "committee": [{
+            "id": m.id, "user_id": m.user_id, "role_label": m.role_label,
+            "name": (db.query(User).filter(User.id == m.user_id).first() or User()).full_name
+                or (db.query(User).filter(User.id == m.user_id).first() or User()).username,
+        } for m in members],
+        "scores": scores,
+        "purchase_orders": pos,
+    }
+
+
+@app.post("/api/procurement/rfqs/{rfq_id}/invite")
+def create_quote_link(
+    rfq_id: int,
+    vendor_name: str = Form(...),
+    vendor_email: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    if rfq.status not in ("open",):
+        raise HTTPException(400, "RFQ is not open for invites")
+    if rfq.deadline < datetime.utcnow():
+        rfq.status = "closed"
+        db.commit()
+        raise HTTPException(400, "RFQ deadline has passed")
+    token = secrets.token_urlsafe(24)
+    link = RFQQuoteLink(
+        company_id=current_user.company_id, rfq_id=rfq.id, token=token,
+        vendor_name=vendor_name, vendor_email=vendor_email,
+        status="pending", expires_at=rfq.deadline,
+    )
+    db.add(link)
+    db.commit()
+    db.refresh(link)
+    base = _public_base()
+    url = f"{base}/quote/{token}" if base else f"/quote/{token}"
+    audit(db, current_user.company_id, current_user, "RFQ_INVITE", f"{rfq.rfq_no} → {vendor_name}")
+    return {"id": link.id, "token": token, "url": url, "expires_at": link.expires_at.isoformat(), "vendor_name": vendor_name}
+
+
+# ---- Public quote form (no auth) ----
+@app.get("/api/public/quote/{token}")
+def public_quote_get(token: str, db: Session = Depends(get_db)):
+    link = db.query(RFQQuoteLink).filter(RFQQuoteLink.token == token).first()
+    if not link:
+        raise HTTPException(404, "Invalid or unknown link")
+    rfq = db.query(RFQ).filter(RFQ.id == link.rfq_id).first()
+    expired = link.expires_at < datetime.utcnow() or link.status in ("received", "expired")
+    if expired and link.status == "pending":
+        link.status = "expired"
+        db.commit()
+    msg = ""
+    if link.status == "received":
+        msg = "Your quotation submission has been received by the procurement office. This link is now closed."
+    elif link.status == "expired" or (link.expires_at < datetime.utcnow() and link.status != "submitted"):
+        msg = "This quotation link has expired."
+    elif link.status == "submitted":
+        msg = "You have already submitted a quotation. Awaiting procurement acknowledgement."
+    return {
+        "valid": link.status == "pending" and link.expires_at >= datetime.utcnow(),
+        "status": link.status,
+        "message": msg,
+        "vendor_name": link.vendor_name,
+        "rfq_no": rfq.rfq_no if rfq else "",
+        "title": rfq.title if rfq else "",
+        "description": rfq.description if rfq else "",
+        "deadline": rfq.deadline.isoformat() if rfq and rfq.deadline else None,
+    }
+
+
+@app.post("/api/public/quote/{token}")
+async def public_quote_submit(
+    token: str,
+    vendor_name: str = Form(...),
+    vendor_email: str = Form(""),
+    vendor_phone: str = Form(""),
+    amount: float = Form(...),
+    notes: str = Form(""),
+    validity_days: int = Form(30),
+    file: UploadFile = File(None),
+    db: Session = Depends(get_db),
+):
+    link = db.query(RFQQuoteLink).filter(RFQQuoteLink.token == token).first()
+    if not link:
+        raise HTTPException(404, "Invalid link")
+    if link.status != "pending" or link.expires_at < datetime.utcnow():
+        raise HTTPException(400, "This link is no longer accepting submissions")
+    rfq = db.query(RFQ).filter(RFQ.id == link.rfq_id).first()
+    if not rfq or rfq.status != "open":
+        raise HTTPException(400, "RFQ is closed")
+    att = None
+    if file and file.filename:
+        content = await file.read()
+        if len(content) > 2 * 1024 * 1024:
+            raise HTTPException(400, "Attachment max 2MB")
+        ext = Path(file.filename).suffix.lower() or ".bin"
+        fname = f"quote_{link.id}_{secrets.token_hex(4)}{ext}"
+        (UPLOADS_DIR / fname).write_bytes(content)
+        att = f"/static/uploads/{fname}"
+    quote = RFQQuote(
+        company_id=link.company_id, rfq_id=link.rfq_id, link_id=link.id,
+        vendor_name=vendor_name or link.vendor_name,
+        vendor_email=vendor_email or link.vendor_email,
+        vendor_phone=vendor_phone, amount=amount, notes=notes,
+        validity_days=validity_days, attachment_path=att, status="submitted",
+    )
+    link.status = "submitted"
+    # Also ensure vendor appears in vendor register if new
+    existing = db.query(Vendor).filter(
+        Vendor.company_id == link.company_id,
+        Vendor.name == quote.vendor_name,
+    ).first()
+    if not existing:
+        vn = f"V-RFQ-{link.id}"
+        db.add(Vendor(
+            company_id=link.company_id, vendor_number=vn, name=quote.vendor_name,
+            description=f"From RFQ quote {rfq.rfq_no if rfq else ''}", amount=amount,
+        ))
+    db.add(quote)
+    db.commit()
+    db.refresh(quote)
+    return {"message": "Quotation submitted successfully. Awaiting procurement acknowledgement.", "quote_id": quote.id}
+
+
+@app.post("/api/procurement/quotes/{quote_id}/receive")
+def mark_quote_received(quote_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    q = db.query(RFQQuote).filter(RFQQuote.id == quote_id, RFQQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404, "Quote not found")
+    q.status = "received"
+    q.received_at = datetime.utcnow()
+    if q.link_id:
+        link = db.query(RFQQuoteLink).filter(RFQQuoteLink.id == q.link_id).first()
+        if link:
+            link.status = "received"
+            link.received_at = datetime.utcnow()
+            link.received_by = current_user.id
+            # expire link
+            link.expires_at = datetime.utcnow()
+    db.commit()
+    audit(db, current_user.company_id, current_user, "QUOTE_RECEIVED", f"quote {quote_id}")
+    return {"message": "Marked received. Vendor link now shows acknowledgement and is closed."}
+
+
+@app.post("/api/procurement/rfqs/{rfq_id}/committee")
+def add_committee_member(
+    rfq_id: int,
+    user_id: int = Form(...),
+    role_label: str = Form("Member"),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    u = db.query(User).filter(User.id == user_id, User.company_id == current_user.company_id).first()
+    if not u:
+        raise HTTPException(400, "User not in company")
+    m = RFQCommitteeMember(company_id=current_user.company_id, rfq_id=rfq_id, user_id=user_id, role_label=role_label)
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return m
+
+
+@app.post("/api/procurement/quotes/{quote_id}/score")
+def score_quote(
+    quote_id: int,
+    score: float = Form(...),
+    comments: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    if score < 0 or score > 100:
+        raise HTTPException(400, "Score must be 0–100")
+    q = db.query(RFQQuote).filter(RFQQuote.id == quote_id, RFQQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404, "Quote not found")
+    # must be committee member or admin
+    is_member = db.query(RFQCommitteeMember).filter(
+        RFQCommitteeMember.rfq_id == q.rfq_id, RFQCommitteeMember.user_id == current_user.id
+    ).first()
+    if not is_member and current_user.role not in ("company_admin", "superadmin"):
+        raise HTTPException(403, "Only committee members can score")
+    existing = db.query(RFQQuoteScore).filter(
+        RFQQuoteScore.quote_id == quote_id, RFQQuoteScore.member_id == current_user.id
+    ).first()
+    if existing:
+        existing.score = score
+        existing.comments = comments
+    else:
+        db.add(RFQQuoteScore(
+            company_id=current_user.company_id, rfq_id=q.rfq_id, quote_id=quote_id,
+            member_id=current_user.id, score=score, comments=comments,
+        ))
+    db.commit()
+    # recompute average
+    all_s = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == quote_id).all()
+    q.total_score = sum(s.score for s in all_s) / max(len(all_s), 1)
+    q.status = "scored"
+    db.commit()
+    return {"message": "Score saved", "total_score": q.total_score}
+
+
+@app.post("/api/procurement/rfqs/{rfq_id}/declare-winner")
+def declare_winner(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).all()
+    if not quotes:
+        raise HTTPException(400, "No quotes to evaluate")
+    winner = max(quotes, key=lambda q: (q.total_score or 0, -(q.amount or 0)))
+    for q in quotes:
+        q.status = "winner" if q.id == winner.id else "rejected"
+    rfq.winner_quote_id = winner.id
+    rfq.status = "awarded"
+    token = secrets.token_urlsafe(24)
+    po = PurchaseOrder(
+        company_id=current_user.company_id,
+        po_no=_po_no(db, current_user.company_id),
+        rfq_id=rfq.id, quote_id=winner.id,
+        vendor_name=winner.vendor_name, vendor_email=winner.vendor_email or "",
+        amount=winner.amount, description=f"PO from {rfq.rfq_no}: {rfq.title}",
+        status="pending_vendor", result_token=token, created_by=current_user.id,
+    )
+    db.add(po)
+    # result links for all vendors (share on each line)
+    for q in quotes:
+        if q.id == winner.id:
+            continue
+        # losers can still get a token via quote-level result - store on a simple field via new PO only for winner
+        pass
+    db.commit()
+    db.refresh(po)
+    audit(db, current_user.company_id, current_user, "RFQ_WINNER", f"{rfq.rfq_no} → {winner.vendor_name}")
+    base = _public_base()
+    return {
+        "winner": winner,
+        "purchase_order": po,
+        "result_url": f"{base}/po-result/{token}" if base else f"/po-result/{token}",
+        "message": f"Winner: {winner.vendor_name} (score {winner.total_score})",
+    }
+
+
+@app.get("/api/procurement/rfqs/{rfq_id}/committee-report/pdf")
+def committee_report_pdf(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    co, code, sym = _company_and_currency(db, current_user)
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).order_by(RFQQuote.total_score.desc()).all()
+    headers = ["Vendor", "Amount", "Score", "Status", "Email"]
+    rows = [[q.vendor_name, f"{q.amount:,.2f}", f"{q.total_score:.1f}", q.status, q.vendor_email or ""] for q in quotes]
+    winner = next((q for q in quotes if q.status == "winner"), None)
+    foot = [
+        f"RFQ: {rfq.rfq_no} — {rfq.title}",
+        f"Winner: {winner.vendor_name if winner else 'Not declared'}",
+        "Procurement committee evaluation report",
+    ]
+    buf = build_pdf(co, "PROCUREMENT COMMITTEE REPORT", headers, rows, code, sym, True, foot)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename=committee_{rfq.rfq_no}.pdf"})
+
+
+@app.get("/api/procurement/pos")
+def list_pos(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(PurchaseOrder).filter(PurchaseOrder.company_id == current_user.company_id).order_by(PurchaseOrder.id.desc()).all()
+
+
+@app.get("/api/procurement/pos/{po_id}/result-link")
+def po_result_link(po_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404, "PO not found")
+    if not po.result_token:
+        po.result_token = secrets.token_urlsafe(24)
+        db.commit()
+    base = _public_base()
+    return {"url": f"{base}/po-result/{po.result_token}" if base else f"/po-result/{po.result_token}", "token": po.result_token}
+
+
+@app.get("/api/public/po-result/{token}")
+def public_po_result(token: str, db: Session = Depends(get_db)):
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.result_token == token).first()
+    if not po:
+        raise HTTPException(404, "Invalid link")
+    return {
+        "po_no": po.po_no,
+        "vendor_name": po.vendor_name,
+        "amount": po.amount,
+        "description": po.description,
+        "status": po.status,
+        "vendor_response": po.vendor_response,
+        "successful": po.status in ("pending_vendor", "accepted", "sent_to_finance", "paid") and True,
+        "can_respond": po.status == "pending_vendor" and not po.vendor_response,
+    }
+
+
+@app.post("/api/public/po-result/{token}")
+def public_po_respond(token: str, response: str = Form(...), db: Session = Depends(get_db)):
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.result_token == token).first()
+    if not po:
+        raise HTTPException(404, "Invalid link")
+    if po.status != "pending_vendor":
+        raise HTTPException(400, "This offer can no longer be accepted or rejected")
+    response = response.lower().strip()
+    if response not in ("accepted", "rejected"):
+        raise HTTPException(400, "response must be accepted or rejected")
+    po.vendor_response = response
+    po.vendor_response_at = datetime.utcnow()
+    po.status = "accepted" if response == "accepted" else "rejected"
+    db.commit()
+    return {"message": f"You have {response} the purchase order {po.po_no}", "status": po.status}
+
+
+@app.post("/api/procurement/pos/{po_id}/send-to-finance")
+def po_to_finance(
+    po_id: int,
+    debit_account_id: int = Form(...),
+    credit_account_id: int = Form(...),
+    project_code_id: Optional[int] = Form(None),
+    budget_code_id: Optional[int] = Form(None),
+    expense_code_id: Optional[int] = Form(None),
+    designated_approver_id: Optional[int] = Form(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404, "PO not found")
+    if po.status != "accepted":
+        raise HTTPException(400, "Vendor must accept the PO before sending to finance")
+    # need budget/expense - use first available if not provided
+    if not budget_code_id:
+        b = db.query(BudgetCode).filter(BudgetCode.company_id == current_user.company_id, BudgetCode.is_active == True).first()
+        budget_code_id = b.id if b else None
+    if not expense_code_id:
+        e = db.query(ExpenseCode).filter(ExpenseCode.company_id == current_user.company_id, ExpenseCode.is_active == True).first()
+        expense_code_id = e.id if e else None
+    if not budget_code_id or not expense_code_id:
+        raise HTTPException(400, "Company must have at least one budget code and expense code")
+    if not designated_approver_id:
+        designated_approver_id = current_user.id
+    pr = PaymentRequest(
+        company_id=current_user.company_id,
+        request_no=next_request_no(db, current_user.company_id),
+        requester_id=current_user.id,
+        budget_code_id=budget_code_id,
+        expense_code_id=expense_code_id,
+        amount=po.amount,
+        narration=f"PO {po.po_no}: {po.description}",
+        payee_name=po.vendor_name,
+        project_code_id=project_code_id,
+        debit_account_id=debit_account_id,
+        credit_account_id=credit_account_id,
+        designated_approver_id=designated_approver_id,
+        status="submitted",
+    )
+    db.add(pr)
+    db.commit()
+    db.refresh(pr)
+    po.payment_request_id = pr.id
+    po.debit_account_id = debit_account_id
+    po.credit_account_id = credit_account_id
+    po.project_code_id = project_code_id
+    po.status = "sent_to_finance"
+    db.add(PaymentApprovalLog(
+        payment_request_id=pr.id, actor_id=current_user.id, action="submit",
+        comment=f"From PO {po.po_no}", amount_snapshot=pr.amount,
+        debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+    ))
+    db.commit()
+    audit(db, current_user.company_id, current_user, "PO_TO_FINANCE", f"{po.po_no} → {pr.request_no}")
+    return {"message": "Purchase order sent to finance as payment request", "payment_request_id": pr.id, "request_no": pr.request_no}
+
+
+@app.get("/api/reports/po/{po_id}/pdf")
+def po_pdf(po_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404, "Not found")
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Field", "Value"]
+    rows = [
+        ["PO No", po.po_no], ["Vendor", po.vendor_name], ["Amount", f"{sym}{po.amount:,.2f}"],
+        ["Amount in words", amount_to_words(po.amount)], ["Description", po.description or ""],
+        ["Status", po.status], ["Vendor response", po.vendor_response or "Pending"],
+    ]
+    buf = build_pdf(co, "PURCHASE ORDER", headers, rows, code, sym, False)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={po.po_no}.pdf"})
 
 
 

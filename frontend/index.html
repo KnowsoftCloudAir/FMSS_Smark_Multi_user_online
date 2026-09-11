@@ -34,6 +34,33 @@
   </script>
 
   <!-- ========== LANDING (dark captivating) ========== -->
+  <div id="public-quote-page" class="page" style="background:#0a1628;color:#e8eef5;min-height:100vh;padding:24px;">
+    <div class="card" style="max-width:720px;margin:0 auto;">
+      <h2 id="pq-title">Vendor Quotation</h2>
+      <p id="pq-msg" class="hint"></p>
+      <div id="pq-form-wrap">
+        <div class="form-grid">
+          <div class="form-group"><label>Company / Vendor name *</label><input id="pq-name" /></div>
+          <div class="form-group"><label>Email</label><input id="pq-email" type="email" /></div>
+          <div class="form-group"><label>Phone</label><input id="pq-phone" /></div>
+          <div class="form-group full-width"><label>Notes</label><input id="pq-notes" /></div>
+        </div>
+        <table class="data-table"><thead><tr><th>Item</th><th>Qty</th><th>Unit cost</th><th>Amount</th></tr></thead>
+        <tbody id="pq-lines"></tbody></table>
+        <button class="btn btn-accent" type="button" id="pq-submit">Submit quotation</button>
+      </div>
+    </div>
+  </div>
+  <div id="public-result-page" class="page" style="background:#0a1628;color:#e8eef5;min-height:100vh;padding:24px;">
+    <div class="card" style="max-width:560px;margin:0 auto;">
+      <h2>Procurement result</h2>
+      <p id="pr-msg"></p>
+      <div id="pr-actions" style="display:none;gap:12px;margin-top:16px;">
+        <button class="btn btn-success" id="pr-accept">Accept purchase order</button>
+        <button class="btn btn-danger" id="pr-reject">Reject</button>
+      </div>
+    </div>
+  </div>
   <div id="landing-page" class="page">
     <div class="landing-bg">
       <div class="orb orb-1"></div>
@@ -170,6 +197,7 @@
         <div class="nav-divider" id="admin-divider" style="display:none;"></div>
         
         <a href="#" class="nav-item" data-view="payments"><span class="icon">💳</span> Payment Requests</a>
+        <a href="#" class="nav-item" data-view="procurement"><span class="icon">📋</span> Procurement RFQ</a>
         <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
         <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
@@ -268,6 +296,45 @@
         </section>
 
         
+        
+        <section id="view-procurement" class="view">
+          <div class="card">
+            <div class="card-header">
+              <h3>Procurement — RFQ / Quotes / Committee / PO</h3>
+              <button class="btn btn-success" id="btn-new-rfq">+ New RFQ</button>
+            </div>
+            <form id="rfq-form" class="form-grid" style="display:none;margin-bottom:16px;">
+              <div class="form-group"><label>Title *</label><input id="rfq-title" required /></div>
+              <div class="form-group"><label>Deadline *</label><input id="rfq-deadline" type="datetime-local" required /></div>
+              <div class="form-group full-width"><label>Description</label><input id="rfq-desc" /></div>
+              <div class="form-group full-width">
+                <label>Line items (description | qty | unit)</label>
+                <textarea id="rfq-items" rows="4" placeholder="Laptop|10|unit&#10;Installation|1|job"></textarea>
+              </div>
+              <div class="form-group full-width"><button class="btn btn-accent" type="submit">Create &amp; Open RFQ</button></div>
+            </form>
+            <div class="table-responsive">
+              <table class="data-table" id="rfq-table">
+                <thead><tr><th>No</th><th>Title</th><th>Deadline</th><th>Status</th><th>Actions</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="card" id="rfq-detail" style="display:none;">
+            <h3 id="rfq-detail-title">RFQ detail</h3>
+            <div id="rfq-detail-body"></div>
+          </div>
+          <div class="card">
+            <h3>Purchase Orders</h3>
+            <div class="table-responsive">
+              <table class="data-table" id="po-table">
+                <thead><tr><th>PO No</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Vendor links</th><th>To Finance</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         <section id="view-payments" class="view">
           <div class="card">
             <div class="card-header">
@@ -292,8 +359,16 @@
                 <input type="text" id="pay-expense-desc" readonly placeholder="Auto-filled from expense code" />
               </div>
               <div class="form-group">
-                <label>Amount *</label>
-                <input type="number" id="pay-amount" step="0.01" min="0.01" required />
+                <label>Total amount (auto from lines)</label>
+                <input type="number" id="pay-amount" step="0.01" min="0" readonly />
+              </div>
+              <div class="form-group full-width">
+                <label>Expense / payment lines</label>
+                <table class="data-table" id="pay-lines-table">
+                  <thead><tr><th>Description</th><th>Qty</th><th>Unit cost</th><th>Amount</th><th></th></tr></thead>
+                  <tbody id="pay-lines"></tbody>
+                </table>
+                <button type="button" class="btn btn-sm btn-outline" id="btn-add-pay-line">+ Add line</button>
               </div>
               <div class="form-group">
                 <label>Payee Name</label>

@@ -393,3 +393,124 @@ class BankStatementSession(Base):
     book_balance = Column(Float, default=0.0)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class RFQ(Base):
+    """Request for Quotation — procurement officer creates; vendors quote via expiring links."""
+    __tablename__ = "rfqs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_no = Column(String(50), nullable=False, index=True)
+    title = Column(String(300), nullable=False)
+    description = Column(Text, default="")
+    deadline = Column(DateTime, nullable=False)
+    status = Column(String(30), default="open")  # open | closed | evaluated | awarded | cancelled
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    winner_quote_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class RFQQuoteLink(Base):
+    """Unique link sent to a vendor to submit a quote; expires after deadline or when marked received."""
+    __tablename__ = "rfq_quote_links"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=False, index=True)
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    vendor_name = Column(String(200), default="")
+    vendor_email = Column(String(150), default="")
+    status = Column(String(30), default="pending")  # pending | submitted | received | expired
+    expires_at = Column(DateTime, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    received_at = Column(DateTime, nullable=True)
+    received_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+
+class RFQQuote(Base):
+    __tablename__ = "rfq_quotes"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=False, index=True)
+    link_id = Column(Integer, ForeignKey("rfq_quote_links.id"), nullable=True)
+    vendor_name = Column(String(200), nullable=False)
+    vendor_email = Column(String(150), default="")
+    vendor_phone = Column(String(50), default="")
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), default="NGN")
+    validity_days = Column(Integer, default=30)
+    notes = Column(Text, default="")
+    attachment_path = Column(String(500), nullable=True)
+    status = Column(String(30), default="submitted")  # submitted | received | scored | winner | rejected
+    total_score = Column(Float, default=0.0)
+    submitted_at = Column(DateTime, default=datetime.utcnow)
+    received_at = Column(DateTime, nullable=True)
+
+
+class RFQCommitteeMember(Base):
+    __tablename__ = "rfq_committee_members"
+    __table_args__ = (UniqueConstraint("rfq_id", "user_id", name="uq_rfq_member"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    role_label = Column(String(100), default="Member")
+
+
+class RFQQuoteScore(Base):
+    __tablename__ = "rfq_quote_scores"
+    __table_args__ = (UniqueConstraint("quote_id", "member_id", name="uq_quote_score"),)
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=False, index=True)
+    quote_id = Column(Integer, ForeignKey("rfq_quotes.id"), nullable=False, index=True)
+    member_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    score = Column(Float, nullable=False)  # 0-100
+    comments = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class PurchaseOrder(Base):
+    __tablename__ = "purchase_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    po_no = Column(String(50), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=True)
+    quote_id = Column(Integer, ForeignKey("rfq_quotes.id"), nullable=True)
+    vendor_name = Column(String(200), nullable=False)
+    vendor_email = Column(String(150), default="")
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), default="NGN")
+    description = Column(Text, default="")
+    # draft | pending_vendor | accepted | rejected | sent_to_finance | paid
+    status = Column(String(30), default="draft")
+    result_token = Column(String(64), unique=True, nullable=True, index=True)
+    vendor_response = Column(String(20), default="")  # accepted | rejected | ""
+    vendor_response_at = Column(DateTime, nullable=True)
+    payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=True)
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ===================== PROCUREMENT / RFQ =====================
+
+class PaymentLine(Base):
+    """Line items on a payment request: qty × unit cost = amount."""
+    __tablename__ = "payment_lines"
+
+    id = Column(Integer, primary_key=True, index=True)
+    payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=False, index=True)
+    description = Column(String(400), nullable=False)
+    quantity = Column(Float, default=1.0)
+    unit_cost = Column(Float, default=0.0)
+    amount = Column(Float, default=0.0)
+    sort_order = Column(Integer, default=0)
