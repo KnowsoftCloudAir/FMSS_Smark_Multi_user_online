@@ -2592,6 +2592,20 @@ def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_a
 
 
 
+
+def _rfq_no(db, cid):
+    try:
+        n = db.query(RFQ).filter(RFQ.company_id == cid).count() + 1
+    except Exception:
+        n = 1
+    return f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
+
+
+def _public_base():
+    import os
+    return (os.getenv("PUBLIC_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+
+
 @app.get("/api/procurement/rfqs")
 def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     if not (current_user.can_access_vendors or current_user.role in ("company_admin", "finance", "superadmin", "project_manager")):
@@ -2601,11 +2615,12 @@ def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session
 
 
 @app.post("/api/procurement/rfqs")
-def create_rfq(
+async def create_rfq(
     title: str = Form(...),
     description: str = Form(""),
     deadline: str = Form(...),
     items_json: str = Form("[]"),
+    file: UploadFile = File(None),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
@@ -2614,7 +2629,7 @@ def create_rfq(
     if not (getattr(current_user, "can_access_vendors", False) or current_user.role in ("company_admin", "superadmin", "finance", "project_manager")):
         raise HTTPException(403, "Procurement access required")
     try:
-        dl = datetime.fromisoformat(deadline.replace("Z", "+00:00").replace("+00:00", ""))
+        dl = datetime.fromisoformat(deadline.replace("Z", "").replace("+00:00", ""))
     except Exception:
         try:
             dl = datetime.strptime(deadline[:16], "%Y-%m-%dT%H:%M")
@@ -2624,11 +2639,26 @@ def create_rfq(
             except Exception:
                 raise HTTPException(400, "Invalid deadline format")
     try:
+        try:
+            rno = _rfq_no(db, current_user.company_id)
+        except NameError:
+            n = db.query(RFQ).filter(RFQ.company_id == current_user.company_id).count() + 1
+            rno = f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
+        att = None
+        if file and file.filename:
+            content = await file.read()
+            if len(content) > 25 * 1024 * 1024:
+                raise HTTPException(400, "RFQ attachment max 25MB")
+            ext = Path(file.filename).suffix.lower() or ".bin"
+            fname = f"rfq_{secrets.token_hex(6)}{ext}"
+            (UPLOADS_DIR / fname).write_bytes(content)
+            att = f"/static/uploads/{fname}"
         rfq = RFQ(
             company_id=current_user.company_id,
-            rfq_no=_rfq_no(db, current_user.company_id),
+            rfq_no=rno,
             title=title.strip(), description=description or "", deadline=dl,
             status="open", created_by=current_user.id,
+            attachment_path=att,
         )
         db.add(rfq)
         db.commit()
@@ -2652,7 +2682,7 @@ def create_rfq(
         return {
             "id": rfq.id, "rfq_no": rfq.rfq_no, "title": rfq.title,
             "description": rfq.description, "deadline": rfq.deadline.isoformat() if rfq.deadline else None,
-            "status": rfq.status,
+            "status": rfq.status, "attachment_path": rfq.attachment_path,
         }
     except HTTPException:
         raise
@@ -2754,7 +2784,8 @@ def public_quote_get(token: str, db: Session = Depends(get_db)):
         "conditions": rfq.description if rfq else "",
         "vendor_name": link.vendor_name,
         "vendor_email": link.vendor_email,
-        "company_label": (co.name if co else "Organisation"),  # minimal label only
+        "company_label": (co.name if co else "Organisation"),
+        "attachment_path": getattr(rfq, "attachment_path", None) if rfq else None,
         "items": [{"id": it.id, "description": it.description, "quantity": it.quantity, "unit": it.unit, "conditions": it.conditions} for it in items],
     }
 

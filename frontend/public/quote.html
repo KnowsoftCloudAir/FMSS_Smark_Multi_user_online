@@ -160,7 +160,8 @@
       document.getElementById("rfq-meta").innerHTML =
         "<strong>" + (d.rfq_no || "") + "</strong> — " + (d.title || "Request for quotation") +
         (d.deadline ? "<br/>Deadline: " + d.deadline : "") +
-        (d.description ? "<br/>" + d.description : "");
+        (d.description ? "<br/>" + d.description : "") +
+        (d.attachment_path ? "<br/><a href=\"" + d.attachment_path + "\" target=\"_blank\" rel=\"noopener\"><strong>Download full RFQ / TOR document</strong></a>" : "");
       if (d.vendor_name) document.getElementById("vendor_name").value = d.vendor_name;
       if (d.vendor_email) document.getElementById("vendor_email").value = d.vendor_email;
 

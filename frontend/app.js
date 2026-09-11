@@ -2295,6 +2295,8 @@ document.getElementById("rfq-form")?.addEventListener("submit", async function (
     return { description: p[0] || "Item", quantity: parseFloat(p[1]) || 1, unit: p[2] || "unit", conditions: p[3] || "" };
   });
   form.append("items_json", JSON.stringify(items));
+  var rf = document.getElementById("rfq-file");
+  if (rf && rf.files && rf.files[0]) form.append("file", rf.files[0]);
   try {
     var res = await fetch(API + "/api/procurement/rfqs", { method: "POST", headers: { Authorization: "Bearer " + token }, body: form });
     var text = await res.text();

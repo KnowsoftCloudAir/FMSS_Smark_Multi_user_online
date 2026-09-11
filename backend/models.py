@@ -409,6 +409,7 @@ class RFQ(Base):
     description = Column(Text, default="")
     deadline = Column(DateTime, nullable=False)
     status = Column(String(30), default="open")  # open | closed | evaluated | awarded | cancelled
+    attachment_path = Column(String(500), nullable=True)  # RFQ document for vendors
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     winner_quote_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

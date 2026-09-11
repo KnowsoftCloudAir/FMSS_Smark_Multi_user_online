@@ -11,14 +11,14 @@ from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
 
 def _styles():
     s = getSampleStyleSheet()
-    s.add(ParagraphStyle(name="Co", fontSize=10, alignment=TA_CENTER, spaceAfter=2, textColor=colors.HexColor("#1A6B9A"), fontName="Helvetica-Bold"))
-    s.add(ParagraphStyle(name="Title", fontSize=9, alignment=TA_CENTER, spaceAfter=3, spaceBefore=4, fontName="Helvetica-Bold"))
-    s.add(ParagraphStyle(name="Sub", fontSize=7, alignment=TA_CENTER, spaceAfter=8, textColor=colors.HexColor("#555")))
-    s.add(ParagraphStyle(name="Sec", fontSize=7, fontName="Helvetica-Bold", spaceBefore=4, spaceAfter=1))
-    s.add(ParagraphStyle(name="Cell", fontSize=6.5, leading=8))
-    s.add(ParagraphStyle(name="BoldCell", fontSize=6.5, leading=8, fontName="Helvetica-Bold"))
-    s.add(ParagraphStyle(name="Foot", fontSize=6, textColor=colors.HexColor("#666"), spaceBefore=6))
-    s.add(ParagraphStyle(name="Note", fontSize=6, leading=7, textColor=colors.HexColor("#444")))
+    s.add(ParagraphStyle(name="IfrsCo", fontSize=10, alignment=TA_CENTER, spaceAfter=2, textColor=colors.HexColor("#1A6B9A"), fontName="Helvetica-Bold"))
+    s.add(ParagraphStyle(name="IfrsTitle", fontSize=9, alignment=TA_CENTER, spaceAfter=3, spaceBefore=4, fontName="Helvetica-Bold"))
+    s.add(ParagraphStyle(name="IfrsSub", fontSize=7, alignment=TA_CENTER, spaceAfter=8, textColor=colors.HexColor("#555")))
+    s.add(ParagraphStyle(name="IfrsSec", fontSize=7, fontName="Helvetica-Bold", spaceBefore=4, spaceAfter=1))
+    s.add(ParagraphStyle(name="IfrsCell", fontSize=6.5, leading=8))
+    s.add(ParagraphStyle(name="IfrsBoldCell", fontSize=6.5, leading=8, fontName="Helvetica-Bold"))
+    s.add(ParagraphStyle(name="IfrsFoot", fontSize=6, textColor=colors.HexColor("#666"), spaceBefore=6))
+    s.add(ParagraphStyle(name="IfrsNote", fontSize=6, leading=7, textColor=colors.HexColor("#444")))
     return s
 
 
@@ -40,20 +40,24 @@ def _header(story, co, title, subtitle, styles):
                     break
                 except Exception:
                     pass
-    story.append(Paragraph(co.name if co else "Organisation", styles["Co"]))
+    story.append(Paragraph(co.name if co else "Organisation", styles["IfrsCo"]))
     if co and getattr(co, "address", None):
-        story.append(Paragraph(co.address, styles["Sub"]))
-    story.append(Paragraph(title, styles["Title"]))
-    story.append(Paragraph(subtitle, styles["Sub"]))
-    story.append(Paragraph("Prepared in accordance with IFRS (IAS 1 / IAS 7 as applicable)", styles["Foot"]))
+        story.append(Paragraph(co.address, styles["IfrsSub"]))
+    story.append(Paragraph(title, styles["IfrsTitle"]))
+    story.append(Paragraph(subtitle, styles["IfrsSub"]))
+    story.append(Paragraph("Prepared in accordance with IFRS (IAS 1 / IAS 7 as applicable)", styles["IfrsFoot"]))
 
 
-def _P(text, style_name="Cell", styles=None):
+def _P(text, style_name="IfrsCell", styles=None):
     if styles is None:
         styles = _styles()
     if hasattr(text, "text"):  # already Paragraph
         return text
-    return Paragraph(str(text).replace("\n", "<br/>"), styles[style_name])
+    try:
+        st = styles[style_name]
+    except Exception:
+        st = styles["IfrsCell"]
+    return Paragraph(str(text).replace("\n", "<br/>"), st)
 
 
 def _table(rows, col_widths=None, styles=None):
@@ -67,11 +71,11 @@ def _table(rows, col_widths=None, styles=None):
             elif hasattr(cell, "text"):
                 new_row.append(cell)
             else:
-                st = "BoldCell" if i == 0 or (isinstance(cell, str) and cell.startswith("<b>")) else "Cell"
+                st = "IfrsBoldCell" if i == 0 or (isinstance(cell, str) and cell.startswith("<b>")) else "Cell"
                 # Notes column smaller
                 if j == 1 and i > 0:
-                    st = "Note"
-                new_row.append(_P(cell, st if st in styles else "Cell", styles))
+                    st = "IfrsNote"
+                new_row.append(_P(cell, st if st in styles.byName else "IfrsCell", styles))
         wrapped.append(new_row)
     t = Table(wrapped, colWidths=col_widths or [100*mm, 18*mm, 28*mm, 28*mm])
     t.setStyle(TableStyle([
@@ -100,9 +104,9 @@ def build_sfp(co, year_label, prior_label, amounts: dict):
     def L(name, key, note=""):
         return [name, note or "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
     def S(name):
-        return [Paragraph(f"<b>{name}</b>", styles["Cell"]), "", "", ""]
+        return [Paragraph(f"<b>{name}</b>", styles["IfrsCell"]), "", "", ""]
     def T(name, key):
-        return [Paragraph(f"<b>{name}</b>", styles["Cell"]), "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
+        return [Paragraph(f"<b>{name}</b>", styles["IfrsCell"]), "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
 
     rows = [["", "Notes", year_label, prior_label]]
     rows.append(S("ASSETS"))
@@ -164,7 +168,7 @@ def build_sfp(co, year_label, prior_label, amounts: dict):
     rows.append(T("Total liabilities", "total_liab"))
     rows.append(T("Total equity and liabilities", "total_equity_liab"))
     story.append(_table(rows))
-    story.append(Paragraph("Figures marked — indicate no balance in the ledger for that line in the reporting period.", styles["Foot"]))
+    story.append(Paragraph("Figures marked — indicate no balance in the ledger for that line in the reporting period.", styles["IfrsFoot"]))
     doc.build(story)
     buf.seek(0)
     return buf
@@ -180,9 +184,9 @@ def build_pl(co, year_label, prior_label, amounts: dict):
     def L(name, key, note=""):
         return [name, note, _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
     def T(name, key):
-        return [Paragraph(f"<b>{name}</b>", styles["Cell"]), "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
+        return [Paragraph(f"<b>{name}</b>", styles["IfrsCell"]), "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
     rows = [["", "Notes", year_label, prior_label],
-            [Paragraph("<b>Continuing operations</b>", styles["Cell"]), "", "", ""],
+            [Paragraph("<b>Continuing operations</b>", styles["IfrsCell"]), "", "", ""],
             L("Revenue", "revenue", "IFRS 15"),
             L("Cost of sales", "cos", ""),
             T("Gross profit", "gross_profit"),
@@ -200,7 +204,7 @@ def build_pl(co, year_label, prior_label, amounts: dict):
             L("Profit/(loss) from discontinued operations", "discontinued", "IFRS 5"),
             T("Profit for the year", "profit_year"),
             ["", "", "", ""],
-            [Paragraph("<b>Other comprehensive income</b>", styles["Cell"]), "", "", ""],
+            [Paragraph("<b>Other comprehensive income</b>", styles["IfrsCell"]), "", "", ""],
             L("Remeasurement of defined benefit plans", "oci_db", "IAS 19"),
             L("Equity investments at FVOCI", "oci_fvoci", "IFRS 9"),
             L("Exchange differences on translation", "oci_fx", "IAS 21"),
@@ -258,9 +262,9 @@ def build_cashflow(co, year_label, prior_label, amounts: dict):
     def L(name, key, note=""):
         return [name, note, _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
     def T(name, key):
-        return [Paragraph(f"<b>{name}</b>", styles["Cell"]), "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
+        return [Paragraph(f"<b>{name}</b>", styles["IfrsCell"]), "", _fmt(a.get(key)), _fmt(a.get(key + "_prior"))]
     rows = [["", "Notes", year_label, prior_label],
-            [Paragraph("<b>Cash flows from operating activities</b>", styles["Cell"]), "", "", ""],
+            [Paragraph("<b>Cash flows from operating activities</b>", styles["IfrsCell"]), "", "", ""],
             L("Profit before tax", "pbt", ""),
             L("Depreciation and amortisation", "depreciation", ""),
             L("Finance costs", "fin_costs", ""),
@@ -272,13 +276,13 @@ def build_cashflow(co, year_label, prior_label, amounts: dict):
             L("Interest paid", "interest_paid", ""),
             L("Income taxes paid", "tax_paid", ""),
             T("Net cash from operating activities", "net_ops"),
-            [Paragraph("<b>Cash flows from investing activities</b>", styles["Cell"]), "", "", ""],
+            [Paragraph("<b>Cash flows from investing activities</b>", styles["IfrsCell"]), "", "", ""],
             L("Purchase of property, plant and equipment", "ppe_buy", "IAS 16"),
             L("Proceeds from sale of PPE", "ppe_sell", ""),
             L("Purchase of investments", "inv_buy", ""),
             L("Interest received", "int_recv", ""),
             T("Net cash used in investing activities", "net_inv"),
-            [Paragraph("<b>Cash flows from financing activities</b>", styles["Cell"]), "", "", ""],
+            [Paragraph("<b>Cash flows from financing activities</b>", styles["IfrsCell"]), "", "", ""],
             L("Proceeds from issue of shares", "shares", ""),
             L("Proceeds from borrowings", "borrow", ""),
             L("Repayment of borrowings", "repay", ""),
@@ -327,7 +331,7 @@ def build_bank_recon(co, account_name, statement_balance, book_balance, outstand
     story.append(Paragraph(
         "Prepared under standard bank reconciliation practice: start from balance as per bank statement, "
         "adjust for timing differences, arrive at balance as per cash book (system cash account balance).",
-        styles["Foot"],
+        styles["IfrsFoot"],
     ))
     doc.build(story)
     buf.seek(0)
