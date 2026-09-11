@@ -1982,19 +1982,9 @@ window.actPay = async function (id, action) {
     var c = document.getElementById("pd-credit");
     if (d && d.value) body.debit_account_id = parseInt(d.value, 10);
     if (c && c.value) body.credit_account_id = parseInt(c.value, 10);
-    if (!body.debit_account_id || !body.credit_account_id) {
-      // try open detail first
-      try {
-        await openPaymentDetail(id);
-        alert("Select Debit and Credit accounts in the payment detail, then click Finance Approve again.");
-        return;
-      } catch (e) {}
-      var debit = prompt("Debit account ID (required):");
-      var credit = prompt("Credit account ID (required):");
-      if (!debit || !credit) { alert("Debit and credit accounts are required"); return; }
-      body.debit_account_id = parseInt(debit, 10);
-      body.credit_account_id = parseInt(credit, 10);
-    }
+    // Accounts optional at finance approve — required only when marking paid
+    if (document.getElementById("pd-debit")?.value) body.debit_account_id = parseInt(document.getElementById("pd-debit").value, 10);
+    if (document.getElementById("pd-credit")?.value) body.credit_account_id = parseInt(document.getElementById("pd-credit").value, 10);
     body.comment = prompt("Comment (optional):") || "Accounts confirmed";
   } else if (action === "reject") {
     body.comment = prompt("Rejection reason:") || "Rejected";
@@ -2148,6 +2138,12 @@ document.getElementById("btn-dl-report-pdf")?.addEventListener("click", async fu
   };
   var url = map[key];
   if (!url) return alert("PDF not available for this report");
+  var from = document.getElementById("report-from")?.value;
+  var to = document.getElementById("report-to")?.value;
+  var q = [];
+  if (from) q.push("from_date="+encodeURIComponent(from));
+  if (to) q.push("to_date="+encodeURIComponent(to));
+  if (q.length) url += (url.indexOf("?")>=0?"&":"?") + q.join("&");
   try { await authDownload(url, key + ".pdf"); } catch (ex) { alert(ex.message); }
 });
 
@@ -2280,6 +2276,7 @@ async function loadProcurement() {
 document.getElementById("btn-new-rfq")?.addEventListener("click", function () {
   var f = document.getElementById("rfq-form");
   if (f) f.style.display = f.style.display === "none" ? "grid" : "none";
+  fillCodeDropdowns();
 });
 
 document.getElementById("rfq-form")?.addEventListener("submit", async function (e) {
@@ -2295,6 +2292,16 @@ document.getElementById("rfq-form")?.addEventListener("submit", async function (
     return { description: p[0] || "Item", quantity: parseFloat(p[1]) || 1, unit: p[2] || "unit", conditions: p[3] || "" };
   });
   form.append("items_json", JSON.stringify(items));
+  var rb = document.getElementById("rfq-budget");
+  var rp = document.getElementById("rfq-project");
+  var rd = document.getElementById("rfq-debit");
+  var rc = document.getElementById("rfq-credit");
+  var rcur = document.getElementById("rfq-currency");
+  if (rb && rb.value) form.append("budget_code_id", rb.value);
+  if (rp && rp.value) form.append("project_code_id", rp.value);
+  if (rd && rd.value) form.append("debit_account_id", rd.value);
+  if (rc && rc.value) form.append("credit_account_id", rc.value);
+  if (rcur && rcur.value) form.append("currency", rcur.value);
   var rf = document.getElementById("rfq-file");
   if (rf && rf.files && rf.files[0]) form.append("file", rf.files[0]);
   try {
@@ -2682,3 +2689,96 @@ document.getElementById("income-form")?.addEventListener("submit", async functio
     if(name==="income") loadIncome();
   };
 })();
+
+
+
+/* Knowsoft clock + todo + RFQ code dropdowns + report period */
+(function knowsoftClock(){
+  function tick(){
+    var el = document.getElementById("knowsoft-clock");
+    var d = document.getElementById("knowsoft-date");
+    if(!el) return;
+    var now = new Date();
+    el.textContent = now.toLocaleTimeString(undefined,{hour12:false});
+    if(d) d.textContent = now.toLocaleDateString(undefined,{weekday:"long",year:"numeric",month:"long",day:"numeric"});
+  }
+  setInterval(tick, 1000); tick();
+})();
+
+async function loadTodos(){
+  try{
+    var rows = await api("/api/todos");
+    var ul = document.getElementById("todo-list");
+    if(!ul) return;
+    ul.innerHTML = (rows||[]).map(function(t){
+      return "<li style='display:flex;align-items:center;gap:8px;padding:8px;border-bottom:1px solid #eee;"+(t.done?"opacity:.6;text-decoration:line-through;":"")+"'>"+
+        "<input type='checkbox' "+(t.done?"checked":"")+" onchange='toggleTodo("+t.id+")'/>"+
+        "<span style='flex:1'>"+t.title+"</span>"+
+        "<small style='color:#666'>"+(t.due_at?("Due "+t.due_at):"")+"</small></li>";
+    }).join("") || "<li style='color:#888'>No tasks yet</li>";
+  }catch(e){}
+}
+window.toggleTodo = async function(id){ try{ await api("/api/todos/"+id+"/toggle",{method:"POST"}); loadTodos(); }catch(ex){alert(ex.message);} };
+document.getElementById("btn-add-todo")?.addEventListener("click", async function(){
+  var title = document.getElementById("todo-title")?.value?.trim();
+  if(!title) return;
+  var form = new FormData();
+  form.append("title", title);
+  form.append("due_at", document.getElementById("todo-due")?.value || "");
+  try{
+    var res = await fetch(API+"/api/todos",{method:"POST",headers:{Authorization:"Bearer "+token},body:form});
+    var data = await res.json();
+    if(!res.ok) throw new Error(data.detail||"Failed");
+    document.getElementById("todo-title").value="";
+    loadTodos();
+  }catch(ex){alert(ex.message);}
+});
+
+async function loadCurrencyBadge(){
+  try{
+    var c = await api("/api/company/currency");
+    var b = document.getElementById("reporting-currency-badge");
+    if(b) b.textContent = "Reporting currency: "+c.code+" "+c.symbol;
+  }catch(e){}
+}
+
+async function fillCodeDropdowns(){
+  try{
+    var coa = await api("/api/finance/coa");
+    var buds = await api("/api/finance/budget-codes");
+    var projs = [];
+    try{ projs = await api("/api/finance/projects"); }catch(e){}
+    function fill(sel, rows, labelFn){
+      if(!sel) return;
+      var v = sel.value;
+      sel.innerHTML = '<option value="">— Select —</option>';
+      (rows||[]).forEach(function(r){
+        var o = document.createElement("option");
+        o.value = r.id;
+        o.textContent = labelFn(r);
+        sel.appendChild(o);
+      });
+      if(v) sel.value = v;
+    }
+    fill(document.getElementById("rfq-budget"), buds, function(r){ return r.code+" — "+(r.description||""); });
+    fill(document.getElementById("rfq-project"), projs, function(r){ return r.code+" — "+(r.name||""); });
+    fill(document.getElementById("rfq-debit"), coa, function(r){ return r.code+" — "+r.name; });
+    fill(document.getElementById("rfq-credit"), coa, function(r){ return r.code+" — "+r.name; });
+    fill(document.getElementById("pay-budget"), buds, function(r){ return r.code+" — "+(r.description||""); });
+    fill(document.getElementById("pay-debit"), coa, function(r){ return r.code+" — "+r.name; });
+    fill(document.getElementById("pay-credit"), coa, function(r){ return r.code+" — "+r.name; });
+    fill(document.getElementById("inc-cash-acct"), coa, function(r){ return r.code+" — "+r.name; });
+    fill(document.getElementById("inc-income-acct"), coa, function(r){ return r.code+" — "+r.name; });
+  }catch(e){ console.warn(e); }
+}
+
+// RFQ submit append codes
+(function(){
+  var form = document.getElementById("rfq-form");
+  if(!form) return;
+  form.addEventListener("submit", function(e){
+    // form data built in existing handler - patch by intercepting FormData after - better replace in existing handler
+  });
+})();
+
+// Patch existing RFQ form submit to include codes - string replace style already in app.js

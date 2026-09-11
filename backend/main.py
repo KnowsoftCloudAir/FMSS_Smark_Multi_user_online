@@ -15,7 +15,7 @@ from models import (
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
     Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession,
-    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine, RFQLineItem, RFQCommitteeInvite, IncomeReceipt, IncomeReceiptLine, RFQQuoteLine
+    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine, RFQLineItem, RFQCommitteeInvite, IncomeReceipt, IncomeReceiptLine, RFQQuoteLine, TodoItem
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -1027,8 +1027,9 @@ def submit_payment_request(
     if not approver:
         raise HTTPException(400, "Select a valid approver for this budget line")
 
-    debit_id = data.debit_account_id or exp.default_debit_account_id
-    credit_id = data.credit_account_id or exp.default_credit_account_id
+    # Accounts optional at submission — finance sets before payment
+    debit_id = data.debit_account_id or (exp.default_debit_account_id if exp else None)
+    credit_id = data.credit_account_id or (exp.default_credit_account_id if exp else None)
 
     lines_in = getattr(data, "lines", None) or []
     total_from_lines = 0.0
@@ -1136,8 +1137,7 @@ def finance_approve(pid: int, data: PaymentAction, current_user: User = Depends(
         pr.debit_account_id = data.debit_account_id
     if data.credit_account_id:
         pr.credit_account_id = data.credit_account_id
-    if not pr.debit_account_id or not pr.credit_account_id:
-        raise HTTPException(400, "Finance must select debit and credit accounts from the chart of accounts before approval")
+    # Debit/credit optional at approval — finance sets them before Mark Paid
     if not pr.payee_name:
         raise HTTPException(400, "Payee name is required before final finance approval")
     if not pr.budget_code_id or not pr.expense_code_id:
@@ -2514,7 +2514,7 @@ def ifrs_cash_flow(current_user: User = Depends(get_current_active_user), db: Se
 
 
 @app.get("/api/reports/ifrs/{report_type}/pdf")
-def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+def ifrs_report_pdf(report_type: str, from_date: Optional[str] = None, to_date: Optional[str] = None, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     try:
         from ifrs_statements import build_sfp, build_pl, build_equity, build_cashflow
         co, code, sym = _company_and_currency(db, current_user)
@@ -2522,10 +2522,23 @@ def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_a
         prior = str(datetime.utcnow().year - 1)
         cid = current_user.company_id
         amounts = {}
+        fd = td = None
+        try:
+            if from_date:
+                fd = datetime.strptime(from_date[:10], "%Y-%m-%d").date()
+            if to_date:
+                td = datetime.strptime(to_date[:10], "%Y-%m-%d").date()
+        except Exception:
+            pass
         if cid:
             accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid).all()
             for acc in accounts:
-                lines = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id).all()
+                q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id)
+                if fd:
+                    q = q.filter(JournalEntry.entry_date >= fd)
+                if td:
+                    q = q.filter(JournalEntry.entry_date <= td)
+                lines = q.all()
                 bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
                 at = (acc.account_type or "").lower()
                 name = (acc.name or "").lower()
@@ -2620,6 +2633,11 @@ async def create_rfq(
     description: str = Form(""),
     deadline: str = Form(...),
     items_json: str = Form("[]"),
+    budget_code_id: Optional[int] = Form(None),
+    project_code_id: Optional[int] = Form(None),
+    debit_account_id: Optional[int] = Form(None),
+    credit_account_id: Optional[int] = Form(None),
+    currency: str = Form("NGN"),
     file: UploadFile = File(None),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
@@ -2653,12 +2671,17 @@ async def create_rfq(
             fname = f"rfq_{secrets.token_hex(6)}{ext}"
             (UPLOADS_DIR / fname).write_bytes(content)
             att = f"/static/uploads/{fname}"
+        if not budget_code_id or not debit_account_id or not credit_account_id:
+            raise HTTPException(400, "Budget code, debit account and credit account are required when raising an RFQ")
         rfq = RFQ(
             company_id=current_user.company_id,
             rfq_no=rno,
             title=title.strip(), description=description or "", deadline=dl,
             status="open", created_by=current_user.id,
             attachment_path=att,
+            budget_code_id=budget_code_id, project_code_id=project_code_id,
+            debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+            currency=(currency or "NGN")[:10],
         )
         db.add(rfq)
         db.commit()
@@ -3355,6 +3378,62 @@ def public_committee_get(token: str, db: Session = Depends(get_db)):
     }
 
 
+
+@app.post("/api/public/committee-score/{token}/submit-all")
+async def public_committee_score_all(token: str, request: dict, db: Session = Depends(get_db)):
+    """Body: { scores: [{quote_id, score, comments}] } — one submission for all vendors."""
+    inv = db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.token == token).first()
+    if not inv:
+        raise HTTPException(404, "Invalid link")
+    if inv.submitted:
+        raise HTTPException(400, "You have already submitted scores for this RFQ")
+    scores_in = (request or {}).get("scores") or []
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == inv.rfq_id).all()
+    qids = {q.id for q in quotes}
+    if not quotes:
+        raise HTTPException(400, "No quotes to score")
+    submitted_map = {}
+    for s in scores_in:
+        try:
+            qid = int(s.get("quote_id"))
+            sc = float(s.get("score"))
+        except Exception:
+            raise HTTPException(400, "Invalid score entry")
+        if qid not in qids:
+            raise HTTPException(400, f"Unknown quote {qid}")
+        if sc is None or sc < 0 or sc > 100:
+            raise HTTPException(400, "Each score must be between 0 and 100 (no empty or negative scores)")
+        submitted_map[qid] = {"score": sc, "comments": s.get("comments") or ""}
+    missing = [q.id for q in quotes if q.id not in submitted_map]
+    if missing:
+        raise HTTPException(400, "Score every vendor before submitting (empty scores not allowed)")
+    for qid, val in submitted_map.items():
+        existing = db.query(RFQQuoteScore).filter(
+            RFQQuoteScore.quote_id == qid, RFQQuoteScore.member_id == inv.user_id
+        ).first()
+        if existing:
+            raise HTTPException(400, "Scores already locked for this member")
+        db.add(RFQQuoteScore(
+            company_id=inv.company_id, rfq_id=inv.rfq_id, quote_id=qid,
+            member_id=inv.user_id, score=val["score"], comments=val["comments"],
+        ))
+    inv.submitted = True
+    db.commit()
+    # refresh averages
+    for q in quotes:
+        scs = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id).all()
+        if scs:
+            q.total_score = sum(x.score for x in scs) / len(scs)
+            q.status = "scored"
+    db.commit()
+    po = _try_auto_award(db, inv.rfq_id, inv.company_id)
+    msg = "All scores submitted and locked."
+    if po:
+        msg += f" Winner auto-declared. PO {po.po_no} created."
+    return {"message": msg, "auto_awarded": bool(po), "po_no": getattr(po, "po_no", None)}
+
+
+
 @app.post("/api/public/committee-score/{token}")
 def public_committee_score(
     token: str,
@@ -3494,6 +3573,82 @@ def post_income(rid: int, current_user: User = Depends(require_roles("finance", 
     db.commit()
     audit(db, current_user.company_id, current_user, "INCOME_POST", rec.receipt_no)
     return {"message": "Income posted to ledger", "status": rec.status}
+
+
+
+
+@app.get("/api/todos")
+def list_todos(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(TodoItem).filter(TodoItem.user_id == current_user.id).order_by(TodoItem.done, TodoItem.due_at).all()
+
+
+@app.post("/api/todos")
+def create_todo(
+    title: str = Form(...),
+    due_at: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    due = None
+    if due_at:
+        try:
+            due = datetime.fromisoformat(due_at.replace("Z", ""))
+        except Exception:
+            try:
+                due = datetime.strptime(due_at[:16], "%Y-%m-%dT%H:%M")
+            except Exception:
+                due = None
+    item = TodoItem(company_id=current_user.company_id, user_id=current_user.id, title=title.strip(), due_at=due)
+    db.add(item)
+    db.commit()
+    db.refresh(item)
+    return item
+
+
+@app.post("/api/todos/{tid}/toggle")
+def toggle_todo(tid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    item = db.query(TodoItem).filter(TodoItem.id == tid, TodoItem.user_id == current_user.id).first()
+    if not item:
+        raise HTTPException(404, "Not found")
+    item.done = not item.done
+    item.done_at = datetime.utcnow() if item.done else None
+    db.commit()
+    return item
+
+
+@app.delete("/api/todos/{tid}")
+def delete_todo(tid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    item = db.query(TodoItem).filter(TodoItem.id == tid, TodoItem.user_id == current_user.id).first()
+    if not item:
+        raise HTTPException(404, "Not found")
+    db.delete(item)
+    db.commit()
+    return {"message": "Deleted"}
+
+
+@app.get("/api/company/currency")
+def get_currency(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    co = db.query(Company).filter(Company.id == current_user.company_id).first() if current_user.company_id else None
+    return {
+        "code": getattr(co, "reporting_currency_code", None) or "NGN",
+        "symbol": getattr(co, "reporting_currency_symbol", None) or "₦",
+    }
+
+
+@app.post("/api/company/currency")
+def set_currency(
+    code: str = Form(...),
+    symbol: str = Form(...),
+    current_user: User = Depends(require_roles("company_admin", "finance", "superadmin")),
+    db: Session = Depends(get_db),
+):
+    co = db.query(Company).filter(Company.id == current_user.company_id).first()
+    if not co:
+        raise HTTPException(404, "Company not found")
+    co.reporting_currency_code = code[:10]
+    co.reporting_currency_symbol = symbol[:8]
+    db.commit()
+    return {"code": co.reporting_currency_code, "symbol": co.reporting_currency_symbol}
 
 
 

@@ -2,46 +2,70 @@
 <html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Committee scoring</title>
 <style>
-body{margin:0;font-family:system-ui,sans-serif;background:#f4f6f8}.wrap{max-width:800px;margin:24px auto;background:#fff;padding:24px;border-radius:12px}
-table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;font-size:.9rem}
-.btn{background:#0d6efd;color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer}
+body{margin:0;font-family:system-ui,sans-serif;background:#f4f6f8}.wrap{max-width:900px;margin:24px auto;background:#fff;padding:24px;border-radius:12px;box-shadow:0 4px 20px rgba(0,0,0,.08)}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;font-size:.88rem;vertical-align:top}
+th{background:#eef2f6}.btn{background:#1a6b9a;color:#fff;border:0;padding:12px 18px;border-radius:8px;cursor:pointer;font-weight:700;width:100%;margin-top:16px}
+.btn:disabled{opacity:.5}.msg{padding:10px;border-radius:8px;margin-bottom:12px}.ok{background:#e8f5e9}.err{background:#ffebee}
+input[type=number]{width:80px}input[type=text]{width:100%}
 </style></head><body><div class="wrap">
 <h1 id="title">Committee evaluation</h1>
-<p id="msg"></p>
+<p id="msg" class="msg">Enter a score (0–100) for every vendor, then submit once. Scores cannot be changed after submit.</p>
 <div id="list"></div>
+<button class="btn" id="btn-submit-all">Submit all scores</button>
 </div>
 <script>
 const token = location.pathname.split("/").filter(Boolean).pop();
+let quotes = [];
 async function load(){
   const r = await fetch("/api/public/committee-score/"+token);
   const d = await r.json();
+  if(!r.ok){ document.getElementById("msg").textContent = d.detail||"Invalid link"; document.getElementById("msg").className="msg err"; document.getElementById("btn-submit-all").disabled=true; return; }
   document.getElementById("title").textContent = (d.rfq_no||"")+" — "+(d.title||"Scoring");
-  document.getElementById("msg").textContent = d.submitted_all ? "You have completed scoring for all vendors." : "Score each vendor (0–100). Scores cannot be edited after submit.";
-  let h = "<table><thead><tr><th>Vendor</th><th>Amount</th><th>Docs</th><th>Score</th><th>Comment</th><th></th></tr></thead><tbody>";
-  (d.quotes||[]).forEach(q=>{
-    h += "<tr><td><strong>"+q.vendor_name+"</strong><br/><small>"+(q.qualification||q.notes||"")+"</small></td><td>"+Number(q.amount).toLocaleString()+"</td><td>"+
-      (q.attachment_path?"<a href='"+q.attachment_path+"' target='_blank'>Quotation file</a>":"—")+
-      "<br/>CAC: "+(q.cac_number||"—")+"</td><td>";
-    if(q.locked) h += (q.my_score)+" (locked)";
-    else h += "<input type='number' min='0' max='100' id='s"+q.id+"' style='width:70px'/>";
+  quotes = d.quotes||[];
+  if(d.submitted_all){
+    document.getElementById("msg").textContent = "You have already submitted scores for this RFQ. Scores are locked.";
+    document.getElementById("msg").className="msg ok";
+    document.getElementById("btn-submit-all").disabled=true;
+  }
+  let h = "<table><thead><tr><th>Vendor</th><th>Amount</th><th>Documents</th><th>Score (0–100) *</th><th>Comment</th></tr></thead><tbody>";
+  quotes.forEach(q=>{
+    h += "<tr data-id='"+q.id+"'><td><strong>"+q.vendor_name+"</strong><br/><small>"+(q.qualification||q.notes||"")+"</small></td><td>"+Number(q.amount).toLocaleString()+"</td><td>"+
+      (q.attachment_path?"<a href='"+q.attachment_path+"' target='_blank'>Quotation</a>":"—")+"<br/>CAC: "+(q.cac_number||"—")+
+      "</td><td>";
+    if(q.locked || d.submitted_all) h += (q.my_score!=null?q.my_score:"—");
+    else h += "<input type='number' min='0' max='100' step='0.1' class='sc' required/>";
     h += "</td><td>";
-    if(q.locked) h += (q.my_comments||"");
-    else h += "<input id='c"+q.id+"' style='width:100%'/>";
-    h += "</td><td>";
-    if(!q.locked) h += "<button class='btn' onclick='score("+q.id+")'>Submit score</button>";
+    if(q.locked || d.submitted_all) h += (q.my_comments||"");
+    else h += "<input type='text' class='cm' placeholder='Optional comment'/>";
     h += "</td></tr>";
   });
   document.getElementById("list").innerHTML = h+"</tbody></table>";
 }
-window.score = async (id)=>{
-  const fd = new FormData();
-  fd.append("quote_id", id);
-  fd.append("score", document.getElementById("s"+id).value);
-  fd.append("comments", document.getElementById("c"+id).value||"");
-  const r = await fetch("/api/public/committee-score/"+token,{method:"POST",body:fd});
-  const d = await r.json();
-  if(!r.ok) return alert(d.detail||"Failed");
-  alert(d.message); load();
+document.getElementById("btn-submit-all").onclick = async ()=>{
+  const scores = [];
+  let bad = false;
+  document.querySelectorAll("#list tr[data-id]").forEach(tr=>{
+    const id = parseInt(tr.getAttribute("data-id"),10);
+    const inp = tr.querySelector(".sc");
+    if(!inp) return;
+    const v = inp.value;
+    if(v==="" || v===null || Number(v)<0 || Number(v)>100){ bad = true; inp.style.border="2px solid red"; }
+    else { inp.style.border=""; scores.push({quote_id:id, score:Number(v), comments:(tr.querySelector(".cm")?.value||"")}); }
+  });
+  if(bad){ alert("Every vendor must have a score from 0 to 100. Empty or negative scores are not allowed."); return; }
+  if(!scores.length){ alert("Nothing to submit"); return; }
+  if(!confirm("Submit scores for all "+scores.length+" vendor(s)? This cannot be undone.")) return;
+  const btn = document.getElementById("btn-submit-all");
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/public/committee-score/"+token+"/submit-all", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({scores})
+    });
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail||"Failed");
+    document.getElementById("msg").textContent = d.message; document.getElementById("msg").className="msg ok";
+    load();
+  }catch(e){ alert(e.message); btn.disabled=false; }
 };
 load();
 </script></body></html>

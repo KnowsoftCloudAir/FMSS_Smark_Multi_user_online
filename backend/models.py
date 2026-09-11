@@ -410,6 +410,11 @@ class RFQ(Base):
     deadline = Column(DateTime, nullable=False)
     status = Column(String(30), default="open")  # open | closed | evaluated | awarded | cancelled
     attachment_path = Column(String(500), nullable=True)  # RFQ document for vendors
+    budget_code_id = Column(Integer, ForeignKey("budget_codes.id"), nullable=True)
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
+    currency = Column(String(10), default="NGN")
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     winner_quote_id = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -600,3 +605,15 @@ class RFQQuoteLine(Base):
     unit = Column(String(50), default="unit")
     unit_cost = Column(Float, default=0.0)
     amount = Column(Float, default=0.0)
+
+
+class TodoItem(Base):
+    __tablename__ = "todo_items"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(300), nullable=False)
+    due_at = Column(DateTime, nullable=True)
+    done = Column(Boolean, default=False)
+    done_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

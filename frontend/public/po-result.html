@@ -8,6 +8,7 @@ h1{font-size:1.25rem}label{display:block;font-weight:600;margin:12px 0 4px}input
 </style></head><body><div class="wrap">
 <h1>Purchase order response</h1>
 <p id="msg"></p>
+<p id="po-dl" style="display:none;margin:12px 0;"><a id="po-pdf-link" href="#" target="_blank">Download Purchase Order (PDF)</a></p>
 <div id="actions" style="display:none">
 <label>Delivery / service completion %</label>
 <input type="number" id="pct" min="0" max="100" value="0"/>
@@ -24,6 +25,8 @@ async function load(){
   if(!r.ok) r = await fetch("/api/public/result/"+token);
   const d = await r.json();
   document.getElementById("msg").textContent = d.message||"";
+  if(d.po_pdf_url){ document.getElementById("po-dl").style.display="block"; document.getElementById("po-pdf-link").href=d.po_pdf_url; }
+
   document.getElementById("actions").style.display = d.can_respond ? "block" : "none";
 }
 load();
