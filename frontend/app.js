@@ -2139,6 +2139,7 @@ document.getElementById("btn-dl-report-pdf")?.addEventListener("click", async fu
     "ifrs-position": "/api/reports/ifrs/financial-position/pdf",
     "ifrs-performance": "/api/reports/ifrs/financial-performance/pdf",
     "ifrs-cashflow": "/api/reports/ifrs/cash-flow/pdf",
+    "ifrs-equity": "/api/reports/ifrs/equity/pdf",
     "payments": "/api/reports/payments/pdf",
     "assets": "/api/reports/assets/pdf",
     "inventory": "/api/reports/inventory/pdf",
@@ -2324,6 +2325,8 @@ window.openRfq = async function (id) {
       "<div class='form-group'><button type='button' class='btn btn-secondary' onclick='createInvite(" + id + ")'>Generate link</button></div></div>" +
       "<table class='data-table'><thead><tr><th>Vendor</th><th>Email</th><th>Status</th><th>Link</th></tr></thead><tbody>" +
       (links || "<tr><td colspan='4'>No links yet</td></tr>") + "</tbody></table>" +
+      "<h4>Committee scoring invites</h4>" +
+      "<button type='button' class='btn btn-sm btn-secondary' onclick='inviteCommittee(" + id + ")'>Invite committee member & copy link</button>" +
       "<h4>Add committee member (user ID)</h4>" +
       "<input id='cm-uid' type='number' placeholder='User ID' /> <button class='btn btn-sm btn-outline' onclick='addCommittee(" + id + ")'>Add</button>" +
       "<ul>" + (d.committee || []).map(function (m) { return "<li>#" + m.user_id + " " + (m.name || "") + " (" + m.role_label + ")</li>"; }).join("") + "</ul>" +
@@ -2511,3 +2514,27 @@ window.poToFinance = async function (poId) {
     if (name === "procurement") loadProcurement();
   };
 })();
+
+
+window.inviteCommittee = async function(rfqId) {
+  var uid = prompt("Existing staff user ID (leave blank to register new by email)");
+  var form = new FormData();
+  if (uid) form.append("user_id", uid);
+  else {
+    form.append("invite_name", prompt("Committee member name") || "");
+    form.append("invite_email", prompt("Email") || "");
+    form.append("password", prompt("Temporary password for new user") || "Committee@1");
+  }
+  try {
+    var res = await fetch(API + "/api/procurement/rfqs/" + rfqId + "/committee-invite", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    var url = data.url.startsWith("http") ? data.url : (location.origin + data.url);
+    await navigator.clipboard.writeText(url);
+    alert("Scoring link copied:\n" + url);
+  } catch (ex) { alert(ex.message); }
+};
+
+// Patch openRfq HTML to include committee invite button - via string if present

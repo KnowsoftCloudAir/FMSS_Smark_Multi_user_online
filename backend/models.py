@@ -114,6 +114,7 @@ class ChartOfAccount(Base):
 
 
 class BudgetCode(Base):
+
     __tablename__ = "budget_codes"
     __table_args__ = (UniqueConstraint("company_id", "code", name="uq_budget_code"),)
 
@@ -171,6 +172,8 @@ class PaymentRequest(Base):
     finance_approved_at = Column(DateTime, nullable=True)
     paid_at = Column(DateTime, nullable=True)
     rejection_reason = Column(Text, default="")
+    return_comment = Column(Text, default="")
+    returned_to_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -412,7 +415,19 @@ class RFQ(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class RFQLineItem(Base):
+    __tablename__ = "rfq_line_items"
+    id = Column(Integer, primary_key=True, index=True)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=False, index=True)
+    description = Column(String(400), nullable=False)
+    quantity = Column(Float, default=1.0)
+    unit = Column(String(50), default="unit")
+    conditions = Column(Text, default="")
+    sort_order = Column(Integer, default=0)
+
+
 class RFQQuoteLink(Base):
+
     """Unique link sent to a vendor to submit a quote; expires after deadline or when marked received."""
     __tablename__ = "rfq_quote_links"
 
@@ -461,7 +476,22 @@ class RFQCommitteeMember(Base):
     role_label = Column(String(100), default="Member")
 
 
+class RFQCommitteeInvite(Base):
+    """Link for committee member (existing staff or invited) to score quotes."""
+    __tablename__ = "rfq_committee_invites"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    rfq_id = Column(Integer, ForeignKey("rfqs.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    invite_email = Column(String(150), default="")
+    invite_name = Column(String(200), default="")
+    token = Column(String(64), unique=True, nullable=False, index=True)
+    submitted = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class RFQQuoteScore(Base):
+
     __tablename__ = "rfq_quote_scores"
     __table_args__ = (UniqueConstraint("quote_id", "member_id", name="uq_quote_score"),)
 
@@ -493,7 +523,10 @@ class PurchaseOrder(Base):
     result_token = Column(String(64), unique=True, nullable=True, index=True)
     vendor_response = Column(String(20), default="")  # accepted | rejected | ""
     vendor_response_at = Column(DateTime, nullable=True)
+    invoice_path = Column(String(500), nullable=True)
+    delivery_percent = Column(Float, default=0.0)
     payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=True)
+    designated_approver_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
     credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
     project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)

@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Vendor Quotation</title>
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:system-ui,sans-serif;background:#f4f6f8;color:#1a1a1a}
+.wrap{max-width:720px;margin:24px auto;background:#fff;padding:28px;border-radius:12px;box-shadow:0 4px 24px rgba(0,0,0,.08)}
+h1{font-size:1.35rem;margin:0 0 8px}h2{font-size:1.05rem;margin:20px 0 10px;border-bottom:1px solid #e0e0e0;padding-bottom:6px}
+.hint{color:#555;font-size:.9rem;margin-bottom:16px}label{display:block;font-weight:600;font-size:.85rem;margin:10px 0 4px}
+input,textarea,select{width:100%;padding:10px;border:1px solid #c5cdd6;border-radius:8px;font-size:1rem}
+table{width:100%;border-collapse:collapse;margin:12px 0}th,td{border:1px solid #dde3ea;padding:8px;text-align:left;font-size:.9rem}
+th{background:#eef2f6}.btn{background:#0d6efd;color:#fff;border:0;padding:12px 20px;border-radius:8px;font-weight:700;cursor:pointer;width:100%;margin-top:16px}
+.btn:disabled{opacity:.5}.msg{padding:12px;background:#e8f5e9;border-radius:8px;margin-bottom:12px}.err{background:#ffebee}
+.check{display:flex;gap:8px;align-items:flex-start;margin:14px 0}.check input{width:auto;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1 id="title">Vendor Quotation</h1>
+  <p class="hint" id="msg"></p>
+  <div id="items-box"></div>
+  <form id="f">
+    <h2>Vendor details</h2>
+    <label>Vendor / company name *</label><input id="vendor_name" required/>
+    <label>Email</label><input id="vendor_email" type="email"/>
+    <label>Phone</label><input id="vendor_phone"/>
+    <label>CAC number *</label><input id="cac_number" required/>
+    <label>Tax clearance reference *</label><input id="tax_clearance" required/>
+    <label>Qualification / capacity *</label><textarea id="qualification" rows="3" required></textarea>
+    <label>Bank name *</label><input id="bank_name" required/>
+    <label>Bank account number *</label><input id="bank_account" required/>
+    <label>Account name *</label><input id="bank_account_name" required/>
+    <label>Total quotation amount *</label><input id="amount" type="number" step="0.01" min="0.01" required/>
+    <label>Notes</label><textarea id="notes" rows="2"></textarea>
+    <label>Official letter-head quotation (PDF, max 25MB) *</label><input id="file" type="file" accept=".pdf,image/*"/>
+    <div class="check">
+      <input type="checkbox" id="consent" required/>
+      <label for="consent" style="font-weight:500">I consent that our organisation is ready, willing and able to supply the goods/services listed under the stated conditions.</label>
+    </div>
+    <button class="btn" type="submit" id="submit">Submit quotation</button>
+  </form>
+</div>
+<script>
+const token = location.pathname.split("/").filter(Boolean).pop();
+const API = "";
+async function load(){
+  const r = await fetch(API+"/api/public/quote/"+token);
+  const d = await r.json();
+  document.getElementById("title").textContent = (d.rfq_no||"")+" — "+(d.title||"Quotation");
+  document.getElementById("msg").textContent = d.message||d.description||"";
+  if(d.vendor_name) document.getElementById("vendor_name").value = d.vendor_name;
+  if(d.vendor_email) document.getElementById("vendor_email").value = d.vendor_email;
+  let html = "<h2>Requested items / services</h2>";
+  if(d.items&&d.items.length){
+    html += "<table><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Conditions</th></tr></thead><tbody>";
+    d.items.forEach(it=>{
+      html += "<tr><td>"+it.description+"</td><td>"+it.quantity+"</td><td>"+(it.unit||"")+"</td><td>"+(it.conditions||"")+"</td></tr>";
+    });
+    html += "</tbody></table>";
+  } else {
+    html += "<p class='hint'>"+(d.description||"See RFQ description above.")+"</p>";
+  }
+  document.getElementById("items-box").innerHTML = html;
+  if(!d.valid){ document.getElementById("submit").disabled = true; document.getElementById("f").style.opacity=".65"; }
+}
+load().catch(e=>{ document.getElementById("msg").textContent="Invalid or expired link"; document.getElementById("msg").className="hint err";});
+document.getElementById("f").onsubmit = async (e)=>{
+  e.preventDefault();
+  if(!document.getElementById("consent").checked) return alert("Consent is required");
+  const fd = new FormData();
+  ["vendor_name","vendor_email","vendor_phone","cac_number","tax_clearance","qualification","bank_name","bank_account","bank_account_name","amount","notes"].forEach(k=>fd.append(k, document.getElementById(k).value));
+  fd.append("consent_capable","true");
+  fd.append("validity_days","30");
+  const f = document.getElementById("file").files[0];
+  if(f) fd.append("file", f);
+  const btn = document.getElementById("submit"); btn.disabled=true;
+  try{
+    const r = await fetch(API+"/api/public/quote/"+token,{method:"POST",body:fd});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.detail||"Failed");
+    document.getElementById("msg").textContent = d.message;
+    document.getElementById("msg").className = "msg";
+    btn.textContent = "Submitted";
+  }catch(err){ alert(err.message); btn.disabled=false; }
+};
+</script>
+</body></html>

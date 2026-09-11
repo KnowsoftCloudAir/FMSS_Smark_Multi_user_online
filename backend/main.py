@@ -15,7 +15,7 @@ from models import (
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
     Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession,
-    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine
+    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine, RFQLineItem, RFQCommitteeInvite
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -2484,50 +2484,75 @@ def ifrs_cash_flow(current_user: User = Depends(get_current_active_user), db: Se
 
 @app.get("/api/reports/ifrs/{report_type}/pdf")
 def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    from ifrs_statements import build_sfp, build_pl, build_equity, build_cashflow
     co, code, sym = _company_and_currency(db, current_user)
-    if report_type == "financial-position":
-        data = ifrs_financial_position(current_user, db)
-        headers = ["Code", "Name", "Type", "Project", f"Amount ({sym})", "IFRS / Standard"]
-        rows = [[r["code"], r["name"], r["type"], r.get("project_code", ""), f"{r['amount']:,.2f}", r["ifrs"]] for r in data["rows"]]
-        foot = [f"Standard: {data['standard']}", f"Assets incl. cash concept total (net): see ledger", "Prepared in accordance with IFRS framework (IAS 1)."]
-    elif report_type == "financial-performance":
-        data = ifrs_financial_performance(current_user, db)
-        headers = ["Code", "Name", "Type", "Project", f"Amount ({sym})", "IFRS / Standard"]
-        rows = [[r["code"], r["name"], r["type"], r.get("project_code", ""), f"{r['amount']:,.2f}", r["ifrs"]] for r in data["rows"]]
-        foot = [
-            f"Total income: {sym}{data['total_income']:,.2f}",
-            f"Total expense: {sym}{data['total_expense']:,.2f}",
-            f"Surplus/(Deficit): {sym}{data['surplus_deficit']:,.2f}",
-            f"Standard: {data['standard']}",
-        ]
-    elif report_type == "cash-flow":
-        data = ifrs_cash_flow(current_user, db)
-        headers = ["Date", "Entry", "Description", "Class", f"Amount ({sym})", "IFRS / Standard"]
-        rows = [[r["date"], r["entry_no"], r["description"] or "", r["classification"], f"{r['amount']:,.2f}", r["ifrs"]] for r in data["rows"]]
-        foot = [f"{k}: {sym}{v:,.2f}" for k, v in data["totals"].items()] + [f"Net change: {sym}{data['net_change']:,.2f}", f"Standard: {data['standard']}"]
+    year = str(datetime.utcnow().year)
+    prior = str(datetime.utcnow().year - 1)
+    cid = current_user.company_id
+    # Map ledger balances into IFRS buckets
+    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid).all()
+    amounts = {}
+    for acc in accounts:
+        lines = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id).all()
+        bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
+        at = (acc.account_type or "").lower()
+        name = (acc.name or "").lower()
+        if at == "cash" or "cash" in name:
+            amounts["cash"] = amounts.get("cash", 0) + bal
+        elif at == "asset":
+            if "receivable" in name:
+                amounts["receivables"] = amounts.get("receivables", 0) + bal
+            elif "inventor" in name:
+                amounts["inventory"] = amounts.get("inventory", 0) + bal
+            elif "property" in name or "plant" in name or "equipment" in name or "ppe" in name:
+                amounts["ppe"] = amounts.get("ppe", 0) + bal
+            else:
+                amounts["other_ca"] = amounts.get("other_ca", 0) + bal
+        elif at == "liability":
+            if "payable" in name:
+                amounts["payables"] = amounts.get("payables", 0) + (-bal)
+            else:
+                amounts["other_cl"] = amounts.get("other_cl", 0) + (-bal)
+        elif at == "equity":
+            amounts["retained"] = amounts.get("retained", 0) + (-bal)
+        elif at == "income":
+            amounts["revenue"] = amounts.get("revenue", 0) + (-bal)
+        elif at == "expense":
+            amounts["admin"] = amounts.get("admin", 0) + bal
+    amounts["total_ca"] = sum(amounts.get(k, 0) for k in ("cash", "receivables", "inventory", "other_ca", "cta"))
+    amounts["total_nca"] = sum(amounts.get(k, 0) for k in ("ppe", "inv_prop", "intangible", "associates", "fin_assets", "dta", "other_nca"))
+    amounts["total_assets"] = amounts.get("total_ca", 0) + amounts.get("total_nca", 0)
+    amounts["total_cl"] = sum(amounts.get(k, 0) for k in ("payables", "c_borrowings", "ctl", "c_provisions", "other_cl"))
+    amounts["total_ncl"] = sum(amounts.get(k, 0) for k in ("nc_borrowings", "dtl", "nc_provisions", "other_ncl"))
+    amounts["total_liab"] = amounts.get("total_cl", 0) + amounts.get("total_ncl", 0)
+    amounts["total_equity"] = amounts.get("retained", 0) + amounts.get("share_capital", 0) + amounts.get("share_premium", 0) + amounts.get("other_reserves", 0)
+    amounts["total_equity_owners"] = amounts["total_equity"]
+    amounts["total_equity_liab"] = amounts["total_equity"] + amounts["total_liab"]
+    amounts["gross_profit"] = amounts.get("revenue", 0) - amounts.get("cos", 0)
+    amounts["operating_profit"] = amounts["gross_profit"] + amounts.get("other_income", 0) - amounts.get("admin", 0) - amounts.get("distribution", 0) - amounts.get("other_exp", 0)
+    amounts["pbt"] = amounts["operating_profit"] + amounts.get("fin_income", 0) - amounts.get("fin_costs", 0)
+    amounts["profit_year"] = amounts["pbt"] - amounts.get("tax", 0)
+    amounts["profit_cont"] = amounts["profit_year"]
+    amounts["tci"] = amounts["profit_year"]
+    amounts["cash_close"] = amounts.get("cash", 0)
+    amounts["net_ops"] = amounts.get("pbt", 0)
+    if report_type in ("financial-position", "position", "sfp"):
+        buf = build_sfp(co, year, prior, amounts)
+        fname = "statement_of_financial_position.pdf"
+    elif report_type in ("financial-performance", "performance", "pl"):
+        buf = build_pl(co, year, prior, amounts)
+        fname = "statement_of_profit_or_loss.pdf"
+    elif report_type in ("equity", "changes-in-equity"):
+        buf = build_equity(co, year, amounts)
+        fname = "statement_of_changes_in_equity.pdf"
+    elif report_type in ("cash-flow", "cashflow"):
+        buf = build_cashflow(co, year, prior, amounts)
+        fname = "statement_of_cash_flows.pdf"
     else:
-        raise HTTPException(404, "Unknown IFRS report")
-    buf = build_pdf(co, data["title"], headers, rows, code, sym, True, foot)
+        raise HTTPException(404, "Unknown IFRS report type")
     return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename=ifrs_{report_type}.pdf"})
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
 
-
-
-
-# ===================== PROCUREMENT: RFQ → QUOTES → COMMITTEE → PO → FINANCE =====================
-
-def _rfq_no(db, company_id):
-    n = db.query(RFQ).filter(RFQ.company_id == company_id).count() + 1
-    return f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
-
-
-def _po_no(db, company_id):
-    n = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == company_id).count() + 1
-    return f"PO-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
-
-
-def _public_base():
-    return os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 
 
 @app.get("/api/procurement/rfqs")
@@ -2631,28 +2656,35 @@ def create_quote_link(
 def public_quote_get(token: str, db: Session = Depends(get_db)):
     link = db.query(RFQQuoteLink).filter(RFQQuoteLink.token == token).first()
     if not link:
-        raise HTTPException(404, "Invalid or unknown link")
+        raise HTTPException(404, "Invalid link")
     rfq = db.query(RFQ).filter(RFQ.id == link.rfq_id).first()
-    expired = link.expires_at < datetime.utcnow() or link.status in ("received", "expired")
-    if expired and link.status == "pending":
-        link.status = "expired"
-        db.commit()
+    co = db.query(Company).filter(Company.id == link.company_id).first()
+    items = db.query(RFQLineItem).filter(RFQLineItem.rfq_id == link.rfq_id).order_by(RFQLineItem.sort_order).all()
+    existing = db.query(RFQQuote).filter(RFQQuote.link_id == link.id).first()
+    expired = bool(link.expires_at and link.expires_at < datetime.utcnow())
+    received = link.status == "received"
+    valid = link.status == "pending" and not expired and not existing
     msg = ""
-    if link.status == "received":
-        msg = "Your quotation submission has been received by the procurement office. This link is now closed."
-    elif link.status == "expired" or (link.expires_at < datetime.utcnow() and link.status != "submitted"):
-        msg = "This quotation link has expired."
-    elif link.status == "submitted":
+    if received:
+        msg = "Your submission has been received by the procurement officer. This link is closed."
+    elif existing:
         msg = "You have already submitted a quotation. Awaiting procurement acknowledgement."
+    elif expired or link.status == "expired":
+        msg = "This quotation link has expired."
     return {
-        "valid": link.status == "pending" and link.expires_at >= datetime.utcnow(),
-        "status": link.status,
+        "valid": valid,
+        "received": received,
+        "already_submitted": bool(existing),
         "message": msg,
-        "vendor_name": link.vendor_name,
         "rfq_no": rfq.rfq_no if rfq else "",
         "title": rfq.title if rfq else "",
         "description": rfq.description if rfq else "",
         "deadline": rfq.deadline.isoformat() if rfq and rfq.deadline else None,
+        "conditions": rfq.description if rfq else "",
+        "vendor_name": link.vendor_name,
+        "vendor_email": link.vendor_email,
+        "company_label": (co.name if co else "Organisation"),  # minimal label only
+        "items": [{"id": it.id, "description": it.description, "quantity": it.quantity, "unit": it.unit, "conditions": it.conditions} for it in items],
     }
 
 
@@ -2664,6 +2696,13 @@ async def public_quote_submit(
     vendor_phone: str = Form(""),
     amount: float = Form(...),
     notes: str = Form(""),
+    cac_number: str = Form(""),
+    tax_clearance: str = Form(""),
+    qualification: str = Form(""),
+    bank_name: str = Form(""),
+    bank_account: str = Form(""),
+    bank_account_name: str = Form(""),
+    consent_capable: str = Form("false"),
     validity_days: int = Form(30),
     file: UploadFile = File(None),
     db: Session = Depends(get_db),
@@ -2671,17 +2710,21 @@ async def public_quote_submit(
     link = db.query(RFQQuoteLink).filter(RFQQuoteLink.token == token).first()
     if not link:
         raise HTTPException(404, "Invalid link")
-    if link.status != "pending" or link.expires_at < datetime.utcnow():
+    if link.status != "pending" or (link.expires_at and link.expires_at < datetime.utcnow()):
         raise HTTPException(400, "This link is no longer accepting submissions")
-    rfq = db.query(RFQ).filter(RFQ.id == link.rfq_id).first()
-    if not rfq or rfq.status != "open":
-        raise HTTPException(400, "RFQ is closed")
+    if db.query(RFQQuote).filter(RFQQuote.link_id == link.id).first():
+        raise HTTPException(400, "Quote already submitted")
+    if consent_capable.lower() not in ("true", "1", "yes", "on"):
+        raise HTTPException(400, "You must consent that you are ready and able to provide the goods/services")
     att = None
     if file and file.filename:
         content = await file.read()
-        if len(content) > 2 * 1024 * 1024:
-            raise HTTPException(400, "Attachment max 2MB")
-        ext = Path(file.filename).suffix.lower() or ".bin"
+        # practical limit 25MB (browser uploads; 500MB is not viable for typical hosting)
+        if len(content) > 25 * 1024 * 1024:
+            raise HTTPException(400, "Attachment max 25MB")
+        ext = Path(file.filename).suffix.lower()
+        if ext not in (".pdf", ".png", ".jpg", ".jpeg"):
+            raise HTTPException(400, "Upload PDF or image of letter-head quotation")
         fname = f"quote_{link.id}_{secrets.token_hex(4)}{ext}"
         (UPLOADS_DIR / fname).write_bytes(content)
         att = f"/static/uploads/{fname}"
@@ -2691,23 +2734,23 @@ async def public_quote_submit(
         vendor_email=vendor_email or link.vendor_email,
         vendor_phone=vendor_phone, amount=amount, notes=notes,
         validity_days=validity_days, attachment_path=att, status="submitted",
+        cac_number=cac_number, tax_clearance=tax_clearance, qualification=qualification,
+        bank_name=bank_name, bank_account=bank_account, bank_account_name=bank_account_name,
+        consent_capable=True,
     )
     link.status = "submitted"
-    # Also ensure vendor appears in vendor register if new
-    existing = db.query(Vendor).filter(
-        Vendor.company_id == link.company_id,
-        Vendor.name == quote.vendor_name,
-    ).first()
+    existing = db.query(Vendor).filter(Vendor.company_id == link.company_id, Vendor.name == quote.vendor_name).first()
     if not existing:
-        vn = f"V-RFQ-{link.id}"
         db.add(Vendor(
-            company_id=link.company_id, vendor_number=vn, name=quote.vendor_name,
-            description=f"From RFQ quote {rfq.rfq_no if rfq else ''}", amount=amount,
+            company_id=link.company_id, vendor_number=f"V-RFQ-{link.id}", name=quote.vendor_name,
+            description=f"CAC:{cac_number} Tax:{tax_clearance}", amount=amount,
+            cac_number=cac_number or "", tax_clearance=tax_clearance or "",
+            bank=bank_name or "",
         ))
     db.add(quote)
     db.commit()
     db.refresh(quote)
-    return {"message": "Quotation submitted successfully. Awaiting procurement acknowledgement.", "quote_id": quote.id}
+    return {"message": "Quotation submitted. Await procurement acknowledgement that your submission was received.", "quote_id": quote.id}
 
 
 @app.post("/api/procurement/quotes/{quote_id}/receive")
@@ -2978,6 +3021,192 @@ def po_pdf(po_id: int, current_user: User = Depends(get_current_active_user), db
     buf = build_pdf(co, "PURCHASE ORDER", headers, rows, code, sym, False)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f"attachment; filename={po.po_no}.pdf"})
+
+
+
+
+@app.post("/api/procurement/rfqs/{rfq_id}/committee-invite")
+def committee_invite(
+    rfq_id: int,
+    user_id: Optional[int] = Form(None),
+    invite_name: str = Form(""),
+    invite_email: str = Form(""),
+    password: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Invite existing staff by user_id, or register a new committee user and return scoring link."""
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    uid = user_id
+    if not uid and invite_email:
+        # create user with limited access
+        uname = (invite_email.split("@")[0] + "_cm")[:40]
+        existing = db.query(User).filter(User.company_id == current_user.company_id, User.username == uname).first()
+        if existing:
+            uid = existing.id
+        else:
+            u = User(
+                company_id=current_user.company_id, username=uname, email=invite_email,
+                full_name=invite_name or uname,
+                hashed_password=get_password_hash(password or secrets.token_urlsafe(8)),
+                role="user", is_active=True, can_access_reports=True, can_access_vendors=True,
+            )
+            db.add(u)
+            db.commit()
+            db.refresh(u)
+            uid = u.id
+    if not uid:
+        raise HTTPException(400, "Provide user_id or invite_email")
+    if not db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id, RFQCommitteeMember.user_id == uid).first():
+        db.add(RFQCommitteeMember(company_id=current_user.company_id, rfq_id=rfq_id, user_id=uid, role_label="Committee"))
+    tok = secrets.token_urlsafe(24)
+    inv = RFQCommitteeInvite(
+        company_id=current_user.company_id, rfq_id=rfq_id, user_id=uid,
+        invite_email=invite_email, invite_name=invite_name, token=tok,
+    )
+    db.add(inv)
+    db.commit()
+    base = _public_base() if "_public_base" in dir() else ""
+    try:
+        base = _public_base()
+    except Exception:
+        base = ""
+    url = f"{base}/committee-score/{tok}" if base else f"/committee-score/{tok}"
+    return {"token": tok, "url": url, "user_id": uid, "message": "Share this scoring link with the committee member"}
+
+
+def _try_auto_award(db, rfq_id, company_id):
+    members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id).all()
+    if not members:
+        return None
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id, RFQQuote.status.in_(["submitted", "received", "scored"])).all()
+    if not quotes:
+        return None
+    for q in quotes:
+        scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id).all()
+        if len(scores) < len(members):
+            return None  # not all members scored every quote
+    # all scored — declare winner
+    for q in quotes:
+        sc = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id).all()
+        q.total_score = sum(s.score for s in sc) / len(sc) if sc else 0
+        q.status = "scored"
+    winner = max(quotes, key=lambda x: (x.total_score or 0, -(x.amount or 0)))
+    for q in quotes:
+        q.status = "winner" if q.id == winner.id else "rejected"
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id).first()
+    rfq.status = "awarded"
+    rfq.winner_quote_id = winner.id
+    token = secrets.token_urlsafe(24)
+    po = PurchaseOrder(
+        company_id=company_id, po_no=f"PO-{datetime.utcnow().strftime('%Y%m')}-{db.query(PurchaseOrder).filter(PurchaseOrder.company_id==company_id).count()+1:04d}",
+        rfq_id=rfq_id, quote_id=winner.id, vendor_name=winner.vendor_name,
+        amount=winner.amount, currency=winner.currency or "NGN",
+        description=f"PO from {rfq.rfq_no}: {rfq.title}",
+        status="pending_vendor", result_token=token,
+    )
+    db.add(po)
+    db.commit()
+    db.refresh(po)
+    return po
+
+
+@app.get("/api/public/committee-score/{token}")
+def public_committee_get(token: str, db: Session = Depends(get_db)):
+    inv = db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.token == token).first()
+    if not inv:
+        raise HTTPException(404, "Invalid committee link")
+    rfq = db.query(RFQ).filter(RFQ.id == inv.rfq_id).first()
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == inv.rfq_id).all()
+    out_q = []
+    for q in quotes:
+        my = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id, RFQQuoteScore.member_id == inv.user_id).first()
+        out_q.append({
+            "id": q.id, "vendor_name": q.vendor_name, "amount": q.amount,
+            "notes": q.notes, "attachment_path": q.attachment_path,
+            "cac_number": getattr(q, "cac_number", ""), "tax_clearance": getattr(q, "tax_clearance", ""),
+            "qualification": getattr(q, "qualification", ""),
+            "my_score": my.score if my else None, "my_comments": my.comments if my else "",
+            "locked": my is not None,
+        })
+    return {
+        "rfq_no": rfq.rfq_no if rfq else "", "title": rfq.title if rfq else "",
+        "submitted_all": inv.submitted, "quotes": out_q, "member_name": inv.invite_name,
+    }
+
+
+@app.post("/api/public/committee-score/{token}")
+def public_committee_score(
+    token: str,
+    quote_id: int = Form(...),
+    score: float = Form(...),
+    comments: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    inv = db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.token == token).first()
+    if not inv:
+        raise HTTPException(404, "Invalid link")
+    if score < 0 or score > 100:
+        raise HTTPException(400, "Score 0-100")
+    existing = db.query(RFQQuoteScore).filter(
+        RFQQuoteScore.quote_id == quote_id, RFQQuoteScore.member_id == inv.user_id
+    ).first()
+    if existing:
+        raise HTTPException(400, "Score already submitted and cannot be edited")
+    db.add(RFQQuoteScore(
+        company_id=inv.company_id, rfq_id=inv.rfq_id, quote_id=quote_id,
+        member_id=inv.user_id, score=score, comments=comments,
+    ))
+    db.commit()
+    # mark invite submitted if all quotes scored
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == inv.rfq_id).all()
+    done = True
+    for q in quotes:
+        if not db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id, RFQQuoteScore.member_id == inv.user_id).first():
+            done = False
+            break
+    if done:
+        inv.submitted = True
+        db.commit()
+        po = _try_auto_award(db, inv.rfq_id, inv.company_id)
+        if po:
+            return {"message": "Scores complete. Winner auto-declared and PO created.", "auto_awarded": True, "po_no": po.po_no}
+    return {"message": "Score submitted (locked)", "auto_awarded": False}
+
+
+
+
+@app.get("/api/reports/bank-recon/pdf")
+def bank_recon_pdf_std(
+    account_id: int = None,
+    statement_balance: float = 0,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    from ifrs_statements import build_bank_recon
+    co, code, sym = _company_and_currency(db, current_user)
+    # book balance from ledger for cash account
+    book = 0.0
+    name = "Cash account"
+    if account_id:
+        acc = db.query(ChartOfAccount).filter(ChartOfAccount.id == account_id, ChartOfAccount.company_id == current_user.company_id).first()
+        if acc:
+            name = f"{acc.code} — {acc.name}"
+            lines = db.query(JournalEntry).filter(JournalEntry.company_id == current_user.company_id, JournalEntry.account_id == account_id).all()
+            book = sum((l.debit or 0) - (l.credit or 0) for l in lines)
+    # outstanding from unticked recon items if any
+    outstanding = deposits = 0.0
+    try:
+        # optional: sum unticked credits/debits if BankReconState exists
+        pass
+    except Exception:
+        pass
+    period = datetime.utcnow().strftime("%B %Y")
+    buf = build_bank_recon(co, name, statement_balance or book, book, outstanding, deposits, 0, 0, period)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=bank_reconciliation.pdf"})
 
 
 

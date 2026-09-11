@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Committee scoring</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#f4f6f8}.wrap{max-width:800px;margin:24px auto;background:#fff;padding:24px;border-radius:12px}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:8px;font-size:.9rem}
+.btn{background:#0d6efd;color:#fff;border:0;padding:8px 14px;border-radius:6px;cursor:pointer}
+</style></head><body><div class="wrap">
+<h1 id="title">Committee evaluation</h1>
+<p id="msg"></p>
+<div id="list"></div>
+</div>
+<script>
+const token = location.pathname.split("/").filter(Boolean).pop();
+async function load(){
+  const r = await fetch("/api/public/committee-score/"+token);
+  const d = await r.json();
+  document.getElementById("title").textContent = (d.rfq_no||"")+" — "+(d.title||"Scoring");
+  document.getElementById("msg").textContent = d.submitted_all ? "You have completed scoring for all vendors." : "Score each vendor (0–100). Scores cannot be edited after submit.";
+  let h = "<table><thead><tr><th>Vendor</th><th>Amount</th><th>Docs</th><th>Score</th><th>Comment</th><th></th></tr></thead><tbody>";
+  (d.quotes||[]).forEach(q=>{
+    h += "<tr><td><strong>"+q.vendor_name+"</strong><br/><small>"+(q.qualification||q.notes||"")+"</small></td><td>"+Number(q.amount).toLocaleString()+"</td><td>"+
+      (q.attachment_path?"<a href='"+q.attachment_path+"' target='_blank'>Quotation file</a>":"—")+
+      "<br/>CAC: "+(q.cac_number||"—")+"</td><td>";
+    if(q.locked) h += (q.my_score)+" (locked)";
+    else h += "<input type='number' min='0' max='100' id='s"+q.id+"' style='width:70px'/>";
+    h += "</td><td>";
+    if(q.locked) h += (q.my_comments||"");
+    else h += "<input id='c"+q.id+"' style='width:100%'/>";
+    h += "</td><td>";
+    if(!q.locked) h += "<button class='btn' onclick='score("+q.id+")'>Submit score</button>";
+    h += "</td></tr>";
+  });
+  document.getElementById("list").innerHTML = h+"</tbody></table>";
+}
+window.score = async (id)=>{
+  const fd = new FormData();
+  fd.append("quote_id", id);
+  fd.append("score", document.getElementById("s"+id).value);
+  fd.append("comments", document.getElementById("c"+id).value||"");
+  const r = await fetch("/api/public/committee-score/"+token,{method:"POST",body:fd});
+  const d = await r.json();
+  if(!r.ok) return alert(d.detail||"Failed");
+  alert(d.message); load();
+};
+load();
+</script></body></html>
