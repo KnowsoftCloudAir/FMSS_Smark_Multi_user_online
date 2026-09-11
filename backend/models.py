@@ -369,7 +369,12 @@ class CorrectionRequest(Base):
     from_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     to_user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     message = Column(Text, nullable=False)
-    status = Column(String(20), default="open")  # open | resolved | dismissed
+    status = Column(String(20), default="open")  # open | in_progress | resubmitted | resolved | dismissed
+    original_debit = Column(Float, nullable=True)
+    original_credit = Column(Float, nullable=True)
+    corrected_debit = Column(Float, nullable=True)
+    corrected_credit = Column(Float, nullable=True)
+    corrected_description = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     resolved_at = Column(DateTime, nullable=True)
 
@@ -383,7 +388,30 @@ class BankStatementSession(Base):
     account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=False)
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
-    statement_balance = Column(Float, default=0.0)
-    book_balance = Column(Float, default=0.0)
+    statement_balance = Column(Float, default=0.0)  # closing balance as per bank statement
+    book_balance = Column(Float, default=0.0)  # balance as per cashbook after ticks
+    bank_charges = Column(Float, default=0.0)
+    bank_charges_note = Column(Text, default="")
+    unpresented_cheques = Column(Float, default=0.0)
+    deposits_in_transit = Column(Float, default=0.0)
+    status = Column(String(20), default="draft")  # draft | approved
+    approved_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    approved_at = Column(DateTime, nullable=True)
+    approver_stamp = Column(String(120), nullable=True)  # initials + date
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StoredReport(Base):
+    """PDF reports saved after download + sync (internal memory)."""
+    __tablename__ = "stored_reports"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    report_type = Column(String(60), nullable=False)
+    title = Column(String(200), default="")
+    filename = Column(String(255), nullable=False)
+    file_path = Column(String(500), nullable=False)
+    synced = Column(Boolean, default=False)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

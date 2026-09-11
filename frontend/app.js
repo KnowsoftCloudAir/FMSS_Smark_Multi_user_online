@@ -1894,3 +1894,184 @@ window.downloadVoucher = async function (id) {
     startApp();
   }
 })();
+
+/* ===== Bank recon session, stamp, sync, corrections resubmit ===== */
+let _lastBrSessionId = null;
+let _lastStoredMeta = null;
+
+document.getElementById("btn-save-br-session")?.addEventListener("click", async () => {
+  const acc = document.getElementById("br-account")?.value || document.getElementById("bank-rec-account")?.value;
+  const form = new FormData();
+  form.append("account_id", acc || "0");
+  form.append("statement_balance", document.getElementById("br-statement-balance")?.value || "0");
+  form.append("book_balance", document.getElementById("br-book-balance")?.value || "0");
+  form.append("bank_charges", document.getElementById("br-bank-charges")?.value || "0");
+  form.append("bank_charges_note", document.getElementById("br-charges-note")?.value || "");
+  form.append("unpresented_cheques", document.getElementById("br-unpresented")?.value || "0");
+  form.append("deposits_in_transit", document.getElementById("br-deposits")?.value || "0");
+  try {
+    const res = await fetch(API + "/api/finance/bank-recon/session", {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Save failed");
+    _lastBrSessionId = data.id;
+    document.getElementById("br-session-info").textContent =
+      `Session #${data.id} saved (draft). Statement ${data.statement_balance} → Cashbook ${data.book_balance}. Approve when ready.`;
+    loadBrSessions();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-approve-br")?.addEventListener("click", async () => {
+  if (!_lastBrSessionId) {
+    alert("Save recon figures first");
+    return;
+  }
+  try {
+    const res = await fetch(API + `/api/finance/bank-recon/session/${_lastBrSessionId}/approve`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Approve failed");
+    document.getElementById("br-session-info").textContent =
+      `APPROVED — Stamp: ${data.stamp}. You can download the PDF.`;
+    loadBrSessions();
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-dl-br-pdf")?.addEventListener("click", async (e) => {
+  e.preventDefault();
+  const q = _lastBrSessionId ? `?session_id=${_lastBrSessionId}` : "";
+  try {
+    const res = await fetch(API + "/api/reports/bank-recon/pdf" + q, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) throw new Error("Download failed");
+    const blob = await res.blob();
+    const stored = res.headers.get("X-Stored-Path") || "";
+    const rtype = res.headers.get("X-Report-Type") || "bank_recon";
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `bank_reconciliation_${_lastBrSessionId || "current"}.pdf`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    _lastStoredMeta = {
+      report_type: rtype,
+      title: "Bank Reconciliation",
+      filename: a.download,
+      file_path: stored,
+    };
+    const syncBtn = document.getElementById("btn-sync-br-pdf");
+    if (syncBtn) syncBtn.style.display = "inline-block";
+  } catch (ex) { alert(ex.message); }
+});
+
+document.getElementById("btn-sync-br-pdf")?.addEventListener("click", async () => {
+  if (!_lastStoredMeta) { alert("Download a report first"); return; }
+  const form = new FormData();
+  form.append("report_type", _lastStoredMeta.report_type);
+  form.append("title", _lastStoredMeta.title);
+  form.append("filename", _lastStoredMeta.filename);
+  form.append("file_path", _lastStoredMeta.file_path || "");
+  try {
+    const res = await fetch(API + "/api/reports/stored/sync", {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Sync failed");
+    alert(data.message || "Synchronised");
+    document.getElementById("btn-sync-br-pdf").style.display = "none";
+    loadStoredReports();
+  } catch (ex) { alert(ex.message); }
+});
+
+async function loadBrSessions() {
+  try {
+    const rows = await api("/api/finance/bank-recon/sessions");
+    const el = document.getElementById("br-sessions");
+    if (!el) return;
+    let h = `<table class="data-table"><thead><tr><th>ID</th><th>Statement</th><th>Cashbook</th><th>Charges</th><th>Status</th><th>Stamp</th><th></th></tr></thead><tbody>`;
+    (rows || []).forEach(s => {
+      h += `<tr><td>${s.id}</td><td>${Number(s.statement_balance).toLocaleString()}</td>
+        <td>${Number(s.book_balance).toLocaleString()}</td>
+        <td>${Number(s.bank_charges||0).toLocaleString()}</td>
+        <td>${s.status}</td><td>${s.approver_stamp || "—"}</td>
+        <td><button class="btn btn-sm btn-outline" onclick="_lastBrSessionId=${s.id};document.getElementById('br-session-info').textContent='Selected session #${s.id}'">Select</button></td></tr>`;
+    });
+    h += "</tbody></table>";
+    el.innerHTML = h;
+  } catch (e) {}
+}
+
+async function loadStoredReports() {
+  try {
+    const rows = await api("/api/reports/stored");
+    const el = document.getElementById("stored-reports-list");
+    if (!el) return;
+    if (!rows.length) { el.innerHTML = "<p class='hint'>No synchronised reports yet.</p>"; return; }
+    let h = `<table class="data-table"><thead><tr><th>Title</th><th>Type</th><th>File</th><th>Date</th><th></th></tr></thead><tbody>`;
+    rows.forEach(r => {
+      h += `<tr><td>${r.title}</td><td>${r.report_type}</td><td>${r.filename}</td><td>${r.created_at||""}</td>
+        <td><a class="btn btn-sm btn-outline" href="${API}/api/reports/stored/${r.id}/download" data-auth-dl>View</a></td></tr>`;
+    });
+    h += "</tbody></table>";
+    el.innerHTML = h;
+  } catch (e) {}
+}
+document.getElementById("btn-refresh-stored")?.addEventListener("click", loadStoredReports);
+
+async function loadCorrectionsInbox() {
+  try {
+    const rows = await api("/api/finance/correction-requests");
+    const el = document.getElementById("corrections-list");
+    if (!el) return;
+    let h = `<table class="data-table"><thead><tr><th>From</th><th>Message</th><th>JE</th><th>Status</th><th></th></tr></thead><tbody>`;
+    (rows || []).forEach(c => {
+      h += `<tr><td>${c.from_user || c.from_user_id || ""}</td><td>${c.message || ""}</td>
+        <td>${c.journal_entry_id || ""}</td><td>${c.status}</td>
+        <td>${c.status === "open" || c.status === "in_progress" ?
+          `<button class="btn btn-sm btn-primary" onclick="openCorrectionEdit(${c.id},${c.journal_entry_id||0})">Open & correct</button>` : "—"}</td></tr>`;
+    });
+    h += "</tbody></table>";
+    el.innerHTML = h;
+  } catch (ex) {
+    const el = document.getElementById("corrections-list");
+    if (el) el.innerHTML = `<p class="hint">${ex.message}</p>`;
+  }
+}
+
+window.openCorrectionEdit = function (cid, jid) {
+  document.getElementById("correction-edit-panel").style.display = "block";
+  document.getElementById("corr-edit-id").value = cid;
+  document.getElementById("corr-edit-jid").value = jid;
+};
+
+document.getElementById("btn-resubmit-corr")?.addEventListener("click", async () => {
+  const cid = document.getElementById("corr-edit-id").value;
+  const form = new FormData();
+  form.append("debit", document.getElementById("corr-edit-debit").value || "0");
+  form.append("credit", document.getElementById("corr-edit-credit").value || "0");
+  form.append("description", document.getElementById("corr-edit-desc").value || "");
+  try {
+    const res = await fetch(API + `/api/finance/correction-request/${cid}/resubmit`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message);
+    document.getElementById("correction-edit-panel").style.display = "none";
+    loadCorrectionsInbox();
+  } catch (ex) { alert(ex.message); }
+});
+
+const _showViewBr = typeof showView === "function" ? showView : null;
+if (typeof showView === "function") {
+  const _sv = showView;
+  window.showView = function (name) {
+    _sv(name);
+    if (name === "bank-recon") { loadBankRecon(); loadBrSessions(); }
+    if (name === "corrections") loadCorrectionsInbox();
+    if (name === "reports") loadStoredReports();
+  };
+}

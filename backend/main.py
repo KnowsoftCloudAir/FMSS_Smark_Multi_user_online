@@ -14,7 +14,7 @@ from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession
+    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession, StoredReport
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -1907,22 +1907,85 @@ def save_bank_session(
     account_id: int = Form(...),
     statement_balance: float = Form(0),
     book_balance: float = Form(0),
+    bank_charges: float = Form(0),
+    bank_charges_note: str = Form(""),
+    unpresented_cheques: float = Form(0),
+    deposits_in_transit: float = Form(0),
     start_date: Optional[str] = Form(None),
     end_date: Optional[str] = Form(None),
     current_user: User = Depends(require_roles("finance", "company_admin")),
     db: Session = Depends(get_db),
 ):
+    """Save recon inputs. Statement balance = closing bank statement; book balance = cashbook after ticks."""
     sd = date.fromisoformat(start_date) if start_date else None
     ed = date.fromisoformat(end_date) if end_date else None
     sess = BankStatementSession(
         company_id=current_user.company_id, account_id=account_id,
-        start_date=sd, end_date=ed, statement_balance=statement_balance,
-        book_balance=book_balance, created_by=current_user.id,
+        start_date=sd, end_date=ed,
+        statement_balance=statement_balance,
+        book_balance=book_balance,
+        bank_charges=bank_charges,
+        bank_charges_note=bank_charges_note or "",
+        unpresented_cheques=unpresented_cheques,
+        deposits_in_transit=deposits_in_transit,
+        status="draft",
+        created_by=current_user.id,
     )
     db.add(sess)
     db.commit()
     db.refresh(sess)
-    return sess
+    return {
+        "id": sess.id,
+        "statement_balance": sess.statement_balance,
+        "book_balance": sess.book_balance,
+        "bank_charges": sess.bank_charges,
+        "status": sess.status,
+    }
+
+
+@app.post("/api/finance/bank-recon/session/{session_id}/approve")
+def approve_bank_session(
+    session_id: int,
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Approve bank recon and apply reviewer stamp (initials + date)."""
+    sess = db.query(BankStatementSession).filter(
+        BankStatementSession.id == session_id,
+        BankStatementSession.company_id == current_user.company_id,
+    ).first()
+    if not sess:
+        raise HTTPException(404, "Session not found")
+    # Initials from full name or username
+    name = (current_user.full_name or current_user.username or "RV").strip()
+    parts = name.replace(".", " ").split()
+    initials = "".join(p[0].upper() for p in parts if p)[:4] or "RV"
+    stamp = f"{initials} · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    sess.status = "approved"
+    sess.approved_by = current_user.id
+    sess.approved_at = datetime.utcnow()
+    sess.approver_stamp = stamp
+    db.commit()
+    return {"ok": True, "stamp": stamp, "status": "approved", "session_id": sess.id}
+
+
+@app.get("/api/finance/bank-recon/sessions")
+def list_bank_sessions(
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    rows = db.query(BankStatementSession).filter(
+        BankStatementSession.company_id == current_user.company_id
+    ).order_by(BankStatementSession.id.desc()).limit(30).all()
+    return [{
+        "id": s.id, "account_id": s.account_id,
+        "statement_balance": s.statement_balance, "book_balance": s.book_balance,
+        "bank_charges": getattr(s, "bank_charges", 0) or 0,
+        "status": getattr(s, "status", "draft"),
+        "approver_stamp": getattr(s, "approver_stamp", None),
+        "approved_at": str(s.approved_at) if s.approved_at else None,
+        "created_at": str(s.created_at) if s.created_at else None,
+    } for s in rows]
 
 
 @app.get("/api/finance/transaction-trail/{journal_entry_id}")
@@ -2001,10 +2064,26 @@ def create_correction_request(
 
 @app.get("/api/finance/correction-requests")
 def list_corrections(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(CorrectionRequest).filter(
+    rows = db.query(CorrectionRequest).filter(
         CorrectionRequest.company_id == current_user.company_id,
         (CorrectionRequest.to_user_id == current_user.id) | (CorrectionRequest.from_user_id == current_user.id),
     ).order_by(CorrectionRequest.created_at.desc()).limit(100).all()
+    out = []
+    for c in rows:
+        fu = db.query(User).filter(User.id == c.from_user_id).first()
+        tu = db.query(User).filter(User.id == c.to_user_id).first()
+        out.append({
+            "id": c.id,
+            "journal_entry_id": c.journal_entry_id,
+            "message": c.message,
+            "status": c.status,
+            "from_user_id": c.from_user_id,
+            "to_user_id": c.to_user_id,
+            "from_user": (fu.full_name or fu.username) if fu else "",
+            "to_user": (tu.full_name or tu.username) if tu else "",
+            "created_at": str(c.created_at) if c.created_at else None,
+        })
+    return out
 
 
 # ===================== BUDGET VARIANCE (per project) =====================
@@ -2056,7 +2135,46 @@ def budget_variance(
 
 
 # ===================== PDF / EXCEL REPORTS =====================
-from reports import build_pdf, build_csv
+from reports import build_pdf, build_csv, build_bank_recon_pdf, build_payment_voucher_pdf
+
+def _dashboard_kpis(db, company_id):
+    """Lightweight dashboard metrics for PDF page 1."""
+    from sqlalchemy import func
+    try:
+        pay_pending = db.query(PaymentRequest).filter(
+            PaymentRequest.company_id == company_id,
+            PaymentRequest.status.in_(["submitted", "program_approved"]),
+        ).count()
+        pay_approved = db.query(PaymentRequest).filter(
+            PaymentRequest.company_id == company_id,
+            PaymentRequest.status.in_(["finance_approved", "paid", "approved"]),
+        ).count()
+        je_count = db.query(JournalEntry).filter(JournalEntry.company_id == company_id).count()
+        return {
+            "Payment requests pending": pay_pending,
+            "Payments approved / paid": pay_approved,
+            "Journal entries posted": je_count,
+            "Report generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        }
+    except Exception:
+        return {"Report generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
+
+
+STORED_DIR = Path("stored_reports")
+STORED_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_pdf_bytes(company_id, user_id, report_type, title, filename, buf):
+    """Write PDF to internal folder for later sync/view."""
+    safe = filename.replace("/", "_")
+    dest = STORED_DIR / f"c{company_id}_{safe}"
+    data = buf.getvalue() if hasattr(buf, "getvalue") else buf.read()
+    if hasattr(buf, "seek"):
+        buf.seek(0)
+    dest.write_bytes(data if isinstance(data, (bytes, bytearray)) else bytes(data))
+    return str(dest), safe
+
+
 
 
 def _company_and_currency(db, user):
@@ -2066,30 +2184,176 @@ def _company_and_currency(db, user):
     return co, code, sym
 
 
+
+
+@app.post("/api/finance/correction-request/{cid}/resubmit")
+def resubmit_correction(
+    cid: int,
+    debit: float = Form(...),
+    credit: float = Form(...),
+    description: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Staff assigned a correction opens the JE, corrects amounts, and resubmits."""
+    cr = db.query(CorrectionRequest).filter(
+        CorrectionRequest.id == cid, CorrectionRequest.company_id == current_user.company_id
+    ).first()
+    if not cr:
+        raise HTTPException(404, "Correction request not found")
+    if cr.to_user_id != current_user.id and current_user.role not in ("company_admin", "finance"):
+        raise HTTPException(403, "Only the assigned staff can resubmit this correction")
+    j = None
+    if cr.journal_entry_id:
+        j = db.query(JournalEntry).filter(JournalEntry.id == cr.journal_entry_id).first()
+    if j:
+        cr.original_debit = j.debit
+        cr.original_credit = j.credit
+        j.debit = debit
+        j.credit = credit
+        if description:
+            j.description = description
+        db.add(j)
+    cr.corrected_debit = debit
+    cr.corrected_credit = credit
+    cr.corrected_description = description
+    cr.status = "resubmitted"
+    cr.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "message": "Correction resubmitted for review", "status": cr.status}
+
+
+@app.post("/api/finance/correction-request/{cid}/resolve")
+def resolve_correction(
+    cid: int,
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    cr = db.query(CorrectionRequest).filter(
+        CorrectionRequest.id == cid, CorrectionRequest.company_id == current_user.company_id
+    ).first()
+    if not cr:
+        raise HTTPException(404)
+    cr.status = "resolved"
+    cr.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/reports/stored")
+def list_stored_reports(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    rows = db.query(StoredReport).filter(
+        StoredReport.company_id == current_user.company_id
+    ).order_by(StoredReport.id.desc()).limit(50).all()
+    return [{
+        "id": r.id, "report_type": r.report_type, "title": r.title,
+        "filename": r.filename, "synced": r.synced,
+        "created_at": str(r.created_at) if r.created_at else None,
+    } for r in rows]
+
+
+@app.post("/api/reports/stored/sync")
+def sync_stored_report(
+    report_type: str = Form(...),
+    title: str = Form(""),
+    filename: str = Form(...),
+    file_path: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a downloaded PDF as synchronised into internal memory."""
+    # Prefer path under STORED_DIR
+    path = file_path or str(STORED_DIR / filename)
+    rec = StoredReport(
+        company_id=current_user.company_id,
+        report_type=report_type,
+        title=title or report_type,
+        filename=filename,
+        file_path=path,
+        synced=True,
+        created_by=current_user.id,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return {"ok": True, "id": rec.id, "message": "Report synchronised to internal memory"}
+
+
+@app.get("/api/reports/stored/{rid}/download")
+def download_stored_report(
+    rid: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    r = db.query(StoredReport).filter(
+        StoredReport.id == rid, StoredReport.company_id == current_user.company_id
+    ).first()
+    if not r:
+        raise HTTPException(404)
+    p = Path(r.file_path)
+    if not p.exists():
+        # try STORED_DIR / filename
+        p2 = STORED_DIR / r.filename
+        if p2.exists():
+            p = p2
+        else:
+            raise HTTPException(404, "File missing from internal storage")
+    return FileResponse(str(p), media_type="application/pdf", filename=r.filename)
+
+
 @app.get("/api/reports/bank-recon/pdf")
 def bank_recon_pdf(
     account_id: Optional[int] = None,
+    session_id: Optional[int] = None,
     current_user: User = Depends(require_roles("finance", "company_admin")),
     db: Session = Depends(get_db),
 ):
     data = bank_recon_lines(account_id, None, None, current_user, db)
     co, code, sym = _company_and_currency(db, current_user)
-    headers = ["Tick", "Date", "Entry", "Account", "Description", f"Debit ({sym})", f"Credit ({sym})", "Balance"]
-    rows = []
-    for L in data["lines"]:
-        rows.append([
-            "✓" if L["ticked"] else "",
-            L["date"], L["entry_no"], L["account"], L["description"] or "",
-            f"{L['debit']:,.2f}", f"{L['credit']:,.2f}", f"{L['balance']:,.2f}",
-        ])
-    foot = [
-        f"Reconciled: {sym}{data['totals']['reconciled']:,.2f}",
-        f"Outstanding: {sym}{data['totals']['outstanding']:,.2f}",
-        f"Book balance: {sym}{data['totals']['book_balance']:,.2f}",
-    ]
-    buf = build_pdf(co, "BANK RECONCILIATION STATEMENT", headers, rows, code, sym, True, foot)
+    ticked = [L for L in data["lines"] if L.get("ticked")]
+    unticked = [L for L in data["lines"] if not L.get("ticked")]
+    sess = None
+    if session_id:
+        sess = db.query(BankStatementSession).filter(
+            BankStatementSession.id == session_id,
+            BankStatementSession.company_id == current_user.company_id,
+        ).first()
+    if not sess:
+        sess = db.query(BankStatementSession).filter(
+            BankStatementSession.company_id == current_user.company_id
+        ).order_by(BankStatementSession.id.desc()).first()
+    stmt_bal = float(sess.statement_balance) if sess else float(data["totals"].get("book_balance") or 0)
+    book_bal = float(sess.book_balance) if sess else float(data["totals"].get("book_balance") or 0)
+    # If book balance not entered, use cashbook running balance after ticks concept
+    if sess is None or not sess.book_balance:
+        book_bal = float(data["totals"].get("book_balance") or 0)
+    charges = float(getattr(sess, "bank_charges", 0) or 0) if sess else 0
+    charges_note = getattr(sess, "bank_charges_note", "") or "" if sess else ""
+    unp = float(getattr(sess, "unpresented_cheques", 0) or 0) if sess else float(data["totals"].get("outstanding") or 0)
+    dep = float(getattr(sess, "deposits_in_transit", 0) or 0) if sess else 0
+    stamp = getattr(sess, "approver_stamp", None) if sess else None
+    if sess and getattr(sess, "status", "") != "approved":
+        # still allow download draft, without stamp
+        pass
+    kpis = _dashboard_kpis(db, current_user.company_id)
+    buf = build_bank_recon_pdf(
+        co, stmt_bal, book_bal, charges, charges_note, unp, dep,
+        ticked, unticked, code, sym,
+        period_label=f"Session #{sess.id}" if sess else "Current reconciliation",
+        stamp_text=stamp, kpis=kpis,
+    )
+    fname = f"bank_reconciliation_{sess.id if sess else 'current'}.pdf"
+    path, safe = _save_pdf_bytes(current_user.company_id, current_user.id, "bank_recon", "Bank Reconciliation", fname, buf)
+    buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": "attachment; filename=bank_reconciliation.pdf"})
+                             headers={
+                                 "Content-Disposition": f"attachment; filename={safe}",
+                                 "X-Stored-Path": path,
+                                 "X-Report-Type": "bank_recon",
+                             })
 
 
 @app.get("/api/reports/trial-balance/pdf")
@@ -2134,7 +2398,7 @@ def assets_pdf(current_user: User = Depends(get_current_active_user), db: Sessio
     co, code, sym = _company_and_currency(db, current_user)
     headers = ["Number", "Name", "Category", "Assigned", "Cost", "NBV", "Condition", "Status", "Insurance"]
     rows = [[a.asset_number, a.asset_name, a.category or "", a.assigned_to or "", f"{(a.cost or 0):,.2f}", f"{(a.nbv or 0):,.2f}", a.condition or "", a.status or "", a.insurance or ""] for a in assets]
-    buf = build_pdf(co, "FIXED ASSET REGISTER", headers, rows, code, sym, True)
+    buf = build_pdf(co, "FIXED ASSET REGISTER", headers, rows, code, sym, True, kpis=_dashboard_kpis(db, current_user.company_id))
     return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=assets.pdf"})
 
 
@@ -2144,7 +2408,7 @@ def inventory_pdf(current_user: User = Depends(get_current_active_user), db: Ses
     co, code, sym = _company_and_currency(db, current_user)
     headers = ["Code", "Name", "Category", "Dept", "Cost", "Balance", "Value"]
     rows = [[i.item_code, i.item_name, i.category or "", i.department or "", f"{(i.cost_price or 0):,.2f}", i.balance_qty, f"{(i.total_value or 0):,.2f}"] for i in items]
-    buf = build_pdf(co, "INVENTORY REGISTER", headers, rows, code, sym, True)
+    buf = build_pdf(co, "INVENTORY REGISTER", headers, rows, code, sym, True, kpis=_dashboard_kpis(db, current_user.company_id))
     return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=inventory.pdf"})
 
 
@@ -2173,26 +2437,29 @@ def payments_pdf(current_user: User = Depends(get_current_active_user), db: Sess
 def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
     if not pr:
-        raise HTTPException(404, "Not found")
+        raise HTTPException(404, "Payment request not found")
+    if pr.status not in ("finance_approved", "paid", "approved", "program_approved"):
+        # still allow download if finance approved ideally
+        pass
     co, code, sym = _company_and_currency(db, current_user)
-    exp = db.query(ExpenseCode).filter(ExpenseCode.id == pr.expense_code_id).first()
-    debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.debit_account_id).first() if pr.debit_account_id else None
-    credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
-    headers = ["Field", "Value"]
-    rows = [
-        ["Voucher No", pr.request_no],
-        ["Payee", pr.payee_name or ""],
-        ["Amount", f"{sym}{pr.amount:,.2f}"],
-        ["Expense", f"{exp.code if exp else ''} — {exp.description if exp else ''}"],
-        ["Debit Account", f"{debit.code} - {debit.name}" if debit else ""],
-        ["Credit Account", f"{credit.code} - {credit.name}" if credit else ""],
-        ["Narration", pr.narration or ""],
-        ["Status", pr.status],
-        ["Date", pr.created_at.strftime("%Y-%m-%d") if pr.created_at else ""],
-    ]
-    buf = build_pdf(co, "PAYMENT VOUCHER", headers, rows, code, sym, False)
+    approvers = {}
+    if pr.program_approved_by:
+        u = db.query(User).filter(User.id == pr.program_approved_by).first()
+        approvers["Program approver"] = f"{(u.full_name or u.username) if u else pr.program_approved_by} @ {pr.program_approved_at or ''}"
+    if pr.finance_approved_by:
+        u = db.query(User).filter(User.id == pr.finance_approved_by).first()
+        approvers["Finance approver"] = f"{(u.full_name or u.username) if u else pr.finance_approved_by} @ {pr.finance_approved_at or ''}"
+    if pr.designated_approver_id:
+        u = db.query(User).filter(User.id == pr.designated_approver_id).first()
+        approvers["Designated approver"] = (u.full_name or u.username) if u else str(pr.designated_approver_id)
+    kpis = _dashboard_kpis(db, current_user.company_id)
+    buf = build_payment_voucher_pdf(co, pr, approvers, code, sym, kpis)
+    fname = f"voucher_{pr.request_no}.pdf"
+    path, safe = _save_pdf_bytes(current_user.company_id, current_user.id, "payment_voucher", f"Voucher {pr.request_no}", fname, buf)
+    buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename=voucher_{pr.request_no}.pdf"})
+                             headers={"Content-Disposition": f"attachment; filename={safe}",
+                                      "X-Stored-Path": path, "X-Report-Type": "payment_voucher"})
 
 
 

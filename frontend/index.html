@@ -170,6 +170,7 @@
         <div class="nav-divider" id="admin-divider" style="display:none;"></div>
         
         <a href="#" class="nav-item" data-view="payments"><span class="icon">💳</span> Payment Requests</a>
+        <a href="#" class="nav-item" data-view="corrections"><span class="icon">✏️</span> Corrections</a>
         <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
         <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
@@ -517,7 +518,24 @@
           </div>
         </section>
 
+        <section id="view-corrections" class="view">
+          <div class="page-header"><h2>Correction requests</h2>
+            <p class="hint">Messages asking you to correct a posting. Open the transaction, amend, and resubmit.</p></div>
+          <div id="corrections-list" class="table-responsive"></div>
+          <div id="correction-edit-panel" style="display:none;margin-top:1rem" class="card">
+            <h3>Correct &amp; resubmit</h3>
+            <input type="hidden" id="corr-edit-id" />
+            <input type="hidden" id="corr-edit-jid" />
+            <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">
+              <div class="form-group"><label>Debit</label><input type="number" step="0.01" id="corr-edit-debit" /></div>
+              <div class="form-group"><label>Credit</label><input type="number" step="0.01" id="corr-edit-credit" /></div>
+              <div class="form-group" style="grid-column:1/-1"><label>Description</label><input type="text" id="corr-edit-desc" /></div>
+            </div>
+            <button type="button" class="btn btn-primary" id="btn-resubmit-corr">Resubmit correction</button>
+          </div>
+        </section>
         <section id="view-bank-recon" class="view">
+            <!-- Bank recon: statement balance → cashbook; bank charges; approve stamp; PDF sync -->
           <div class="card">
             <div class="card-header">
               <h3>🏦 Bank Reconciliation Statement</h3>
@@ -649,6 +667,11 @@
               <a class="btn btn-outline" href="/api/assets/export">Assets CSV</a>
               <a class="btn btn-outline" href="/api/inventory/export">Inventory CSV</a>
               <a class="btn btn-outline" href="/api/vendors/export">Vendors CSV</a>
+            </div>
+            <div id="stored-reports-panel">
+              <h3>Synchronised reports (internal memory)</h3>
+              <div id="stored-reports-list"></div>
+              <button type="button" class="btn btn-sm btn-outline" id="btn-refresh-stored">Refresh stored</button>
             </div>
             <div id="report-output" class="table-responsive"></div>
           </div>
