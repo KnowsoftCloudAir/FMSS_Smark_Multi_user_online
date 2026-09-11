@@ -219,7 +219,7 @@
               <table class="data-table" id="users-table">
                 <thead>
                   <tr>
-                    <th>ID</th><th>Username</th><th>Full Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th>
+                    <th>ID</th><th>Co.</th><th>Username</th><th>Full Name</th><th>Email</th><th>Role</th><th>Status</th><th>Permissions</th><th>Actions</th>
                   </tr>
                 </thead>
                 <tbody></tbody>
@@ -421,6 +421,12 @@
         </section>
 
         <section id="view-superadmin" class="view">
+          <div class="card" style="margin-bottom:1rem">
+            <h3>Demo data</h3>
+            <p class="hint">If finance tables are empty, reload sample COA, budgets, payments, inventory and procurement.</p>
+            <button type="button" class="btn btn-accent" onclick="reseedDemoData()">Reseed demo company data</button>
+          </div>
+
           <div class="card">
             <div class="card-header">
               <h3>Registered Firms</h3>

@@ -812,7 +812,7 @@ def ensure_demo_core_finance(db: Session):
     exp_list = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).all()
     bud_list = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).all()
 
-    if db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() == 0 and exp_list and bud_list:
+    if db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() < 3 and exp_list and bud_list:
         print("Seeding sample payment requests…")
         samples = [
             ("PR-0001", 850000, "Office rent Q1", "Property Holdings Ltd", "paid", program.id, finance.id),
@@ -1141,8 +1141,10 @@ def ensure_demo_extended_samples(db: Session):
     print("✅ Extended demo samples: projects, inventory JE, procurement open/evaluation/PO pending/payment in workflow")
 
 
+
 @app.on_event("startup")
-def on_startup():
+def _app_startup_entry():
+    """Single startup entry — always opens its own DB session."""
     db = next(get_db())
     try:
         Base.metadata.create_all(bind=engine)
@@ -1150,7 +1152,10 @@ def on_startup():
             _migrate_schema(engine)
         except Exception as e:
             print("migrate:", e)
-        init_defaults(db)
+        try:
+            init_defaults(db)
+        except Exception as e:
+            import traceback; print("init_defaults:", e); traceback.print_exc()
         try:
             ensure_demo_core_finance(db)
         except Exception as e:
@@ -1159,44 +1164,47 @@ def on_startup():
             ensure_demo_extended_samples(db)
         except Exception as e:
             import traceback; print("extended seed error:", e); traceback.print_exc()
-        # Force demo passwords (so login always works after redeploy)
         try:
             demo = db.query(Company).filter(Company.slug == "demo").first()
             if demo:
-                resets = [
+                for uname, pwd in [
                     ("admin", "Admin@Knowsoft1!"),
                     ("finance", "Finance@Knowsoft1!"),
                     ("program", "Program@Knowsoft1!"),
-                ]
-                for uname, pwd in resets:
+                ]:
                     u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
                     if u:
                         u.hashed_password = get_password_hash(pwd)
                         u.is_active = True
                         db.add(u)
                 db.commit()
-                print("✅ Demo passwords refreshed (program / finance / admin)")
+                print("✅ Demo passwords refreshed")
+                n_coa = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).count()
+                n_pay = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count()
+                n_bud = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).count()
+                print(f"📊 Demo data: COA={n_coa} budgets={n_bud} payments={n_pay}")
+                if n_coa < 5 or n_pay < 3 or n_bud < 1:
+                    ensure_demo_core_finance(db)
+                    ensure_demo_extended_samples(db)
             sa = db.query(User).filter(User.username == "superadmin", User.company_id.is_(None)).first()
             if sa:
                 sa.hashed_password = get_password_hash("Knowsoft@Super0160!")
                 db.add(sa); db.commit()
         except Exception as e:
-            print("demo password refresh:", e)
+            import traceback; print("demo refresh:", e); traceback.print_exc()
         try:
             cleanup_disposed_assets(db)
         except Exception as e:
-            print("cleanup_disposed_assets:", e)
+            print("cleanup:", e)
     except Exception as e:
         import traceback
-        print("on_startup error:", e)
+        print("startup error (app continues):", e)
         traceback.print_exc()
-        # Do not kill the app — allow login even if seed partially failed
     finally:
         try:
             db.close()
         except Exception:
             pass
-
 
 # ===================== AUTH =====================
 @app.post("/api/auth/register-company")
@@ -1611,7 +1619,72 @@ async def restore_company_backup(
 # ===================== USERS (company scoped) =====================
 @app.get("/api/admin/users", response_model=list[UserOut])
 def list_users(current_user: User = Depends(get_company_admin), db: Session = Depends(get_db)):
+    """Company admin: users in their firm. Superadmin: all users (or filter company_id)."""
+    if current_user.role == "superadmin":
+        return db.query(User).order_by(User.company_id, User.id).all()
+    if not current_user.company_id:
+        raise HTTPException(400, "No company context")
     return db.query(User).filter(User.company_id == current_user.company_id).order_by(User.id).all()
+
+
+@app.get("/api/superadmin/users", response_model=list[UserOut])
+def superadmin_list_users(current_user: User = Depends(get_superadmin), db: Session = Depends(get_db)):
+    return db.query(User).order_by(User.company_id, User.id).all()
+
+
+@app.post("/api/superadmin/reseed-demo")
+def reseed_demo(current_user: User = Depends(get_superadmin), db: Session = Depends(get_db)):
+    """Wipe demo transactional samples and reload finance masters + sample data."""
+    demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        init_defaults(db)
+        demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        raise HTTPException(500, "Could not create demo company")
+    # delete child data for clean seed
+    try:
+        pay_ids = [p.id for p in db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).all()]
+        if pay_ids:
+            db.query(PaymentApprovalLog).filter(PaymentApprovalLog.payment_request_id.in_(pay_ids)).delete(synchronize_session=False)
+            db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id.in_(pay_ids)).delete(synchronize_session=False)
+        db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).delete(synchronize_session=False)
+        db.query(JournalEntry).filter(JournalEntry.company_id == demo.id).delete(synchronize_session=False)
+        inv_ids = [i.id for i in db.query(InventoryItem).filter(InventoryItem.company_id == demo.id).all()]
+        if inv_ids:
+            db.query(InventoryMovement).filter(InventoryMovement.item_id.in_(inv_ids)).delete(synchronize_session=False)
+        db.query(InventoryItem).filter(InventoryItem.company_id == demo.id).delete(synchronize_session=False)
+        rfq_ids = [r.id for r in db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id).all()]
+        if rfq_ids:
+            qids = [q.id for q in db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id.in_(rfq_ids)).all()]
+            if qids:
+                db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id.in_(qids)).delete(synchronize_session=False)
+            db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id.in_(rfq_ids)).delete(synchronize_session=False)
+            db.query(ProcurementDocument).filter(ProcurementDocument.rfq_id.in_(rfq_ids)).delete(synchronize_session=False)
+        db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id).delete(synchronize_session=False)
+        db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id).delete(synchronize_session=False)
+        db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).delete(synchronize_session=False)
+        db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).delete(synchronize_session=False)
+        db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).delete(synchronize_session=False)
+        db.query(Vendor).filter(Vendor.company_id == demo.id).delete(synchronize_session=False)
+        db.query(Asset).filter(Asset.company_id == demo.id).delete(synchronize_session=False)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print("wipe demo data:", e)
+        import traceback; traceback.print_exc()
+    ensure_demo_core_finance(db)
+    ensure_demo_extended_samples(db)
+    n = {
+        "coa": db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).count(),
+        "budgets": db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).count(),
+        "expenses": db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).count(),
+        "payments": db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count(),
+        "projects": db.query(ProjectCode).filter(ProjectCode.company_id == demo.id).count(),
+        "inventory": db.query(InventoryItem).filter(InventoryItem.company_id == demo.id).count(),
+    }
+    return {"ok": True, "message": "Demo company reseeded", "counts": n}
+
+
 
 
 @app.get("/api/admin/approvers")
@@ -1626,6 +1699,8 @@ def list_approvers(current_user: User = Depends(get_current_active_user), db: Se
 
 @app.post("/api/admin/users", response_model=UserOut)
 def create_user(user_in: UserCreate, current_user: User = Depends(get_company_admin), db: Session = Depends(get_db)):
+    if current_user.role == "superadmin" and not current_user.company_id:
+        raise HTTPException(400, "Superadmin: manage users from a company context, or use company admin login")
     if db.query(User).filter(User.company_id == current_user.company_id, User.username == user_in.username).first():
         raise HTTPException(400, "Username already exists in your company")
     role = user_in.role if user_in.role in (
@@ -1738,7 +1813,17 @@ def public_settings(db: Session = Depends(get_db)):
 @app.get("/api/coa")
 @app.get("/api/finance/coa")
 def list_coa(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(ChartOfAccount).filter(ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True).all()
+    if not current_user.company_id:
+        return []
+    rows = db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True
+    ).order_by(ChartOfAccount.code).all()
+    return [{
+        "id": a.id, "code": a.code, "name": a.name, "account_type": a.account_type,
+        "project_code": getattr(a, "project_code", "") or "",
+        "label": f"{a.code} — {a.name}",
+        "is_active": a.is_active,
+    } for a in rows]
 
 
 @app.post("/api/finance/coa")
@@ -1830,8 +1915,7 @@ def submit_payment_request(
         User.company_id == current_user.company_id,
         User.can_approve_payment == True,
     ).first()
-    if not getattr(data, "project_code_id", None):
-        raise HTTPException(400, "Project code is required")
+    # Project strongly recommended; allow submit without for backward compatibility
     if not approver:
         raise HTTPException(400, "Select a valid approver for this budget line")
 
@@ -3275,24 +3359,6 @@ def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user),
 
 
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-
-@app.get("/")
-def serve_index():
-    index = FRONTEND_DIR / "index.html"
-    return FileResponse(index) if index.exists() else {"msg": "API up"}
-
-@app.get("/{full_path:path}")
-def serve_frontend(full_path: str):
-    if full_path.startswith("api/"):
-        raise HTTPException(404)
-    fp = FRONTEND_DIR / full_path
-    if fp.exists() and fp.is_file():
-        return FileResponse(fp)
-    index = FRONTEND_DIR / "index.html"
-    return FileResponse(index) if index.exists() else HTTPException(404)
-
-
 # ===================== PROJECTS & FINANCIAL STATEMENTS =====================
 @app.get("/api/projects")
 def list_projects(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
@@ -4155,4 +4221,23 @@ def payment_archive(pid: int, current_user: User = Depends(get_current_active_us
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/zip",
                              headers={"Content-Disposition": f"attachment; filename=payment_archive_{pr.request_no}.zip"})
+
+# ===== SPA (must be last routes) =====
+
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+@app.get("/")
+def serve_index():
+    index = FRONTEND_DIR / "index.html"
+    return FileResponse(index) if index.exists() else {"msg": "API up"}
+
+@app.get("/{full_path:path}")
+def serve_frontend(full_path: str):
+    if full_path.startswith("api/") or full_path.startswith("static/"):
+        raise HTTPException(404, "Not found")
+    fp = FRONTEND_DIR / full_path
+    if fp.exists() and fp.is_file():
+        return FileResponse(fp)
+    index = FRONTEND_DIR / "index.html"
+    return FileResponse(index) if index.exists() else HTTPException(404)
 

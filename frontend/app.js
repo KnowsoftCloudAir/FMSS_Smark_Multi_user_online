@@ -354,10 +354,19 @@ document.getElementById("menu-toggle")?.addEventListener("click", () => {
 /* ---------- Users ---------- */
 async function loadUsers() {
   try {
-    const users = await api("/api/admin/users");
+    let users;
+    try {
+      users = await api("/api/admin/users");
+    } catch (e1) {
+      if (currentUser && currentUser.role === "superadmin") {
+        users = await api("/api/superadmin/users");
+      } else throw e1;
+    }
     const tbody = document.querySelector("#users-table tbody");
+    if (!tbody) return;
     tbody.innerHTML = "";
-    document.getElementById("kpi-users").textContent = users.length;
+    const kpi = document.getElementById("kpi-users");
+    if (kpi) kpi.textContent = users.length;
     users.forEach(u => {
       const perms = [];
       if (u.can_access_finance) perms.push("Finance");
@@ -369,6 +378,7 @@ async function loadUsers() {
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${u.id}</td>
+        <td>${u.company_id != null ? u.company_id : "—"}</td>
         <td><strong>${u.username}</strong></td>
         <td>${u.full_name || "—"}</td>
         <td>${u.email}</td>
@@ -870,7 +880,10 @@ async function loadPaymentFormData() {
     fill("pay-debit", coa, r => `${r.code} - ${r.name}`);
     fill("pay-credit", coa, r => `${r.code} - ${r.name}`);
     fill("pay-approver", approvers, r => `${r.full_name || r.username} (${r.role})`);
-  } catch (ex) { console.warn(ex); }
+  } catch (ex) {
+    console.warn(ex);
+    alert("Could not load payment form lists: " + (ex.message || ex) + "\nLog in as demo/finance and ensure demo data is seeded (superadmin → Reseed demo).");
+  }
 }
 
 document.getElementById("pay-expense")?.addEventListener("change", function () {
@@ -2874,3 +2887,15 @@ window.downloadPaymentArchive = async function (id, reqNo) {
     });
   };
 })();
+
+
+/* Reseed demo data (superadmin) */
+async function reseedDemoData() {
+  if (!confirm("Reload all sample finance data for the demo company?")) return;
+  try {
+    const data = await api("/api/superadmin/reseed-demo", { method: "POST", body: "{}" });
+    alert("Reseeded: " + JSON.stringify(data.counts || data));
+    if (typeof loadCompanies === "function") loadCompanies();
+  } catch (ex) { alert(ex.message); }
+}
+window.reseedDemoData = reseedDemoData;
