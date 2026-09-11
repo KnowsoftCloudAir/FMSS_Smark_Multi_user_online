@@ -701,7 +701,174 @@ def init_defaults(db: Session):
         print("✅ Demo company approved + licensed | admin / Admin@Knowsoft1!")
 
 
-@app.on_event("startup")
+
+def ensure_demo_core_finance(db: Session):
+    """If demo company exists but has no COA/payments, seed core finance data."""
+    from datetime import timedelta as _td
+    demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        demo = Company(
+            name="Demo Organization", slug="demo", address="Lagos, Nigeria",
+            status="approved", license_key=generate_license_key("demo"),
+            license_expires=date.today() + timedelta(days=365),
+            approved_at=datetime.utcnow(), approved_by="system",
+        )
+        db.add(demo); db.commit(); db.refresh(demo)
+        print("Created missing demo company")
+    else:
+        demo.status = "approved"
+        if not demo.license_expires or demo.license_expires < date.today():
+            demo.license_expires = date.today() + timedelta(days=365)
+        if not demo.license_key:
+            demo.license_key = generate_license_key("demo")
+        db.add(demo); db.commit()
+    # Ensure users
+    users = {}
+    for uname, role, pwd, email, perms in [
+        ("admin", "company_admin", "Admin@Knowsoft1!", "admin@demo.local", True),
+        ("finance", "finance", "Finance@Knowsoft1!", "finance@demo.local", True),
+        ("program", "program", "Program@Knowsoft1!", "program@demo.local", True),
+    ]:
+        u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
+        if not u:
+            u = User(
+                company_id=demo.id, username=uname, email=email, full_name=uname.title(),
+                hashed_password=get_password_hash(pwd), role=role, is_active=True,
+                can_access_finance=True, can_access_inventory=True, can_access_assets=True,
+                can_edit_assets=True, can_access_vendors=True, can_access_reports=True,
+                can_approve_payment=True,
+            )
+            db.add(u); db.flush()
+        else:
+            u.hashed_password = get_password_hash(pwd)
+            u.is_active = True
+            db.add(u)
+        users[uname] = u
+    db.commit()
+    admin, finance, program = users["admin"], users["finance"], users["program"]
+
+    coa_count = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).count()
+    if coa_count == 0:
+        print("Seeding core COA for demo…")
+        coa_rows = [
+            ("1000", "Cash at Bank - Main", "Cash"),
+            ("1100", "Petty Cash", "Cash"),
+            ("1200", "Accounts Receivable", "Asset"),
+            ("1500", "Furniture & Fittings", "Asset"),
+            ("1510", "IT Equipment", "Asset"),
+            ("1520", "Motor Vehicles", "Asset"),
+            ("2000", "Accounts Payable", "Liability"),
+            ("3000", "Retained Earnings", "Equity"),
+            ("4000", "Grant Income", "Income"),
+            ("4100", "Other Income", "Income"),
+            ("5000", "Staff Salaries", "Expense"),
+            ("5100", "Office Rent", "Expense"),
+            ("5200", "Travel & Transport", "Expense"),
+            ("5300", "Training & Workshops", "Expense"),
+            ("5400", "Utilities & Communications", "Expense"),
+            ("5500", "Programme Supplies", "Expense"),
+            ("5600", "Professional Fees", "Expense"),
+            ("5700", "Bank Charges", "Expense"),
+        ]
+        coa_map = {}
+        for code, name, typ in coa_rows:
+            row = ChartOfAccount(company_id=demo.id, code=code, name=name, account_type=typ)
+            db.add(row); db.flush()
+            coa_map[code] = row.id
+        db.commit()
+    else:
+        coa_map = {a.code: a.id for a in db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).all()}
+
+    if db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).count() == 0:
+        budgets = [
+            ("BUD-HEALTH-2026", "Health Programme 2026", 25000000, program.id),
+            ("BUD-EDU-2026", "Education Support 2026", 18000000, program.id),
+            ("BUD-OPS-2026", "Operations & Admin 2026", 8000000, finance.id),
+            ("BUD-CAPEX-2026", "Capital Expenditure 2026", 12000000, admin.id),
+        ]
+        for code, desc, amt, approver in budgets:
+            db.add(BudgetCode(company_id=demo.id, code=code, description=desc, amount=amt, spent=0, default_approver_id=approver))
+        db.commit()
+
+    bud_map = {b.code: b.id for b in db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).all()}
+
+    if db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).count() == 0 and bud_map:
+        expenses = [
+            ("EXP-SAL", "Monthly staff salaries", bud_map.get("BUD-OPS-2026"), coa_map.get("5000"), coa_map.get("1000")),
+            ("EXP-RENT", "Office rent payment", bud_map.get("BUD-OPS-2026"), coa_map.get("5100"), coa_map.get("1000")),
+            ("EXP-TRV", "Field travel allowances", bud_map.get("BUD-HEALTH-2026"), coa_map.get("5200"), coa_map.get("1000")),
+            ("EXP-TRN", "Community training workshop", bud_map.get("BUD-EDU-2026"), coa_map.get("5300"), coa_map.get("1000")),
+            ("EXP-SUP", "Medical supplies for outreach", bud_map.get("BUD-HEALTH-2026"), coa_map.get("5500"), coa_map.get("1000")),
+            ("EXP-IT", "Laptops and peripherals", bud_map.get("BUD-CAPEX-2026"), coa_map.get("1510"), coa_map.get("1000")),
+        ]
+        for code, desc, bid, dr, cr in expenses:
+            if bid:
+                db.add(ExpenseCode(
+                    company_id=demo.id, code=code, description=desc, budget_code_id=bid,
+                    default_debit_account_id=dr, default_credit_account_id=cr,
+                ))
+        db.commit()
+
+    exp_list = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).all()
+    bud_list = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).all()
+
+    if db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() == 0 and exp_list and bud_list:
+        print("Seeding sample payment requests…")
+        samples = [
+            ("PR-0001", 850000, "Office rent Q1", "Property Holdings Ltd", "paid", program.id, finance.id),
+            ("PR-0002", 4200000, "March payroll", "Staff Payroll Account", "paid", program.id, finance.id),
+            ("PR-0003", 1250000, "Project laptops", "TechMart Nigeria", "finance_approved", program.id, finance.id),
+            ("PR-0004", 320000, "Training workshop", "Training Hub Ltd", "program_approved", program.id, None),
+            ("PR-0005", 175000, "Field travel", "Cash advance", "submitted", program.id, None),
+        ]
+        for i, (rno, amt, narr, payee, status, prog, fin) in enumerate(samples):
+            exp = exp_list[i % len(exp_list)]
+            pr = PaymentRequest(
+                company_id=demo.id, request_no=rno, requester_id=program.id,
+                budget_code_id=exp.budget_code_id, expense_code_id=exp.id,
+                amount=amt, amount_in_words=amount_to_words(amt),
+                narration=narr, payee_name=payee,
+                debit_account_id=exp.default_debit_account_id, credit_account_id=exp.default_credit_account_id,
+                designated_approver_id=program.id, status=status,
+                program_approved_by=prog if status != "submitted" else None,
+                program_approved_at=datetime.utcnow() - timedelta(days=2) if status != "submitted" else None,
+                finance_approved_by=fin if status in ("finance_approved", "paid") else None,
+                finance_approved_at=datetime.utcnow() - timedelta(days=1) if status in ("finance_approved", "paid") else None,
+                paid_at=datetime.utcnow() - timedelta(hours=12) if status == "paid" else None,
+            )
+            db.add(pr)
+        db.commit()
+
+    if db.query(Vendor).filter(Vendor.company_id == demo.id).count() == 0:
+        for num, name, bank, amt, desc in [
+            ("V-001", "MedSupply Co", "Zenith Bank", 5000000, "Medical supplies"),
+            ("V-002", "TechMart Nigeria", "GTBank", 2750000, "IT equipment"),
+            ("V-003", "Training Hub Ltd", "Access Bank", 980000, "Training services"),
+            ("V-004", "Property Holdings Ltd", "UBA", 850000, "Office rent"),
+        ]:
+            db.add(Vendor(
+                company_id=demo.id, vendor_number=num, name=name, bank=bank, amount=amt,
+                description=desc, tax_clearance="Yes", reg_with_govt="Yes", audit_3yrs="Yes",
+                score=90, debit_account_id=coa_map.get("5600"), credit_account_id=coa_map.get("2000"),
+            ))
+        db.commit()
+
+    if db.query(Asset).filter(Asset.company_id == demo.id).count() == 0:
+        for num, name, cat, cost in [
+            ("AST-001", "Toyota Hilux", "Vehicle", 18000000),
+            ("AST-002", "Dell Server", "IT", 2500000),
+            ("AST-003", "Office desks set", "Furniture", 900000),
+        ]:
+            db.add(Asset(
+                company_id=demo.id, asset_number=num, asset_name=name, category=cat,
+                cost=cost, nbv=cost * 0.8, condition="Good", status="active",
+                debit_account_id=coa_map.get("1510"), credit_account_id=coa_map.get("1000"),
+                created_by=admin.id,
+            ))
+        db.commit()
+
+    print("✅ ensure_demo_core_finance done (COA/budgets/expenses/payments/vendors/assets)")
+
 
 
 def ensure_demo_extended_samples(db: Session):
@@ -974,20 +1141,61 @@ def ensure_demo_extended_samples(db: Session):
     print("✅ Extended demo samples: projects, inventory JE, procurement open/evaluation/PO pending/payment in workflow")
 
 
+@app.on_event("startup")
 def on_startup():
     db = next(get_db())
     try:
+        Base.metadata.create_all(bind=engine)
+        try:
+            _migrate_schema(engine)
+        except Exception as e:
+            print("migrate:", e)
         init_defaults(db)
-        ensure_demo_extended_samples(db)
+        try:
+            ensure_demo_core_finance(db)
+        except Exception as e:
+            import traceback; print("core finance seed error:", e); traceback.print_exc()
+        try:
+            ensure_demo_extended_samples(db)
+        except Exception as e:
+            import traceback; print("extended seed error:", e); traceback.print_exc()
+        # Force demo passwords (so login always works after redeploy)
+        try:
+            demo = db.query(Company).filter(Company.slug == "demo").first()
+            if demo:
+                resets = [
+                    ("admin", "Admin@Knowsoft1!"),
+                    ("finance", "Finance@Knowsoft1!"),
+                    ("program", "Program@Knowsoft1!"),
+                ]
+                for uname, pwd in resets:
+                    u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
+                    if u:
+                        u.hashed_password = get_password_hash(pwd)
+                        u.is_active = True
+                        db.add(u)
+                db.commit()
+                print("✅ Demo passwords refreshed (program / finance / admin)")
+            sa = db.query(User).filter(User.username == "superadmin", User.company_id.is_(None)).first()
+            if sa:
+                sa.hashed_password = get_password_hash("Knowsoft@Super0160!")
+                db.add(sa); db.commit()
+        except Exception as e:
+            print("demo password refresh:", e)
         try:
             cleanup_disposed_assets(db)
         except Exception as e:
             print("cleanup_disposed_assets:", e)
     except Exception as e:
+        import traceback
         print("on_startup error:", e)
-        raise
+        traceback.print_exc()
+        # Do not kill the app — allow login even if seed partially failed
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 # ===================== AUTH =====================
