@@ -15,7 +15,7 @@ from models import (
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
     Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession,
-    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine, RFQLineItem, RFQCommitteeInvite
+    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine, RFQLineItem, RFQCommitteeInvite, IncomeReceipt, IncomeReceiptLine, RFQQuoteLine
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -1185,6 +1185,49 @@ def mark_paid(pid: int, data: PaymentAction, current_user: User = Depends(requir
     return {"message": "Marked as paid and posted to ledger", "status": pr.status}
 
 
+
+@app.post("/api/payments/{pid}/update-accounts")
+def update_payment_accounts(
+    pid: int,
+    debit_account_id: Optional[int] = Form(None),
+    credit_account_id: Optional[int] = Form(None),
+    budget_code_id: Optional[int] = Form(None),
+    expense_code_id: Optional[int] = Form(None),
+    project_code_id: Optional[int] = Form(None),
+    comment: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Any reviewing/approving staff (finance, program, admin) can adjust codes before final pay."""
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404, "Not found")
+    if pr.status == "paid":
+        raise HTTPException(400, "Cannot change accounts on a paid request")
+    if debit_account_id is not None:
+        pr.debit_account_id = debit_account_id
+    if credit_account_id is not None:
+        pr.credit_account_id = credit_account_id
+    if budget_code_id is not None:
+        pr.budget_code_id = budget_code_id
+    if expense_code_id is not None:
+        pr.expense_code_id = expense_code_id
+    if project_code_id is not None:
+        pr.project_code_id = project_code_id
+    import json as _json
+    db.add(PaymentApprovalLog(
+        payment_request_id=pr.id, actor_id=current_user.id, action="update_accounts",
+        comment=comment or "Accounts/codes adjusted",
+        debit_account_id=pr.debit_account_id, credit_account_id=pr.credit_account_id,
+        amount_snapshot=pr.amount,
+        details_json=_json.dumps({"debit": pr.debit_account_id, "credit": pr.credit_account_id,
+                                  "budget": pr.budget_code_id, "expense": pr.expense_code_id}),
+    ))
+    audit(db, current_user.company_id, current_user, "PAYMENT_CODES_UPDATE", f"{pr.request_no}")
+    db.commit()
+    return {"message": "Codes updated", "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id}
+
+
 @app.post("/api/payments/{pid}/reject")
 def reject_payment(pid: int, data: PaymentAction, current_user: User = Depends(require_roles("finance", "program", "project_manager", "company_admin")), db: Session = Depends(get_db)):
     pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
@@ -1435,7 +1478,11 @@ def get_payment_detail(pid: int, current_user: User = Depends(get_current_active
         "attachments": [{"id": a.id, "filename": a.filename, "size_bytes": a.size_bytes, "url": a.stored_path} for a in atts],
         "history": hist,
         "chart_of_accounts": [{"id": a.id, "code": a.code, "name": a.name, "account_type": a.account_type, "label": f"{a.code} - {a.name}"} for a in coa],
-        "can_edit_accounts": current_user.role in ("finance", "company_admin", "superadmin"),
+        "can_edit_accounts": current_user.role in ("finance", "company_admin", "superadmin", "program", "project_manager") or current_user.can_approve_payment,
+        "budget_amount": float(bud.amount or 0) if bud else 0,
+        "budget_spent": float(bud.spent or 0) if bud else 0,
+        "budget_available": float((bud.amount or 0) - (bud.spent or 0)) if bud else 0,
+        "funds_sufficient": (float((bud.amount or 0) - (bud.spent or 0)) >= float(pr.amount or 0)) if bud else True,
     }
 
 
@@ -2243,100 +2290,84 @@ def payments_pdf(current_user: User = Depends(get_current_active_user), db: Sess
 # Single payment voucher PDF
 @app.get("/api/reports/voucher/{pid}/pdf")
 def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    from reports import build_pdf, company_header, _styles, table_style
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, HRFlowable
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm, cm
-    from reportlab.lib import colors
-    from io import BytesIO
+    try:
+        from reports import company_header, table_style
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+        from reportlab.lib.pagesizes import A4
+        from reportlab.lib.units import mm, cm
+        from reportlab.lib import colors
+        from io import BytesIO
 
-    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
-    if not pr:
-        raise HTTPException(404, "Not found")
-    co, code, sym = _company_and_currency(db, current_user)
-    exp = db.query(ExpenseCode).filter(ExpenseCode.id == pr.expense_code_id).first()
-    bud = db.query(BudgetCode).filter(BudgetCode.id == pr.budget_code_id).first()
-    debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.debit_account_id).first() if pr.debit_account_id else None
-    credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
-    proj = db.query(ProjectCode).filter(ProjectCode.id == pr.project_code_id).first() if pr.project_code_id else None
-    requester = db.query(User).filter(User.id == pr.requester_id).first()
-    prog_u = db.query(User).filter(User.id == pr.program_approved_by).first() if pr.program_approved_by else None
-    fin_u = db.query(User).filter(User.id == pr.finance_approved_by).first() if pr.finance_approved_by else None
+        pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+        if not pr:
+            raise HTTPException(404, "Payment request not found")
+        co, code, sym = _company_and_currency(db, current_user)
+        exp = db.query(ExpenseCode).filter(ExpenseCode.id == pr.expense_code_id).first() if pr.expense_code_id else None
+        bud = db.query(BudgetCode).filter(BudgetCode.id == pr.budget_code_id).first() if pr.budget_code_id else None
+        debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.debit_account_id).first() if pr.debit_account_id else None
+        credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
+        proj = None
+        try:
+            if pr.project_code_id:
+                proj = db.query(ProjectCode).filter(ProjectCode.id == pr.project_code_id).first()
+        except Exception:
+            pass
+        requester = db.query(User).filter(User.id == pr.requester_id).first()
+        prog_u = db.query(User).filter(User.id == pr.program_approved_by).first() if pr.program_approved_by else None
+        fin_u = db.query(User).filter(User.id == pr.finance_approved_by).first() if pr.finance_approved_by else None
+        lines = db.query(PaymentLine).filter(PaymentLine.payment_request_id == pr.id).order_by(PaymentLine.sort_order).all()
 
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
-    story = []
-    styles = company_header(story, co, "PAYMENT VOUCHER", code, sym)
-    rows = [
-        ["Voucher No", pr.request_no],
-        ["Date", pr.created_at.strftime("%Y-%m-%d") if pr.created_at else ""],
-        ["Payee", pr.payee_name or ""],
-        ["Amount (figures)", f"{sym}{pr.amount:,.2f}"],
-        ["Amount (words)", amount_to_words(pr.amount)],
-        ["Budget code", f"{bud.code if bud else ''} — {bud.description if bud else ''}"],
-        ["Expense code", f"{exp.code if exp else ''} — {exp.description if exp else ''}"],
-        ["Project code", f"{proj.code if proj else ''} — {proj.name if proj else ''}"],
-        ["Account debited", f"{debit.code} - {debit.name}" if debit else "NOT SET"],
-        ["Account credited", f"{credit.code} - {credit.name}" if credit else "NOT SET"],
-        ["Narration / details", pr.narration or ""],
-        ["Status", pr.status],
-        ["Requested by", (requester.full_name or requester.username) if requester else ""],
-        ["Program approved by", (prog_u.full_name or prog_u.username) if prog_u else ""],
-        ["Finance approved by", (fin_u.full_name or fin_u.username) if fin_u else ""],
-    ]
-    data = [["Field", "Value"]] + rows
-    tbl = Table(data, colWidths=[55*mm, 120*mm])
-    tbl.setStyle(table_style())
-    story.append(tbl)
-    story.append(Spacer(1, 16))
-    story.append(Paragraph("Authorisations / Signatures", styles["ReportH"]))
-
-    def sig_cell(user, label):
-        elems = [Paragraph(f"<b>{label}</b>", styles["Cell"])]
-        if user:
-            elems.append(Paragraph(user.full_name or user.username or "", styles["Cell"]))
-            if user.signature_path:
-                lp = str(user.signature_path).replace("/static/uploads/", "")
-                from pathlib import Path as P
-                cand = UPLOADS_DIR / lp
-                if cand.exists():
-                    try:
-                        elems.append(Image(str(cand), width=4*cm, height=1.5*cm, kind="proportional"))
-                    except Exception:
-                        elems.append(Paragraph("[signature on file]", styles["Small"]))
-                else:
-                    elems.append(Paragraph("________________", styles["Cell"]))
-            else:
-                elems.append(Paragraph("________________", styles["Cell"]))
-        else:
-            elems.append(Paragraph("________________", styles["Cell"]))
-        elems.append(Paragraph("Date: ____________", styles["Small"]))
-        return elems
-
-    from reportlab.platypus import KeepTogether
-    sig_data = [[
-        KeepTogether(sig_cell(prog_u or requester, "Reviewed / Program")),
-        KeepTogether(sig_cell(fin_u, "Approved / Finance")),
-    ]]
-    sig_tbl = Table(sig_data, colWidths=[85*mm, 85*mm])
-    sig_tbl.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOX", (0, 0), (-1, -1), 0.5, colors.HexColor("#C5CED8")),
-        ("INNERGRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#C5CED8")),
-        ("LEFTPADDING", (0, 0), (-1, -1), 8),
-        ("TOPPADDING", (0, 0), (-1, -1), 8),
-    ]))
-    story.append(sig_tbl)
-    story.append(Spacer(1, 12))
-    story.append(Paragraph(
-        "This voucher is prepared under double-entry principles. Posting to the general ledger, "
-        "trial balance and project accounts is effected on final payment (status: paid).",
-        styles["Small"],
-    ))
-    doc.build(story)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename=voucher_{pr.request_no}.pdf"})
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
+        story = []
+        styles = company_header(story, co, "PAYMENT VOUCHER", code, sym)
+        data = [
+            ["Field", "Value"],
+            ["Voucher No", pr.request_no or ""],
+            ["Status", pr.status or ""],
+            ["Date", pr.created_at.strftime("%Y-%m-%d") if pr.created_at else ""],
+            ["Payee", pr.payee_name or ""],
+            ["Amount (figures)", f"{sym}{float(pr.amount or 0):,.2f}"],
+            ["Amount (words)", amount_to_words(pr.amount or 0)],
+            ["Budget code", f"{getattr(bud,'code','') or ''} — {getattr(bud,'description','') or ''}"],
+            ["Expense code", f"{getattr(exp,'code','') or ''} — {getattr(exp,'description','') or ''}"],
+            ["Project code", f"{getattr(proj,'code','') or ''} — {getattr(proj,'name','') or ''}"],
+            ["Account debited", f"{debit.code} - {debit.name}" if debit else "NOT SET"],
+            ["Account credited", f"{credit.code} - {credit.name}" if credit else "NOT SET"],
+            ["Narration", (pr.narration or "")[:500]],
+            ["Requested by", (requester.full_name or requester.username) if requester else ""],
+            ["Program approved by", (prog_u.full_name or prog_u.username) if prog_u else ""],
+            ["Finance approved by", (fin_u.full_name or fin_u.username) if fin_u else ""],
+        ]
+        # wrap cells
+        wrapped = []
+        for row in data:
+            wrapped.append([Paragraph(str(row[0]), styles["Cell"]), Paragraph(str(row[1]).replace("\n","<br/>"), styles["Cell"])])
+        tbl = Table(wrapped, colWidths=[50*mm, 120*mm])
+        tbl.setStyle(table_style())
+        story.append(tbl)
+        if lines:
+            story.append(Spacer(1, 10))
+            story.append(Paragraph("Line items", styles["ReportH"]))
+            ld = [["Description", "Qty", "Unit cost", "Amount"]]
+            for L in lines:
+                ld.append([L.description or "", f"{L.quantity or 0}", f"{L.unit_cost or 0:,.2f}", f"{L.amount or 0:,.2f}"])
+            lt = Table(ld, colWidths=[80*mm, 25*mm, 30*mm, 35*mm])
+            lt.setStyle(table_style())
+            story.append(lt)
+        story.append(Spacer(1, 12))
+        story.append(Paragraph(
+            "Posted under double-entry principles to the general ledger on final payment (status: paid).",
+            styles["Small"],
+        ))
+        doc.build(story)
+        buf.seek(0)
+        return StreamingResponse(buf, media_type="application/pdf",
+                                 headers={"Content-Disposition": f"attachment; filename=voucher_{pr.request_no or pid}.pdf"})
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(500, f"Voucher PDF failed: {ex}")
 
 
 
@@ -2484,85 +2515,82 @@ def ifrs_cash_flow(current_user: User = Depends(get_current_active_user), db: Se
 
 @app.get("/api/reports/ifrs/{report_type}/pdf")
 def ifrs_report_pdf(report_type: str, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    from ifrs_statements import build_sfp, build_pl, build_equity, build_cashflow
-    co, code, sym = _company_and_currency(db, current_user)
-    year = str(datetime.utcnow().year)
-    prior = str(datetime.utcnow().year - 1)
-    cid = current_user.company_id
-    # Map ledger balances into IFRS buckets
-    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid).all()
-    amounts = {}
-    for acc in accounts:
-        lines = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id).all()
-        bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
-        at = (acc.account_type or "").lower()
-        name = (acc.name or "").lower()
-        if at == "cash" or "cash" in name:
-            amounts["cash"] = amounts.get("cash", 0) + bal
-        elif at == "asset":
-            if "receivable" in name:
-                amounts["receivables"] = amounts.get("receivables", 0) + bal
-            elif "inventor" in name:
-                amounts["inventory"] = amounts.get("inventory", 0) + bal
-            elif "property" in name or "plant" in name or "equipment" in name or "ppe" in name:
-                amounts["ppe"] = amounts.get("ppe", 0) + bal
-            else:
-                amounts["other_ca"] = amounts.get("other_ca", 0) + bal
-        elif at == "liability":
-            if "payable" in name:
-                amounts["payables"] = amounts.get("payables", 0) + (-bal)
-            else:
-                amounts["other_cl"] = amounts.get("other_cl", 0) + (-bal)
-        elif at == "equity":
-            amounts["retained"] = amounts.get("retained", 0) + (-bal)
-        elif at == "income":
-            amounts["revenue"] = amounts.get("revenue", 0) + (-bal)
-        elif at == "expense":
-            amounts["admin"] = amounts.get("admin", 0) + bal
-    amounts["total_ca"] = sum(amounts.get(k, 0) for k in ("cash", "receivables", "inventory", "other_ca", "cta"))
-    amounts["total_nca"] = sum(amounts.get(k, 0) for k in ("ppe", "inv_prop", "intangible", "associates", "fin_assets", "dta", "other_nca"))
-    amounts["total_assets"] = amounts.get("total_ca", 0) + amounts.get("total_nca", 0)
-    amounts["total_cl"] = sum(amounts.get(k, 0) for k in ("payables", "c_borrowings", "ctl", "c_provisions", "other_cl"))
-    amounts["total_ncl"] = sum(amounts.get(k, 0) for k in ("nc_borrowings", "dtl", "nc_provisions", "other_ncl"))
-    amounts["total_liab"] = amounts.get("total_cl", 0) + amounts.get("total_ncl", 0)
-    amounts["total_equity"] = amounts.get("retained", 0) + amounts.get("share_capital", 0) + amounts.get("share_premium", 0) + amounts.get("other_reserves", 0)
-    amounts["total_equity_owners"] = amounts["total_equity"]
-    amounts["total_equity_liab"] = amounts["total_equity"] + amounts["total_liab"]
-    amounts["gross_profit"] = amounts.get("revenue", 0) - amounts.get("cos", 0)
-    amounts["operating_profit"] = amounts["gross_profit"] + amounts.get("other_income", 0) - amounts.get("admin", 0) - amounts.get("distribution", 0) - amounts.get("other_exp", 0)
-    amounts["pbt"] = amounts["operating_profit"] + amounts.get("fin_income", 0) - amounts.get("fin_costs", 0)
-    amounts["profit_year"] = amounts["pbt"] - amounts.get("tax", 0)
-    amounts["profit_cont"] = amounts["profit_year"]
-    amounts["tci"] = amounts["profit_year"]
-    amounts["cash_close"] = amounts.get("cash", 0)
-    amounts["net_ops"] = amounts.get("pbt", 0)
-    if report_type in ("financial-position", "position", "sfp"):
-        buf = build_sfp(co, year, prior, amounts)
-        fname = "statement_of_financial_position.pdf"
-    elif report_type in ("financial-performance", "performance", "pl"):
-        buf = build_pl(co, year, prior, amounts)
-        fname = "statement_of_profit_or_loss.pdf"
-    elif report_type in ("equity", "changes-in-equity"):
-        buf = build_equity(co, year, amounts)
-        fname = "statement_of_changes_in_equity.pdf"
-    elif report_type in ("cash-flow", "cashflow"):
-        buf = build_cashflow(co, year, prior, amounts)
-        fname = "statement_of_cash_flows.pdf"
-    else:
-        raise HTTPException(404, "Unknown IFRS report type")
-    return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+    try:
+        from ifrs_statements import build_sfp, build_pl, build_equity, build_cashflow
+        co, code, sym = _company_and_currency(db, current_user)
+        year = str(datetime.utcnow().year)
+        prior = str(datetime.utcnow().year - 1)
+        cid = current_user.company_id
+        amounts = {}
+        if cid:
+            accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid).all()
+            for acc in accounts:
+                lines = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id).all()
+                bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
+                at = (acc.account_type or "").lower()
+                name = (acc.name or "").lower()
+                if at == "cash" or "cash" in name or "bank" in name:
+                    amounts["cash"] = amounts.get("cash", 0) + bal
+                elif at == "asset":
+                    if "receivable" in name:
+                        amounts["receivables"] = amounts.get("receivables", 0) + bal
+                    elif "inventor" in name:
+                        amounts["inventory"] = amounts.get("inventory", 0) + bal
+                    elif any(x in name for x in ("property", "plant", "equipment", "ppe", "fixed")):
+                        amounts["ppe"] = amounts.get("ppe", 0) + bal
+                    else:
+                        amounts["other_ca"] = amounts.get("other_ca", 0) + bal
+                elif at == "liability":
+                    if "payable" in name:
+                        amounts["payables"] = amounts.get("payables", 0) + (-bal)
+                    else:
+                        amounts["other_cl"] = amounts.get("other_cl", 0) + (-bal)
+                elif at == "equity":
+                    amounts["retained"] = amounts.get("retained", 0) + (-bal)
+                elif at == "income":
+                    amounts["revenue"] = amounts.get("revenue", 0) + (-bal)
+                elif at == "expense":
+                    amounts["admin"] = amounts.get("admin", 0) + bal
+        amounts["total_ca"] = sum(amounts.get(k, 0) for k in ("cash", "receivables", "inventory", "other_ca", "cta"))
+        amounts["total_nca"] = sum(amounts.get(k, 0) for k in ("ppe", "inv_prop", "intangible", "associates", "fin_assets", "dta", "other_nca"))
+        amounts["total_assets"] = amounts.get("total_ca", 0) + amounts.get("total_nca", 0)
+        amounts["total_cl"] = sum(amounts.get(k, 0) for k in ("payables", "c_borrowings", "ctl", "c_provisions", "other_cl"))
+        amounts["total_ncl"] = sum(amounts.get(k, 0) for k in ("nc_borrowings", "dtl", "nc_provisions", "other_ncl"))
+        amounts["total_liab"] = amounts.get("total_cl", 0) + amounts.get("total_ncl", 0)
+        amounts["total_equity"] = amounts.get("retained", 0) + amounts.get("share_capital", 0) + amounts.get("share_premium", 0) + amounts.get("other_reserves", 0)
+        amounts["total_equity_owners"] = amounts["total_equity"]
+        amounts["total_equity_liab"] = amounts["total_equity"] + amounts["total_liab"]
+        amounts["gross_profit"] = amounts.get("revenue", 0) - amounts.get("cos", 0)
+        amounts["operating_profit"] = amounts["gross_profit"] + amounts.get("other_income", 0) - amounts.get("admin", 0) - amounts.get("distribution", 0) - amounts.get("other_exp", 0)
+        amounts["pbt"] = amounts["operating_profit"] + amounts.get("fin_income", 0) - amounts.get("fin_costs", 0)
+        amounts["profit_year"] = amounts["pbt"] - amounts.get("tax", 0)
+        amounts["profit_cont"] = amounts["profit_year"]
+        amounts["tci"] = amounts["profit_year"]
+        amounts["cash_close"] = amounts.get("cash", 0)
+        amounts["net_ops"] = amounts.get("pbt", 0)
+        rt = (report_type or "").lower().replace("_", "-")
+        if rt in ("financial-position", "position", "sfp"):
+            buf = build_sfp(co, year, prior, amounts)
+            fname = "statement_of_financial_position.pdf"
+        elif rt in ("financial-performance", "performance", "pl"):
+            buf = build_pl(co, year, prior, amounts)
+            fname = "statement_of_profit_or_loss.pdf"
+        elif rt in ("equity", "changes-in-equity"):
+            buf = build_equity(co, year, amounts)
+            fname = "statement_of_changes_in_equity.pdf"
+        elif rt in ("cash-flow", "cashflow"):
+            buf = build_cashflow(co, year, prior, amounts)
+            fname = "statement_of_cash_flows.pdf"
+        else:
+            raise HTTPException(404, f"Unknown IFRS report type: {report_type}")
+        return StreamingResponse(buf, media_type="application/pdf",
+                                 headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except HTTPException:
+        raise
+    except Exception as ex:
+        raise HTTPException(500, f"IFRS PDF failed: {ex}")
 
 
-
-
-def _rfq_no(db, cid):
-    n = db.query(RFQ).filter(RFQ.company_id == cid).count() + 1
-    return f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
-
-def _public_base():
-    import os
-    return (os.getenv("PUBLIC_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
 
 @app.get("/api/procurement/rfqs")
 def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
@@ -2737,7 +2765,7 @@ async def public_quote_submit(
     vendor_name: str = Form(...),
     vendor_email: str = Form(""),
     vendor_phone: str = Form(""),
-    amount: float = Form(...),
+    amount: float = Form(0),
     notes: str = Form(""),
     cac_number: str = Form(""),
     tax_clearance: str = Form(""),
@@ -2747,6 +2775,7 @@ async def public_quote_submit(
     bank_account_name: str = Form(""),
     consent_capable: str = Form("false"),
     validity_days: int = Form(30),
+    lines_json: str = Form("[]"),
     file: UploadFile = File(None),
     db: Session = Depends(get_db),
 ):
@@ -2793,6 +2822,27 @@ async def public_quote_submit(
     db.add(quote)
     db.commit()
     db.refresh(quote)
+    import json as _json
+    try:
+        qlines = _json.loads(lines_json or "[]")
+    except Exception:
+        qlines = []
+    total_lines = 0.0
+    for L in qlines:
+        qty = float(L.get("quantity") or 1)
+        uc = float(L.get("unit_cost") or 0)
+        amt = float(L.get("amount") or qty * uc)
+        total_lines += amt
+        try:
+            db.add(RFQQuoteLine(
+                quote_id=quote.id, description=L.get("description") or "",
+                quantity=qty, unit=L.get("unit") or "unit", unit_cost=uc, amount=amt,
+            ))
+        except Exception:
+            pass
+    if total_lines > 0:
+        quote.amount = total_lines
+    db.commit()
     return {"message": "Quotation submitted. Await procurement acknowledgement that your submission was received.", "quote_id": quote.id}
 
 
@@ -2919,22 +2969,116 @@ def declare_winner(rfq_id: int, current_user: User = Depends(get_current_active_
 
 @app.get("/api/procurement/rfqs/{rfq_id}/committee-report/pdf")
 def committee_report_pdf(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    from reports import company_header, table_style
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from io import BytesIO
     rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
     if not rfq:
         raise HTTPException(404, "RFQ not found")
     co, code, sym = _company_and_currency(db, current_user)
     quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).order_by(RFQQuote.total_score.desc()).all()
-    headers = ["Vendor", "Amount", "Score", "Status", "Email"]
-    rows = [[q.vendor_name, f"{q.amount:,.2f}", f"{q.total_score:.1f}", q.status, q.vendor_email or ""] for q in quotes]
+    members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id).all()
+    scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq_id).all()
     winner = next((q for q in quotes if q.status == "winner"), None)
-    foot = [
-        f"RFQ: {rfq.rfq_no} — {rfq.title}",
-        f"Winner: {winner.vendor_name if winner else 'Not declared'}",
-        "Procurement committee evaluation report",
-    ]
-    buf = build_pdf(co, "PROCUREMENT COMMITTEE REPORT", headers, rows, code, sym, True, foot)
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
+    story = []
+    styles = company_header(story, co, "PROCUREMENT COMMITTEE EVALUATION REPORT", code, sym)
+    story.append(Paragraph(f"<b>1. INTRODUCTION</b>", styles["ReportH"]))
+    story.append(Paragraph(
+        f"This report presents the evaluation of quotations received under RFQ <b>{rfq.rfq_no}</b> — {rfq.title}. "
+        f"A total of <b>{len(quotes)}</b> vendor(s) submitted bids. The procurement committee assessed each submission "
+        f"and awarded scores. The vendor with the highest average score is recommended for award.",
+        styles["Cell"],
+    ))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("<b>2. COMMITTEE MEMBERS</b>", styles["ReportH"]))
+    for m in members:
+        u = db.query(User).filter(User.id == m.user_id).first()
+        story.append(Paragraph(f"• {(u.full_name or u.username) if u else m.user_id} — {m.role_label}", styles["Cell"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("<b>3. BID EVALUATION SUMMARY</b>", styles["ReportH"]))
+    data = [["Vendor", "Amount", "Avg Score", "Status", "Email"]]
+    for q in quotes:
+        data.append([q.vendor_name, f"{sym}{q.amount:,.2f}", f"{(q.total_score or 0):.1f}", q.status, q.vendor_email or ""])
+    t = Table(data, colWidths=[45*mm, 30*mm, 25*mm, 25*mm, 45*mm])
+    t.setStyle(table_style())
+    story.append(t)
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("<b>4. DETAILED SCORES & COMMENTS</b>", styles["ReportH"]))
+    for q in quotes:
+        story.append(Paragraph(f"<b>{q.vendor_name}</b> (Amount {sym}{q.amount:,.2f})", styles["Cell"]))
+        for s in scores:
+            if s.quote_id == q.id:
+                mu = db.query(User).filter(User.id == s.member_id).first()
+                nm = (mu.full_name or mu.username) if mu else str(s.member_id)
+                story.append(Paragraph(f"&nbsp;&nbsp;{nm}: score {s.score} — {s.comments or 'No comment'}", styles["Small"]))
+    story.append(Spacer(1, 8))
+    story.append(Paragraph("<b>5. RECOMMENDATION</b>", styles["ReportH"]))
+    if winner:
+        story.append(Paragraph(
+            f"The committee recommends <b>{winner.vendor_name}</b> with average score <b>{(winner.total_score or 0):.1f}</b> "
+            f"and quoted amount <b>{sym}{winner.amount:,.2f}</b> for award of the purchase order.",
+            styles["Cell"],
+        ))
+    else:
+        story.append(Paragraph("Winner not yet declared.", styles["Cell"]))
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("___________________________ &nbsp;&nbsp; ___________________________", styles["Small"]))
+    story.append(Paragraph("Committee Chair &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Procurement Officer", styles["Small"]))
+    doc.build(story)
+    buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f"attachment; filename=committee_{rfq.rfq_no}.pdf"})
+
+
+
+@app.get("/api/procurement/pos/{po_id}/pdf")
+def purchase_order_pdf(po_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    from reports import company_header, table_style
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from io import BytesIO
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404, "PO not found")
+    co, code, sym = _company_and_currency(db, current_user)
+    quote = db.query(RFQQuote).filter(RFQQuote.id == po.quote_id).first() if po.quote_id else None
+    qlines = []
+    if quote:
+        try:
+            qlines = db.query(RFQQuoteLine).filter(RFQQuoteLine.quote_id == quote.id).all()
+        except Exception:
+            qlines = []
+    buf = BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
+    story = []
+    styles = company_header(story, co, "PURCHASE ORDER", code, sym)
+    story.append(Paragraph(f"<b>PO No:</b> {po.po_no} &nbsp;&nbsp; <b>Date:</b> {po.created_at.strftime('%Y-%m-%d') if po.created_at else ''}", styles["Cell"]))
+    story.append(Paragraph(f"<b>Vendor:</b> {po.vendor_name}", styles["Cell"]))
+    story.append(Paragraph(f"<b>Status:</b> {po.status}", styles["Cell"]))
+    story.append(Spacer(1, 8))
+    if qlines:
+        data = [["Description", "Qty", "Unit", "Unit cost", "Amount"]]
+        for L in qlines:
+            data.append([L.description or "", f"{L.quantity or 0}", L.unit or "", f"{L.unit_cost or 0:,.2f}", f"{L.amount or 0:,.2f}"])
+        data.append(["", "", "", "TOTAL", f"{po.amount or 0:,.2f}"])
+    else:
+        data = [["Description", "Amount"], [po.description or "Supply as per RFQ quotation", f"{sym}{po.amount or 0:,.2f}"]]
+    t = Table(data, colWidths=[70*mm, 25*mm, 25*mm, 30*mm, 30*mm][:len(data[0])])
+    t.setStyle(table_style())
+    story.append(t)
+    story.append(Spacer(1, 16))
+    story.append(Paragraph("Authorised for and on behalf of the organisation.", styles["Small"]))
+    story.append(Paragraph("_________________________ &nbsp;&nbsp;&nbsp; _________________________", styles["Small"]))
+    story.append(Paragraph("Procurement &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Approving officer", styles["Small"]))
+    doc.build(story)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={po.po_no}.pdf"})
 
 
 @app.get("/api/procurement/pos")
@@ -3250,6 +3394,75 @@ def bank_recon_pdf_std(
     buf = build_bank_recon(co, name, statement_balance or book, book, outstanding, deposits, 0, 0, period)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": "attachment; filename=bank_reconciliation.pdf"})
+
+
+
+
+@app.get("/api/income")
+def list_income(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(IncomeReceipt).filter(IncomeReceipt.company_id == current_user.company_id).order_by(IncomeReceipt.id.desc()).all()
+
+
+@app.post("/api/income")
+def create_income(
+    received_from: str = Form(...),
+    amount: float = Form(0),
+    narration: str = Form(""),
+    project_code_id: Optional[int] = Form(None),
+    income_account_id: Optional[int] = Form(None),
+    cash_account_id: Optional[int] = Form(None),
+    lines_json: str = Form("[]"),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    import json as _json
+    lines = _json.loads(lines_json or "[]")
+    total = sum(float(L.get("amount") or (float(L.get("quantity") or 0) * float(L.get("unit_cost") or 0))) for L in lines) if lines else float(amount)
+    if total <= 0:
+        raise HTTPException(400, "Amount must be greater than zero")
+    n = db.query(IncomeReceipt).filter(IncomeReceipt.company_id == current_user.company_id).count() + 1
+    rno = f"INC-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
+    rec = IncomeReceipt(
+        company_id=current_user.company_id, receipt_no=rno, received_from=received_from,
+        amount=total, narration=narration, project_code_id=project_code_id,
+        income_account_id=income_account_id, cash_account_id=cash_account_id,
+        status="draft", created_by=current_user.id,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    for i, L in enumerate(lines):
+        amt = float(L.get("amount") or (float(L.get("quantity") or 0) * float(L.get("unit_cost") or 0)))
+        db.add(IncomeReceiptLine(
+            income_receipt_id=rec.id, description=L.get("description") or "Income line",
+            quantity=float(L.get("quantity") or 1), unit_cost=float(L.get("unit_cost") or 0),
+            amount=amt, sort_order=i,
+        ))
+    db.commit()
+    return rec
+
+
+@app.post("/api/income/{rid}/post")
+def post_income(rid: int, current_user: User = Depends(require_roles("finance", "company_admin")), db: Session = Depends(get_db)):
+    rec = db.query(IncomeReceipt).filter(IncomeReceipt.id == rid, IncomeReceipt.company_id == current_user.company_id).first()
+    if not rec or rec.status == "posted":
+        raise HTTPException(400, "Invalid receipt")
+    if not rec.income_account_id or not rec.cash_account_id:
+        raise HTTPException(400, "Set debit (cash/bank) and credit (income) accounts before posting")
+    # Dr Cash, Cr Income
+    post_double_entry(
+        db, current_user.company_id, current_user.id,
+        "income", rec.id,
+        f"Income {rec.receipt_no}: {rec.received_from}",
+        rec.narration or "",
+        rec.cash_account_id, rec.income_account_id, rec.amount,
+        project_code_id=rec.project_code_id,
+    )
+    rec.status = "posted"
+    rec.posted_at = datetime.utcnow()
+    db.commit()
+    audit(db, current_user.company_id, current_user, "INCOME_POST", rec.receipt_no)
+    return {"message": "Income posted to ledger", "status": rec.status}
 
 
 

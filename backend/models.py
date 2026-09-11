@@ -556,3 +556,46 @@ class PaymentLine(Base):
     unit_cost = Column(Float, default=0.0)
     amount = Column(Float, default=0.0)
     sort_order = Column(Integer, default=0)
+
+
+class IncomeReceipt(Base):
+    """Receive income — mirror of payment request layout for inflow."""
+    __tablename__ = "income_receipts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    receipt_no = Column(String(50), nullable=False, index=True)
+    received_from = Column(String(200), default="")
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), default="NGN")
+    narration = Column(Text, default="")
+    project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
+    income_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)  # credit income
+    cash_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)  # debit cash/bank
+    status = Column(String(30), default="draft")  # draft | posted | cancelled
+    received_date = Column(DateTime, default=datetime.utcnow)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+    posted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class IncomeReceiptLine(Base):
+    __tablename__ = "income_receipt_lines"
+    id = Column(Integer, primary_key=True, index=True)
+    income_receipt_id = Column(Integer, ForeignKey("income_receipts.id"), nullable=False, index=True)
+    description = Column(String(400), nullable=False)
+    quantity = Column(Float, default=1.0)
+    unit_cost = Column(Float, default=0.0)
+    amount = Column(Float, default=0.0)
+    sort_order = Column(Integer, default=0)
+
+
+class RFQQuoteLine(Base):
+    __tablename__ = "rfq_quote_lines"
+    id = Column(Integer, primary_key=True, index=True)
+    quote_id = Column(Integer, ForeignKey("rfq_quotes.id"), nullable=False, index=True)
+    description = Column(String(400), default="")
+    quantity = Column(Float, default=1.0)
+    unit = Column(String(50), default="unit")
+    unit_cost = Column(Float, default=0.0)
+    amount = Column(Float, default=0.0)

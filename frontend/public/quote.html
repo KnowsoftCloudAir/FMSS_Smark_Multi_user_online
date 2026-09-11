@@ -107,7 +107,13 @@
         <div><label>Quotation amount *</label><input name="amount" id="amount" type="number" step="0.01" min="0.01" required/></div>
         <div><label>Validity (days)</label><input name="validity_days" id="validity_days" type="number" value="30" min="1"/></div>
         <div class="full">
-          <label>Official letter-head quotation (PDF) *</label>
+          <label>Quotation line items (description, qty, unit cost)</label>
+          <table id="quote-lines-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit</th><th>Unit cost</th><th>Amount</th><th></th></tr></thead>
+          <tbody id="quote-lines"></tbody></table>
+          <button type="button" class="btn" id="btn-add-qline" style="width:auto;padding:8px 14px;margin:8px 0;font-size:.85rem">+ Add line</button>
+        </div>
+        <div class="full">
+          <label>Official letter-head quotation (PDF)</label>
           <input name="file" id="file" type="file" accept=".pdf,application/pdf,image/*"/>
           <p class="file-hint">Upload PDF (or image) of quotation on company letter-head. Max 25MB.</p>
         </div>
@@ -234,6 +240,95 @@
     }
   });
 
+
+  function addQLine(desc, qty, unit, cost) {
+    var tb = document.getElementById("quote-lines");
+    if (!tb) return;
+    var tr = document.createElement("tr");
+    tr.innerHTML = '<td><input class="qd" value="'+(desc||'')+'" style="width:100%"/></td>'+
+      '<td><input class="qq" type="number" step="0.01" value="'+(qty!=null?qty:1)+'" style="width:70px"/></td>'+
+      '<td><input class="qu" value="'+(unit||'unit')+'" style="width:70px"/></td>'+
+      '<td><input class="qc" type="number" step="0.01" value="'+(cost!=null?cost:0)+'" style="width:90px"/></td>'+
+      '<td class="qa">0.00</td><td><button type="button" class="qx">×</button></td>';
+    function recalc(){
+      var q=parseFloat(tr.querySelector(".qq").value)||0, c=parseFloat(tr.querySelector(".qc").value)||0;
+      tr.querySelector(".qa").textContent=(q*c).toFixed(2);
+      var t=0; document.querySelectorAll("#quote-lines tr").forEach(function(r){ t+=parseFloat(r.querySelector(".qa").textContent)||0; });
+      document.getElementById("amount").value=t.toFixed(2);
+    }
+    tr.querySelector(".qq").oninput=recalc; tr.querySelector(".qc").oninput=recalc;
+    tr.querySelector(".qx").onclick=function(){ tr.remove(); recalc(); };
+    tb.appendChild(tr); recalc();
+  }
+  document.getElementById("btn-add-qline")?.addEventListener("click", function(){ addQLine("",1,"unit",0); });
+
+  // preload items as lines when RFQ items exist
+  var _origLoad = load;
+  load = async function(){
+    await _origLoad();
+    // if items loaded in table, seed quote lines once
+  };
+
+  // patch submit to include lines_json
+  var form = document.getElementById("vendor-form");
+  var oldSubmit = form.onsubmit;
+  form.addEventListener("submit", function(e){
+    // lines collected in main handler - enhance fetch by monkeypatching FormData append via override
+  }, true);
+
+  // Re-bind submit properly
+  document.getElementById("vendor-form").onsubmit = null;
+  document.getElementById("vendor-form").addEventListener("submit", async function (e) {
+    e.preventDefault();
+    if (!document.getElementById("consent").checked) { alert("Consent is required"); return; }
+    var lines = [];
+    document.querySelectorAll("#quote-lines tr").forEach(function(r){
+      var d=r.querySelector(".qd")?.value||"";
+      var q=parseFloat(r.querySelector(".qq")?.value)||0;
+      var u=r.querySelector(".qu")?.value||"unit";
+      var c=parseFloat(r.querySelector(".qc")?.value)||0;
+      if(d) lines.push({description:d, quantity:q, unit:u, unit_cost:c, amount:q*c});
+    });
+    var fd = new FormData();
+    fd.append("vendor_name", document.getElementById("vendor_name").value.trim());
+    fd.append("vendor_email", document.getElementById("vendor_email").value.trim());
+    fd.append("vendor_phone", document.getElementById("vendor_phone").value.trim());
+    fd.append("cac_number", document.getElementById("cac_number").value.trim());
+    fd.append("tax_clearance", document.getElementById("tax_clearance").value + (document.getElementById("tax_ref").value ? (" / "+document.getElementById("tax_ref").value) : ""));
+    fd.append("qualification", document.getElementById("qualification").value + " | Experience: " + document.getElementById("experience").value + " | Reg. Govt: " + document.getElementById("reg_govt").value + " | 3yr Audit: " + document.getElementById("audit_3yrs").value + " | Address: " + document.getElementById("address").value);
+    fd.append("bank_name", document.getElementById("bank_name").value.trim());
+    fd.append("bank_account", document.getElementById("bank_account").value.trim());
+    fd.append("bank_account_name", document.getElementById("bank_account_name").value.trim());
+    fd.append("amount", document.getElementById("amount").value);
+    fd.append("notes", document.getElementById("notes").value);
+    fd.append("validity_days", document.getElementById("validity_days").value || "30");
+    fd.append("consent_capable", "true");
+    fd.append("lines_json", JSON.stringify(lines));
+    var f = document.getElementById("file").files[0];
+    if (f) fd.append("file", f);
+    var btn = document.getElementById("submit-btn");
+    btn.disabled = true; btn.textContent = "Submitting…";
+    try {
+      var r = await fetch(API + "/api/public/quote/" + encodeURIComponent(token), { method: "POST", body: fd });
+      var text = await r.text();
+      var d = {};
+      try { d = JSON.parse(text); } catch (_) { throw new Error(text.slice(0, 180) || "Server error"); }
+      if (!r.ok) {
+        var msg = d.detail || "Submit failed";
+        if (Array.isArray(msg)) msg = msg.map(function(x){ return x.msg||JSON.stringify(x); }).join(", ");
+        throw new Error(msg);
+      }
+      showMsg(d.message || "Submitted successfully.", "ok");
+      btn.textContent = "Submitted";
+      document.getElementById("vendor-form").style.opacity = "0.65";
+    } catch (err) {
+      alert(err.message);
+      btn.disabled = false; btn.textContent = "Submit quotation";
+    }
+  });
+
+  // seed one empty line
+  setTimeout(function(){ if(document.getElementById("quote-lines") && !document.getElementById("quote-lines").children.length) addQLine("",1,"unit",0); }, 400);
   load();
 })();
 </script>

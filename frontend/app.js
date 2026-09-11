@@ -2554,3 +2554,129 @@ window.inviteCommittee = async function(rfqId) {
 };
 
 // Patch openRfq HTML to include committee invite button - via string if present
+
+/* Income receipts + finance account save + score refresh + PO pdf */
+window.savePaymentAccounts = async function(pid) {
+  var d = document.getElementById("pd-debit");
+  var c = document.getElementById("pd-credit");
+  var form = new FormData();
+  if (d && d.value) form.append("debit_account_id", d.value);
+  if (c && c.value) form.append("credit_account_id", c.value);
+  form.append("comment", "Accounts adjusted by " + (currentUser && currentUser.username));
+  try {
+    var res = await fetch(API + "/api/payments/" + pid + "/update-accounts", {
+      method: "POST", headers: { Authorization: "Bearer " + token }, body: form,
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert("Accounts saved");
+    openPaymentDetail(pid);
+  } catch (ex) { alert(ex.message); }
+};
+
+// Patch openPaymentDetail display to show budget funds + save button
+(function(){
+  var prev = window.openPaymentDetail;
+  if (!prev) return;
+  window.openPaymentDetail = async function(id) {
+    await prev(id);
+    try {
+      var p = await api("/api/payments/" + id);
+      var body = document.getElementById("pd-body");
+      if (!body) return;
+      var extra = "<p><strong>Budget available:</strong> " + Number(p.budget_available||0).toLocaleString() +
+        " (budgeted " + Number(p.budget_amount||0).toLocaleString() + " − spent " + Number(p.budget_spent||0).toLocaleString() + ")" +
+        (p.funds_sufficient === false ? " <span style='color:red'>⚠ Insufficient funds on budget line</span>" : " ✓") + "</p>";
+      if (p.rejection_reason) extra += "<p style='color:#b71c1c'><strong>Rejection reason:</strong> " + p.rejection_reason + "</p>";
+      if (p.can_edit_accounts) {
+        extra += "<p><button class='btn btn-sm btn-primary' onclick='savePaymentAccounts(" + id + ")'>Save adjusted account codes</button> " +
+          "<button class='btn btn-sm btn-secondary' onclick='downloadVoucher(" + id + ")'>Print voucher PDF</button></p>";
+      } else {
+        extra += "<p><button class='btn btn-sm btn-secondary' onclick='downloadVoucher(" + id + ")'>Print voucher PDF</button></p>";
+      }
+      body.innerHTML = extra + body.innerHTML;
+    } catch (e) {}
+  };
+})();
+
+// Reject must require reason - already prompts in actPay
+
+window.downloadPoPdf = async function(poId) {
+  try { await authDownload("/api/procurement/pos/" + poId + "/pdf", "PO_" + poId + ".pdf"); }
+  catch (ex) { alert(ex.message); }
+};
+
+// Refresh RFQ quotes panel periodically when open
+window.__rfqPoll = null;
+window.startRfqPoll = function(id) {
+  if (window.__rfqPoll) clearInterval(window.__rfqPoll);
+  window.__rfqPoll = setInterval(function(){ try { openRfq(id); } catch(e){} }, 15000);
+};
+(function(){
+  var prev = window.openRfq;
+  if (!prev) return;
+  window.openRfq = async function(id) {
+    await prev(id);
+    startRfqPoll(id);
+    // add PO pdf buttons if any
+    try {
+      var d = await api("/api/procurement/rfqs/" + id);
+      (d.purchase_orders || []).forEach(function(po){
+        var el = document.getElementById("rfq-detail-body");
+        if (el && el.innerHTML.indexOf("downloadPoPdf(" + po.id + ")") < 0) {
+          el.innerHTML += "<p><button class='btn btn-sm btn-outline' onclick='downloadPoPdf(" + po.id + ")'>Download PO " + po.po_no + " (letterhead)</button></p>";
+        }
+      });
+    } catch(e){}
+  };
+})();
+
+/* Income module */
+async function loadIncome() {
+  try {
+    var rows = await api("/api/income");
+    var tb = document.querySelector("#income-table tbody");
+    if (!tb) return;
+    tb.innerHTML = (rows||[]).map(function(r){
+      return "<tr><td>"+r.receipt_no+"</td><td>"+(r.received_from||"")+"</td><td>"+Number(r.amount).toLocaleString()+
+        "</td><td>"+r.status+"</td><td>"+(r.status!=="posted"?"<button class='btn btn-sm btn-primary' onclick='postIncome("+r.id+")'>Post to ledger</button>":"Posted")+"</td></tr>";
+    }).join("");
+  } catch(e){ console.warn(e); }
+}
+window.postIncome = async function(id){
+  try {
+    await api("/api/income/"+id+"/post", { method: "POST" });
+    alert("Posted"); loadIncome();
+  } catch(ex){ alert(ex.message); }
+};
+document.getElementById("income-form")?.addEventListener("submit", async function(e){
+  e.preventDefault();
+  var form = new FormData();
+  form.append("received_from", document.getElementById("inc-from").value);
+  form.append("amount", document.getElementById("inc-amount").value);
+  form.append("narration", document.getElementById("inc-narration").value);
+  form.append("income_account_id", document.getElementById("inc-income-acct").value);
+  form.append("cash_account_id", document.getElementById("inc-cash-acct").value);
+  var lines=[];
+  document.querySelectorAll("#inc-lines tr").forEach(function(r){
+    var d=r.querySelector(".il-d")?.value; if(!d) return;
+    var q=parseFloat(r.querySelector(".il-q")?.value)||1;
+    var u=parseFloat(r.querySelector(".il-u")?.value)||0;
+    lines.push({description:d, quantity:q, unit_cost:u, amount:q*u});
+  });
+  form.append("lines_json", JSON.stringify(lines));
+  try {
+    var res = await fetch(API+"/api/income",{method:"POST", headers:{Authorization:"Bearer "+token}, body:form});
+    var data = await res.json();
+    if(!res.ok) throw new Error(data.detail||"Failed");
+    alert("Income receipt "+data.receipt_no+" saved");
+    loadIncome();
+  } catch(ex){ alert(ex.message); }
+});
+(function(){
+  var prev = showView;
+  showView = function(name){
+    prev(name);
+    if(name==="income") loadIncome();
+  };
+})();

@@ -197,6 +197,7 @@
         <div class="nav-divider" id="admin-divider" style="display:none;"></div>
         
         <a href="#" class="nav-item" data-view="payments"><span class="icon">💳</span> Payment Requests</a>
+        <a href="#" class="nav-item" data-view="income"><span class="icon">💵</span> Receive Income</a>
         <a href="#" class="nav-item" data-view="procurement"><span class="icon">📋</span> Procurement RFQ</a>
         <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
@@ -331,6 +332,34 @@
                 <thead><tr><th>PO No</th><th>Vendor</th><th>Amount</th><th>Status</th><th>Vendor links</th><th>To Finance</th></tr></thead>
                 <tbody></tbody>
               </table>
+            </div>
+          </div>
+        </section>
+
+        
+        <section id="view-income" class="view">
+          <div class="card">
+            <h3>Receive Income</h3>
+            <p class="hint">Record income with line items. Posting creates double-entry: Dr Cash/Bank, Cr Income account.</p>
+            <form id="income-form" class="form-grid">
+              <div class="form-group"><label>Received from *</label><input id="inc-from" required/></div>
+              <div class="form-group"><label>Total amount</label><input id="inc-amount" type="number" step="0.01"/></div>
+              <div class="form-group"><label>Cash/Bank account ID (Debit) *</label><input id="inc-cash-acct" type="number" required/></div>
+              <div class="form-group"><label>Income account ID (Credit) *</label><input id="inc-income-acct" type="number" required/></div>
+              <div class="form-group full-width"><label>Narration</label><input id="inc-narration"/></div>
+              <div class="form-group full-width">
+                <label>Lines</label>
+                <table class="data-table"><thead><tr><th>Description</th><th>Qty</th><th>Unit cost</th></tr></thead>
+                <tbody id="inc-lines"><tr>
+                  <td><input class="il-d" style="width:100%"/></td>
+                  <td><input class="il-q" type="number" value="1" style="width:80px"/></td>
+                  <td><input class="il-u" type="number" step="0.01" style="width:100px"/></td>
+                </tr></tbody></table>
+              </div>
+              <div class="form-group"><button class="btn btn-accent" type="submit">Save income receipt</button></div>
+            </form>
+            <div class="table-responsive" style="margin-top:16px">
+              <table class="data-table" id="income-table"><thead><tr><th>No</th><th>From</th><th>Amount</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
             </div>
           </div>
         </section>
