@@ -1075,6 +1075,8 @@ def submit_payment_request(
         User.company_id == current_user.company_id,
         User.can_approve_payment == True,
     ).first()
+    if not getattr(data, "project_code_id", None):
+        raise HTTPException(400, "Project code is required")
     if not approver:
         raise HTTPException(400, "Select a valid approver for this budget line")
 
@@ -2494,9 +2496,8 @@ def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user),
     pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
     if not pr:
         raise HTTPException(404, "Payment request not found")
-    if pr.status not in ("finance_approved", "paid", "approved", "program_approved"):
-        # still allow download if finance approved ideally
-        pass
+    if pr.status not in ("finance_approved", "paid", "approved", "program_approved", "submitted"):
+        raise HTTPException(400, "Voucher available after submission")
     co, code, sym = _company_and_currency(db, current_user)
     approvers = {}
     if pr.program_approved_by:
@@ -2838,7 +2839,7 @@ def finance_change_accounts(
     ).first()
     if not pr:
         raise HTTPException(404)
-    if pr.status not in ("submitted", "program_approved", "returned"):
+    if pr.status not in ("submitted", "program_approved", "returned", "finance_approved"):
         raise HTTPException(400, "Only open / program-approved requests can be adjusted")
     if debit_account_id is not None:
         pr.debit_account_id = debit_account_id
@@ -2864,6 +2865,8 @@ def payment_request_correction(
     ).first()
     if not pr:
         raise HTTPException(404)
+    if pr.status not in ("submitted", "program_approved", "returned", "finance_approved"):
+        raise HTTPException(400, "Cannot request correction on this status")
     pr.status = "returned"
     pr.rejection_reason = message
     db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="request_correction", comment=message))

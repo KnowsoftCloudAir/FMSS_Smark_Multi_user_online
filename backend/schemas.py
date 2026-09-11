@@ -196,7 +196,7 @@ class PaymentRequestIn(BaseModel):
     debit_account_id: Optional[int] = None
     credit_account_id: Optional[int] = None
     designated_approver_id: int
-    project_code_id: Optional[int] = None
+    project_code_id: int  # required
     line_items: List[PaymentLineIn] = []
     amount_in_words: Optional[str] = None
 

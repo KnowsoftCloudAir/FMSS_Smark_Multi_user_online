@@ -1,3 +1,24 @@
+
+/** Force file download (browser still chooses folder once; avoids opening PDF in tab). */
+async function forceDownload(url, filename) {
+  const res = await fetch(url.startsWith("http") ? url : (API + url), {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    let msg = "Download failed";
+    try { const j = await res.json(); msg = j.detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename || "report.pdf";
+  a.style.display = "none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+}
+
 const API = "";
 let token = localStorage.getItem("km_token");
 let currentUser = JSON.parse(localStorage.getItem("km_user") || "null");
@@ -866,6 +887,10 @@ async function loadPayments() {
     const role = currentUser.role;
     tbody.innerHTML = rows.map(p => {
       let actions = "";
+      if ((p.status === "submitted" || p.status === "program_approved") && ["finance", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
+        actions += `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Edit accounts</button> `;
+      }
       if (p.status === "submitted" && ["program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-success" onclick="actPay(${p.id},'program-approve')">Program Approve</button> `;
       }
@@ -874,6 +899,11 @@ async function loadPayments() {
       }
       if (p.status === "finance_approved" && ["finance", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-accent" onclick="actPay(${p.id},'pay')">Mark Paid</button> `;
+        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
+        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
+      }
+      if (p.status === "paid") {
+        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
       }
       if (["submitted", "program_approved"].includes(p.status) && ["finance", "program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-danger" onclick="actPay(${p.id},'reject')">Reject</button>`;
@@ -1150,6 +1180,10 @@ loadPayments = async function () {
     const role = currentUser.role;
     tbody.innerHTML = rows.map(p => {
       let actions = `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Open</button> `;
+      if ((p.status === "submitted" || p.status === "program_approved") && ["finance", "company_admin"].includes(role)) {
+        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
+        actions += `<button class="btn btn-sm btn-outline" onclick="openPaymentDetail(${p.id})">Edit accounts</button> `;
+      }
       if (p.status === "submitted" && ["program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-success" onclick="actPay(${p.id},'program-approve')">Program Approve</button> `;
       }
@@ -1158,6 +1192,11 @@ loadPayments = async function () {
       }
       if (p.status === "finance_approved" && ["finance", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-accent" onclick="actPay(${p.id},'pay')">Mark Paid</button> `;
+        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
+        actions += `<button class="btn btn-sm btn-outline" onclick="financeCorrectPayment(${p.id})">Request correction</button> `;
+      }
+      if (p.status === "paid") {
+        actions += `<button class="btn btn-sm btn-outline" onclick="printVoucher(${p.id})">Voucher PDF</button> `;
       }
       if (["submitted", "program_approved"].includes(p.status) && ["finance", "program", "project_manager", "company_admin"].includes(role)) {
         actions += `<button class="btn btn-sm btn-danger" onclick="actPay(${p.id},'reject')">Reject</button>`;
@@ -1826,6 +1865,13 @@ showView = function (name) {
 };
 
 // Voucher PDF from payment detail
+document.addEventListener("click", (e) => {
+  if (e.target && e.target.id === "btn-print-voucher") {
+    const pid = document.getElementById("payment-detail-modal")?.dataset?.pid;
+    if (pid) printVoucher(pid);
+  }
+});
+
 window.downloadVoucher = async function (id) {
   try { await authDownload(`/api/reports/voucher/${id}/pdf`, `voucher_${id}.pdf`); }
   catch (ex) { alert(ex.message); }
@@ -2170,12 +2216,13 @@ document.getElementById("payment-form")?.addEventListener("submit", async (e) =>
     const credit = document.getElementById("pay-credit")?.value;
     const project = document.getElementById("pay-project")?.value;
     try {
+      if (!project) { alert("Project code is required"); return; }
       await api("/api/payments/request", {
         method: "POST",
         body: JSON.stringify({
           budget_code_id: parseInt(document.getElementById("pay-budget").value),
           expense_code_id: parseInt(document.getElementById("pay-expense").value),
-          project_code_id: project ? parseInt(project) : null,
+          project_code_id: parseInt(project),
           amount: parseFloat(document.getElementById("pay-amount").value),
           payee_name: document.getElementById("pay-payee").value,
           narration: document.getElementById("pay-narration").value,
@@ -2391,3 +2438,37 @@ async function loadAssetAccountDropdowns() {
   } catch (e) {}
 }
 document.getElementById("btn-new-asset")?.addEventListener("click", () => loadAssetAccountDropdowns());
+
+document.addEventListener("click", async (e) => {
+  const a = e.target.closest("a[data-auth-dl]");
+  if (!a) return;
+  e.preventDefault();
+  const href = a.getAttribute("href") || "";
+  if (!href || href === "#") return;
+  const name = (href.split("/").pop() || "report.pdf").split("?")[0] || "report.pdf";
+  try { await forceDownload(href, name.endsWith(".pdf") ? name : name + ".pdf"); }
+  catch (ex) { alert(ex.message); }
+});
+
+
+window.printVoucher = async function (id) {
+  try {
+    await forceDownload(`/api/reports/voucher/${id}/pdf`, `payment_voucher_${id}.pdf`);
+  } catch (ex) { alert(ex.message); }
+};
+
+window.financeCorrectPayment = async function (id) {
+  const msg = prompt("Message to originator (required corrections):");
+  if (!msg) return;
+  const form = new FormData();
+  form.append("message", msg);
+  try {
+    const res = await fetch(API + `/api/payments/${id}/request-correction`, {
+      method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed");
+    alert(data.message || "Originator notified");
+    loadPayments();
+  } catch (ex) { alert(ex.message); }
+};

@@ -278,44 +278,60 @@ def build_bank_recon_pdf(company, statement_balance, book_balance, bank_charges,
 
 
 def build_payment_voucher_pdf(company, pr, approvers, currency_code="NGN", currency_symbol="₦", kpis=None):
-    """Approved payment request PDF with org, logo, invoice detail, approvers, sign lines."""
+    """Beautiful payment voucher with logo, company name, payment details, signatures."""
     buf = BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm,
                             topMargin=12*mm, bottomMargin=14*mm)
     story = []
     styles = company_header(
-        story, company, "PAYMENT VOUCHER / APPROVED PAYMENT REQUEST",
+        story, company, "PAYMENT VOUCHER",
         currency_code, currency_symbol,
-        description=f"Request No: {getattr(pr, 'request_no', '')}",
+        description="Official payment document",
     )
     dashboard_snapshot_block(story, styles, kpis or {})
     story.append(PageBreak())
 
+    words = getattr(pr, "amount_in_words", None) or amount_to_words(getattr(pr, "amount", 0) or 0)
+    story.append(Paragraph(f"<b>VOUCHER No:</b> {getattr(pr, 'request_no', '')}", styles["BodyL"]))
+    story.append(Spacer(1, 6))
     details = [
         ["Field", "Detail"],
-        ["Request No", getattr(pr, "request_no", "")],
-        ["Payee", getattr(pr, "payee_name", "")],
+        ["Payee", getattr(pr, "payee_name", "") or "—"],
         ["Amount", f"{currency_symbol}{float(getattr(pr, 'amount', 0) or 0):,.2f}"],
-        ["Description / Invoice", (getattr(pr, "description", None) or getattr(pr, "narration", None) or "")[:200]],
+        ["Amount in words", words],
+        ["Narration / Invoice details", (getattr(pr, "narration", None) or "")[:300]],
         ["Status", getattr(pr, "status", "")],
-        ["Date", str(getattr(pr, "created_at", "") or "")[:19]],
+        ["Request date", str(getattr(pr, "created_at", "") or "")[:19]],
+        ["Paid date", str(getattr(pr, "paid_at", "") or "—")[:19]],
     ]
     for label, val in (approvers or {}).items():
-        details.append([label, val])
+        details.append([label, str(val)])
     t = Table(details, colWidths=[5*cm, 12*cm])
     t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1A6B9A")),
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0D3B66")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CCCCCC")),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#F0F6FA")),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#94a3b8")),
+        ("FONTSIZE", (0, 0), (-1, -1), 10),
+        ("BACKGROUND", (0, 1), (0, -1), colors.HexColor("#E8F4FC")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
     ]))
     story.append(t)
-    signature_block(story, styles, ["Requestor", "Program Approver", "Finance Approver"])
+    story.append(Spacer(1, 20))
+    story.append(Paragraph("<b>Authorisation</b>", styles["BodyL"]))
+    signature_block(story, styles, ["Prepared by", "Finance Officer", "Authorised signatory"])
+    story.append(Spacer(1, 12))
+    story.append(Paragraph(
+        "<i>This voucher is system-generated. Verify payee and amount before disbursement.</i>",
+        styles["Small"],
+    ))
     doc.build(story)
     buf.seek(0)
     return buf
+
 
 
 def build_csv(headers, rows):
