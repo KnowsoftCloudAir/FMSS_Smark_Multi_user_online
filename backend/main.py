@@ -701,9 +701,6 @@ def init_defaults(db: Session):
         print("✅ Demo company approved + licensed | admin / Admin@Knowsoft1!")
 
 
-@app.on_event("startup")
-
-
 def ensure_demo_extended_samples(db: Session):
     """Idempotent: fill projects, inventory JE, procurement stages for demo company."""
     demo = db.query(Company).filter(Company.slug == "demo").first()
@@ -974,6 +971,7 @@ def ensure_demo_extended_samples(db: Session):
     print("✅ Extended demo samples: projects, inventory JE, procurement open/evaluation/PO pending/payment in workflow")
 
 
+@app.on_event("startup")
 def on_startup():
     db = next(get_db())
     try:
