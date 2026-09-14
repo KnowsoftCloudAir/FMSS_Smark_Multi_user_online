@@ -399,11 +399,14 @@ def register_company(data: CompanyRegister, db: Session = Depends(get_db)):
     slug = data.company_slug.lower().strip()
     if db.query(Company).filter(Company.slug == slug).first():
         raise HTTPException(400, "Company slug already taken")
+    # Auto-approve with 15-day free trial (user requirement)
+    trial_days = 15
     company = Company(
         name=data.company_name.strip(),
         slug=slug,
         address=data.address or "",
-        status="pending",  # awaits superadmin approval
+        status="active",
+        license_expires=date.today() + timedelta(days=trial_days),
     )
     db.add(company)
     db.commit()
@@ -426,10 +429,11 @@ def register_company(data: CompanyRegister, db: Session = Depends(get_db)):
     )
     db.add(admin)
     db.commit()
-    audit(db, company.id, admin, "REGISTER_COMPANY", f"Pending approval: {company.name}")
+    audit(db, company.id, admin, "REGISTER_COMPANY", f"15-day trial activated: {company.name}")
     return {
-        "message": "Registration submitted. Awaiting Knowsoft superadmin approval and annual license.",
-        "company": {"name": company.name, "slug": company.slug, "status": "pending"},
+        "message": f"Registration successful. Your 15-day free trial is active until {company.license_expires.isoformat()}.",
+        "company": {"name": company.name, "slug": company.slug, "status": "active", "license_expires": company.license_expires.isoformat()},
+        "trial_days": trial_days,
     }
 
 
@@ -1083,13 +1087,28 @@ def submit_payment_request(
 
 @app.get("/api/payments")
 def list_payments(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Return payment requests filtered so approved/rejected items leave the approver's active queue.
+    - program role: only status=submitted (pending their action)
+    - finance role: only status=program_approved (pending their action)
+    - originator: sees own requests including rejected (for resubmit)
+    - company_admin / superadmin: sees all
+    """
     q = db.query(PaymentRequest).filter(PaymentRequest.company_id == current_user.company_id)
-    # non-finance/program see own or designated
-    if current_user.role not in ("finance", "program", "project_manager", "company_admin", "superadmin"):
+    role = current_user.role
+    if role == "program" or role == "project_manager":
+        # Approving officers only see items awaiting their decision
+        q = q.filter(PaymentRequest.status == "submitted")
         q = q.filter(
-            (PaymentRequest.requester_id == current_user.id) |
-            (PaymentRequest.designated_approver_id == current_user.id)
+            (PaymentRequest.designated_approver_id == current_user.id) |
+            (PaymentRequest.designated_approver_id == None)
         )
+    elif role == "finance":
+        q = q.filter(PaymentRequest.status == "program_approved")
+    elif role in ("company_admin", "superadmin"):
+        pass  # full list
+    else:
+        # originator / other staff: own requests (including rejected for correction)
+        q = q.filter(PaymentRequest.requester_id == current_user.id)
     rows = q.order_by(PaymentRequest.created_at.desc()).all()
     out = []
     for p in rows:
@@ -2399,6 +2418,85 @@ def get_my_signature(current_user: User = Depends(get_current_active_user)):
 
 
 
+
+# ===================== CURRENCY / EXCHANGE RATES =====================
+@app.get("/api/finance/exchange-rates")
+def list_exchange_rates(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """List exchange rates for the company (stored in company settings JSON or default)."""
+    co = db.query(Company).filter(Company.id == current_user.company_id).first()
+    rates = []
+    if co and getattr(co, "settings_json", None):
+        import json as _json
+        try:
+            s = _json.loads(co.settings_json or "{}")
+            rates = s.get("exchange_rates", [])
+        except Exception:
+            rates = []
+    return {"reporting_currency": getattr(co, "reporting_currency_code", "NGN") if co else "NGN", "rates": rates}
+
+
+@app.post("/api/finance/exchange-rates")
+def set_exchange_rate(
+    from_currency: str = Form(...),
+    to_currency: str = Form(...),
+    rate: float = Form(...),
+    current_user: User = Depends(require_roles("company_admin", "finance", "superadmin")),
+    db: Session = Depends(get_db),
+):
+    """Add or update an exchange rate factor (from → to)."""
+    import json as _json
+    co = db.query(Company).filter(Company.id == current_user.company_id).first()
+    if not co:
+        raise HTTPException(404, "Company not found")
+    try:
+        s = _json.loads(co.settings_json or "{}")
+    except Exception:
+        s = {}
+    rates = s.get("exchange_rates", [])
+    # upsert
+    found = False
+    for r in rates:
+        if r.get("from") == from_currency.upper() and r.get("to") == to_currency.upper():
+            r["rate"] = rate
+            r["updated"] = datetime.utcnow().isoformat()
+            found = True
+            break
+    if not found:
+        rates.append({
+            "from": from_currency.upper(), "to": to_currency.upper(),
+            "rate": rate, "updated": datetime.utcnow().isoformat(),
+        })
+    s["exchange_rates"] = rates
+    co.settings_json = _json.dumps(s)
+    db.commit()
+    return {"message": "Rate saved", "rates": rates}
+
+
+@app.post("/api/reports/convert")
+def convert_report(
+    report_type: str = Form("financial-position"),
+    target_currency: str = Form(...),
+    rate: float = Form(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Convert a report to target currency using provided rate factor. Returns IFRS-style rows."""
+    if report_type == "financial-performance":
+        data = ifrs_financial_performance(current_user, db)
+    else:
+        data = ifrs_financial_position(current_user, db)
+    for row in data.get("rows", []):
+        if "amount" in row:
+            row["amount_original"] = row["amount"]
+            row["amount"] = round((row["amount"] or 0) * rate, 2)
+            row["currency"] = target_currency.upper()
+    data["converted"] = True
+    data["target_currency"] = target_currency.upper()
+    data["rate_applied"] = rate
+    data["title"] = data.get("title", "Report") + f" (converted to {target_currency.upper()})"
+    return data
+
+
 @app.get("/api/reports/ifrs/financial-position")
 def ifrs_financial_position(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
     """Statement of Financial Position (IAS 1) — balances by account type."""
@@ -2427,13 +2525,29 @@ def ifrs_financial_position(current_user: User = Depends(get_current_active_user
             "amount": display, "ifrs": ifrs_for(acc.name, at),
             "project_code": acc.project_code or "",
         })
+    assets_total = totals.get("Asset", 0) + totals.get("Cash", 0)
+    liab_eq = totals.get("Liability", 0) + totals.get("Equity", 0)
+    # Ensure SoFP always balances: any difference goes to Capital / Retained Earnings
+    difference = round(assets_total - liab_eq, 2)
+    balancing_note = None
+    if abs(difference) >= 0.01:
+        balancing_note = f"Balancing figure of {difference:,.2f} applied to Capital (investigate root postings)"
+        rows.append({
+            "code": "BAL", "name": "Capital balancing figure (auto)", "type": "Equity",
+            "amount": difference, "ifrs": "IAS 1 — Equity",
+            "project_code": "", "is_balancing": True,
+        })
+        totals["Equity"] = totals.get("Equity", 0) + difference
+        liab_eq = totals.get("Liability", 0) + totals.get("Equity", 0)
     return {
         "title": "Statement of Financial Position",
         "standard": "IAS 1 Presentation of Financial Statements",
         "rows": rows,
         "totals": totals,
-        "assets_total": totals.get("Asset", 0) + totals.get("Cash", 0),
-        "liabilities_equity_total": totals.get("Liability", 0) + totals.get("Equity", 0),
+        "assets_total": assets_total,
+        "liabilities_equity_total": liab_eq,
+        "balancing_difference": difference,
+        "balancing_note": balancing_note,
     }
 
 
@@ -2724,9 +2838,21 @@ def get_rfq(rfq_id: int, current_user: User = Depends(get_current_active_user), 
     members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq.id).all()
     scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq.id).all()
     pos = db.query(PurchaseOrder).filter(PurchaseOrder.rfq_id == rfq.id).all()
+    scored_member_ids = {s.member_id for s in scores}
+    pending_scorers = []
+    for m in members:
+        if m.user_id not in scored_member_ids:
+            u = db.query(User).filter(User.id == m.user_id).first()
+            pending_scorers.append({
+                "user_id": m.user_id,
+                "username": u.username if u else None,
+                "full_name": (u.full_name if u else None) or (u.username if u else str(m.user_id)),
+                "email": u.email if u else None,
+            })
     base = _public_base()
     return {
         "rfq": rfq,
+        "pending_scorers": pending_scorers,
         "links": [{
             "id": L.id, "token": L.token, "vendor_name": L.vendor_name, "vendor_email": L.vendor_email,
             "status": L.status, "expires_at": L.expires_at.isoformat() if L.expires_at else None,
@@ -2964,13 +3090,11 @@ def score_quote(
         RFQQuoteScore.quote_id == quote_id, RFQQuoteScore.member_id == current_user.id
     ).first()
     if existing:
-        existing.score = score
-        existing.comments = comments
-    else:
-        db.add(RFQQuoteScore(
-            company_id=current_user.company_id, rfq_id=q.rfq_id, quote_id=quote_id,
-            member_id=current_user.id, score=score, comments=comments,
-        ))
+        raise HTTPException(400, "You have already scored this quote. Only one score per committee member is allowed.")
+    db.add(RFQQuoteScore(
+        company_id=current_user.company_id, rfq_id=q.rfq_id, quote_id=quote_id,
+        member_id=current_user.id, score=score, comments=comments,
+    ))
     db.commit()
     # recompute average
     all_s = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == quote_id).all()
@@ -3019,6 +3143,50 @@ def declare_winner(rfq_id: int, current_user: User = Depends(get_current_active_
         "result_url": f"{base}/po-result/{token}" if base else f"/po-result/{token}",
         "message": f"Winner: {winner.vendor_name} (score {winner.total_score})",
     }
+
+
+
+@app.delete("/api/procurement/rfqs/{rfq_id}")
+def delete_rfq(rfq_id: int, current_user: User = Depends(require_roles("company_admin", "superadmin")), db: Session = Depends(get_db)):
+    """Delete an RFQ opened by mistake (only if no quotes received yet)."""
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).count()
+    if quotes > 0:
+        raise HTTPException(400, "Cannot delete RFQ that already has vendor quotes. Close it instead.")
+    # cascade clean
+    db.query(RFQQuoteLink).filter(RFQQuoteLink.rfq_id == rfq_id).delete()
+    db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id).delete()
+    db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.rfq_id == rfq_id).delete()
+    db.query(RFQLineItem).filter(RFQLineItem.rfq_id == rfq_id).delete()
+    db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq_id).delete()
+    db.delete(rfq)
+    db.commit()
+    audit(db, current_user.company_id, current_user, "RFQ_DELETE", f"Deleted RFQ id={rfq_id}")
+    return {"message": "RFQ deleted"}
+
+
+@app.delete("/api/procurement/rfqs/{rfq_id}/links/{link_id}")
+def delete_rfq_link(rfq_id: int, link_id: int, current_user: User = Depends(require_roles("company_admin", "superadmin")), db: Session = Depends(get_db)):
+    """Revoke a vendor quote link generated by mistake."""
+    link = db.query(RFQQuoteLink).filter(
+        RFQQuoteLink.id == link_id, RFQQuoteLink.rfq_id == rfq_id
+    ).first()
+    if not link:
+        raise HTTPException(404, "Link not found")
+    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404, "RFQ not found")
+    # prevent delete if quote already submitted on this link
+    existing_q = db.query(RFQQuote).filter(RFQQuote.link_id == link_id).first()
+    if existing_q:
+        raise HTTPException(400, "Cannot delete link: a quote was already submitted")
+    db.delete(link)
+    db.commit()
+    audit(db, current_user.company_id, current_user, "RFQ_LINK_DELETE", f"link={link_id} rfq={rfq_id}")
+    return {"message": "Quote link revoked"}
+
 
 
 @app.get("/api/procurement/rfqs/{rfq_id}/committee-report/pdf")
