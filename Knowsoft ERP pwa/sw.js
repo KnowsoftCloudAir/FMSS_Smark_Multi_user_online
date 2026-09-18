@@ -1,49 +1,54 @@
-const CACHE_NAME = "fmss-smart-knowsoft-v2";
-const APP_SHELL = [
-  "./",
-  "./manifest.webmanifest",
-  "./favicon.png",
-  "./favicon-32.png",
-  "./favicon-16.png",
-  "./icons/icon-192.png",
-  "./icons/icon-512.png",
-  "./icons/icon-maskable-512.png",
-  "./screenshots/fmss-smart-wide.png",
-  "./screenshots/fmss-smart-mobile.png"
+// Simple service worker for Knowsoft Churchgate PWA
+const CACHE_NAME = 'churchgate-v1';
+const urlsToCache = [
+  '/',
+  '/manifest.json',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png'
 ];
 
-self.addEventListener("install", event => {
+// Install event
+self.addEventListener('install', (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL))
+    caches.open(CACHE_NAME)
+      .then((cache) => {
+        return cache.addAll(urlsToCache);
+      })
   );
   self.skipWaiting();
 });
 
-self.addEventListener("activate", event => {
+// Activate event
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys
-          .filter(key => key !== CACHE_NAME)
-          .map(key => caches.delete(key))
-      )
-    )
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cacheName) => {
+          if (cacheName !== CACHE_NAME) {
+            return caches.delete(cacheName);
+          }
+        })
+      );
+    })
   );
   self.clients.claim();
 });
 
-self.addEventListener("fetch", event => {
-  if (event.request.method !== "GET") return;
-
+// Fetch event - Network first, fallback to cache
+self.addEventListener('fetch', (event) => {
   event.respondWith(
-    caches.match(event.request).then(cached => {
-      if (cached) return cached;
-
-      return fetch(event.request).then(response => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(event.request, copy));
+    fetch(event.request)
+      .then((response) => {
+        // Clone the response
+        const responseToCache = response.clone();
+        caches.open(CACHE_NAME)
+          .then((cache) => {
+            cache.put(event.request, responseToCache);
+          });
         return response;
-      }).catch(() => caches.match("./"));
-    })
+      })
+      .catch(() => {
+        return caches.match(event.request);
+      })
   );
 });
