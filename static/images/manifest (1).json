@@ -1,74 +1,16 @@
 {
-  "id": "/",
-  "name": "Knowsoft FMSS — ERP Business Partner",
-  "short_name": "Payme",
-  "description": "Knowsoft FMSS For a good ERP experience.",
+  "name": "Knowsoft FMSS ERP",
+  "short_name": "FMSS ERP",
+  "description": "Knowsoft FMSS Smart Multi-user Online ERP",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
-  "display_override": [
-    "standalone",
-    "minimal-ui",
-    "browser"
-  ],
-  "background_color": "#0b1220",
-  "theme_color": "#0b1220",
-  "orientation": "any",
-  "lang": "en",
-  "dir": "ltr",
-  "categories": [
-    "business",
-    "finance",
-    "productivity",
-    "shopping"
-  ],
-  "prefer_related_applications": false,
+  "background_color": "#0a1228",
+  "theme_color": "#0F1C3A",
   "icons": [
-    {
-      "src": "/static/icons/icon-72.png",
-      "sizes": "72x72",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/static/icons/icon-96.png",
-      "sizes": "96x96",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/static/icons/icon-128.png",
-      "sizes": "128x128",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/static/icons/icon-144.png",
-      "sizes": "144x144",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/static/icons/icon-152.png",
-      "sizes": "152x152",
-      "type": "image/png",
-      "purpose": "any"
-    },
     {
       "src": "/static/icons/icon-192.png",
       "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "any"
-    },
-    {
-      "src": "/static/icons/maskable-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "/static/icons/icon-384.png",
-      "sizes": "384x384",
       "type": "image/png",
       "purpose": "any"
     },
@@ -77,50 +19,6 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
-    },
-    {
-      "src": "/static/icons/maskable-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
-    }
-  ],
-  "shortcuts": [
-    {
-      "name": "Record sale",
-      "short_name": "Sales",
-      "description": "Open camera sales and scan products",
-      "url": "/sales?source=shortcut",
-      "icons": [
-        {
-          "src": "/static/icons/icon-192.png",
-          "sizes": "192x192"
-        }
-      ]
-    },
-    {
-      "name": "Products",
-      "short_name": "Products",
-      "description": "Manage inventory and barcodes",
-      "url": "/products?source=shortcut",
-      "icons": [
-        {
-          "src": "/static/icons/icon-192.png",
-          "sizes": "192x192"
-        }
-      ]
-    },
-    {
-      "name": "Orders",
-      "short_name": "Orders",
-      "description": "Review customer orders",
-      "url": "/orders?source=shortcut",
-      "icons": [
-        {
-          "src": "/static/icons/icon-192.png",
-          "sizes": "192x192"
-        }
-      ]
     }
   ]
 }
