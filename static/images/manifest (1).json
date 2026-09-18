@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Knowsoft Payme — Small Business Partner",
+  "name": "Knowsoft FMSS — ERP Business Partner",
   "short_name": "Payme",
-  "description": "Knowsoft Payme is your small business partner. Register stock, print barcodes and QR codes, scan sales with your phone camera, issue POS receipts, track cash and credit sales, purchases and expenses, share product showcase links, and view financial statements — even when the network is weak. Built by Knowsoft, with ease.",
+  "description": "Knowsoft FMSS For a good ERP experience.",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
