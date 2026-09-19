@@ -1,34 +1,28 @@
 {
   "id": "/",
-  "name": "Eleon \u2014 Knowsoft Presentation Partner",
-  "short_name": "Eleon",
-  "description": "Design and present slides with Eleon. Charts, images, voice probe, original PPT studio, offline pack. By Knowsoft.",
+  "name": "Knowsoft FMSS Multi-User Online",
+  "short_name": "FMSS",
+  "description": "Knowsoft FMSS Multi-User Online \u2014 professional financial management, workflow approvals, assets, inventory, bank reconciliation, procurement and project reporting for multi-company teams.",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
   "display_override": [
-    "window-controls-overlay",
-    "standalone"
+    "standalone",
+    "minimal-ui",
+    "browser"
   ],
   "orientation": "any",
-  "background_color": "#0f172a",
-  "theme_color": "#0f172a",
+  "background_color": "#0a1a20",
+  "theme_color": "#0b6e6e",
   "lang": "en",
   "dir": "ltr",
   "categories": [
-    "productivity",
-    "education",
-    "business"
+    "business",
+    "finance",
+    "productivity"
   ],
-  "iarc_rating_id": "",
   "prefer_related_applications": false,
   "icons": [
-    {
-      "src": "/static/icons/icon-48.png",
-      "sizes": "48x48",
-      "type": "image/png",
-      "purpose": "any"
-    },
     {
       "src": "/static/icons/icon-72.png",
       "sizes": "72x72",
@@ -66,10 +60,10 @@
       "purpose": "any"
     },
     {
-      "src": "/static/icons/icon-256.png",
-      "sizes": "256x256",
+      "src": "/static/icons/maskable-192.png",
+      "sizes": "192x192",
       "type": "image/png",
-      "purpose": "any"
+      "purpose": "maskable"
     },
     {
       "src": "/static/icons/icon-384.png",
@@ -84,51 +78,18 @@
       "purpose": "any"
     },
     {
-      "src": "/static/icons/icon-maskable-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "/static/icons/icon-maskable-512.png",
+      "src": "/static/icons/maskable-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
-    },
-    {
-      "src": "/static/icons/icon-512-maskable.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
-      "src": "/static/icons/apple-touch-icon.png",
-      "sizes": "180x180",
-      "type": "image/png",
-      "purpose": "any"
-    }
-  ],
-  "screenshots": [
-    {
-      "src": "/static/icons/splash-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "form_factor": "narrow",
-      "label": "Eleon presentation partner"
-    },
-    {
-      "src": "/static/icons/icon-512.png",
-      "sizes": "512x512",
-      "type": "image/png",
-      "form_factor": "wide",
-      "label": "Eleon by Knowsoft"
     }
   ],
   "shortcuts": [
     {
       "name": "Dashboard",
-      "short_name": "Home",
-      "url": "/dashboard",
+      "short_name": "Dashboard",
+      "description": "Open FMSS dashboard",
+      "url": "/?view=dashboard",
       "icons": [
         {
           "src": "/static/icons/icon-192.png",
@@ -137,9 +98,22 @@
       ]
     },
     {
-      "name": "New presentation",
-      "short_name": "New",
-      "url": "/presentations/new",
+      "name": "Payment requests",
+      "short_name": "Payments",
+      "description": "Payment workflow",
+      "url": "/?view=payments",
+      "icons": [
+        {
+          "src": "/static/icons/icon-192.png",
+          "sizes": "192x192"
+        }
+      ]
+    },
+    {
+      "name": "Reports",
+      "short_name": "Reports",
+      "description": "Financial reports",
+      "url": "/?view=reports",
       "icons": [
         {
           "src": "/static/icons/icon-192.png",
@@ -147,7 +121,5 @@
         }
       ]
     }
-  ],
-  "related_applications": [],
-  "handle_links": "preferred"
+  ]
 }

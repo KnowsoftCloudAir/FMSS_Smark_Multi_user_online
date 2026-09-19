@@ -1,3 +1,32 @@
+
+def _migrate_schema(engine):
+    """Add new columns if missing (SQLite / Postgres safe try)."""
+    from sqlalchemy import text
+    alters = [
+        ("project_codes", "budget_amount", "FLOAT DEFAULT 0"),
+        ("project_codes", "start_date", "DATE"),
+        ("project_codes", "end_date", "DATE"),
+        ("payment_requests", "project_code_id", "INTEGER"),
+        ("payment_requests", "amount_in_words", "VARCHAR(500)"),
+        ("payment_requests", "line_items_json", "TEXT"),
+        ("bank_statement_sessions", "bank_charges", "FLOAT DEFAULT 0"),
+        ("bank_statement_sessions", "bank_charges_note", "TEXT"),
+        ("bank_statement_sessions", "unpresented_cheques", "FLOAT DEFAULT 0"),
+        ("bank_statement_sessions", "deposits_in_transit", "FLOAT DEFAULT 0"),
+        ("bank_statement_sessions", "status", "VARCHAR(20) DEFAULT 'draft'"),
+        ("bank_statement_sessions", "approved_by", "INTEGER"),
+        ("bank_statement_sessions", "approved_at", "TIMESTAMP"),
+        ("bank_statement_sessions", "approver_stamp", "VARCHAR(120)"),
+        ("procurement_rfqs", "committee_id", "INTEGER"),
+        ("procurement_rfqs", "requesting_officer_id", "INTEGER"),
+    ]
+    with engine.begin() as conn:
+        for table, col, typ in alters:
+            try:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
+            except Exception:
+                pass
+
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -14,8 +43,7 @@ from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
     PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry, BankReconState, CorrectionRequest, BankStatementSession,
-    RFQ, RFQQuoteLink, RFQQuote, RFQCommitteeMember, RFQQuoteScore, PurchaseOrder, PaymentLine, RFQLineItem, RFQCommitteeInvite, IncomeReceipt, IncomeReceiptLine, RFQQuoteLine, TodoItem
+    Vendor, AssetAccountingEntry, ProcurementService, ProcurementRFQ, ProcurementQuote, ProcurementCommittee, ProcurementCommitteeMember, QuoteMemberScore, PurchaseOrder, ProcurementDocument, BankReconState, CorrectionRequest, BankStatementSession, StoredReport, PaymentLineItem, ProjectCode
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -23,7 +51,7 @@ from schemas import (
     COAIn, BudgetCodeIn, ExpenseCodeIn, PaymentRequestIn, PaymentAction, AssetIn,
     CompanySettingsOut
 )
-from amount_words import amount_to_words
+from reports import amount_to_words
 from auth import (
     create_access_token, get_password_hash, verify_password,
     get_current_active_user, get_superadmin, get_company_admin,
@@ -32,15 +60,18 @@ from auth import (
 )
 
 Base.metadata.create_all(bind=engine)
+_migrate_schema(engine)
 
 app = FastAPI(title="Knowsoft FMSS ERP", version="2.2.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 IMAGES_DIR = STATIC_DIR / "images"
 UPLOADS_DIR = STATIC_DIR / "uploads"
 BACKUP_DIR = STATIC_DIR / "backups"
-for d in (IMAGES_DIR, UPLOADS_DIR, BACKUP_DIR):
+ARCHIVE_DIR = STATIC_DIR / "archives"
+for d in (IMAGES_DIR, UPLOADS_DIR, BACKUP_DIR, ARCHIVE_DIR):
     d.mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
@@ -60,6 +91,26 @@ def audit(db, company_id, user, action, details):
 
 
 def init_defaults(db: Session):
+    # Ensure new columns exist (SQLite)
+    try:
+        from sqlalchemy import text
+        for stmt in [
+            "ALTER TABLE project_codes ADD COLUMN budget_amount FLOAT DEFAULT 0",
+            "ALTER TABLE project_codes ADD COLUMN start_date DATE",
+            "ALTER TABLE project_codes ADD COLUMN end_date DATE",
+            "ALTER TABLE project_codes ADD COLUMN created_at DATETIME",
+            "ALTER TABLE payment_requests ADD COLUMN project_code_id INTEGER",
+            "ALTER TABLE payment_requests ADD COLUMN amount_in_words VARCHAR(500)",
+            "ALTER TABLE payment_requests ADD COLUMN line_items_json TEXT",
+        ]:
+            try:
+                db.execute(text(stmt))
+                db.commit()
+            except Exception:
+                db.rollback()
+    except Exception as e:
+        print("migrate note:", e)
+
     if not db.query(CompanySettings).first():
         db.add(CompanySettings(org_name="Knowsoft FMSS ERP"))
         db.commit()
@@ -333,18 +384,289 @@ def init_defaults(db: Session):
                 debit_account_id=coa_map.get("5600"), credit_account_id=coa_map.get("2000"),
             ))
 
-        # Project codes
-        for code, name in [("PRJ-HLT", "Health Outreach"), ("PRJ-EDU", "Education Support"), ("PRJ-OPS", "Operations")]:
-            db.add(ProjectCode(company_id=demo.id, code=code, name=name))
+        # ---- Project codes (always refresh map) ----
+        proj_defs = [
+            ("PRJ-HLT", "Health Outreach 2026", 5000000),
+            ("PRJ-EDU", "Education Support 2026", 3500000),
+            ("PRJ-OPS", "Operations & Admin", 1500000),
+            ("PRJ-WASH", "Water & Sanitation", 2800000),
+            ("PRJ-CAP", "Capital / Equipment", 4200000),
+        ]
+        proj_map = {}
+        for code, name, bud in proj_defs:
+            pc = db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first()
+            if not pc:
+                kwargs = dict(company_id=demo.id, code=code, name=name, description=name)
+                if hasattr(ProjectCode, "budget_amount"):
+                    kwargs["budget_amount"] = bud
+                pc = ProjectCode(**kwargs)
+                db.add(pc)
+                db.flush()
+            else:
+                if hasattr(pc, "budget_amount") and not (pc.budget_amount or 0):
+                    try:
+                        pc.budget_amount = bud
+                    except Exception:
+                        pass
+            proj_map[code] = pc.id
+        db.commit()
 
-        # Update assets with assigned_to and accounts
+        # Tag existing journal lines with projects where missing
+        jes = db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.project_code_id.is_(None)).all()
+        for i, j in enumerate(jes):
+            codes = list(proj_map.values())
+            j.project_code_id = codes[i % len(codes)]
+            db.add(j)
+
+        # Extra project-coded postings (income + expenses)
+        extra_jes = [
+            ("JE-PRJ-HLT-01", "1000", "4000", 2000000, "Grant received — Health", "PRJ-HLT"),
+            ("JE-PRJ-HLT-02", "5500", "1000", 450000, "Medical kits — field", "PRJ-HLT"),
+            ("JE-PRJ-EDU-01", "1000", "4000", 1500000, "Grant received — Education", "PRJ-EDU"),
+            ("JE-PRJ-EDU-02", "5300", "1000", 320000, "Teacher training workshop", "PRJ-EDU"),
+            ("JE-PRJ-WASH-01", "5500", "1000", 280000, "Water treatment supplies", "PRJ-WASH"),
+            ("JE-PRJ-OPS-01", "5100", "1000", 850000, "HQ rent allocation", "PRJ-OPS"),
+            ("JE-PRJ-CAP-01", "1510", "1000", 1250000, "Project laptops", "PRJ-CAP"),
+        ]
+        for eno, dr, cr, amt, desc, pcode in extra_jes:
+            if db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).first():
+                continue
+            pid = proj_map.get(pcode)
+            db.add(JournalEntry(
+                company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=5),
+                source_type="manual", account_id=coa_map[dr], project_code_id=pid,
+                description=desc, narration=f"Project {pcode}", debit=amt, credit=0, created_by=finance.id,
+            ))
+            db.add(JournalEntry(
+                company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=5),
+                source_type="manual", account_id=coa_map[cr], project_code_id=pid,
+                description=desc, narration=f"Project {pcode}", debit=0, credit=amt, created_by=finance.id,
+            ))
+        db.commit()
+
+        # Update assets with project + accounts
         for a in db.query(Asset).filter(Asset.company_id == demo.id).all():
             a.assigned_to = a.assigned_to or "Head Office Pool"
             a.debit_account_id = a.debit_account_id or coa_map.get("1510")
             a.credit_account_id = a.credit_account_id or coa_map.get("1000")
             a.useful_life = a.useful_life or 5.0
+            if not a.project_code_id:
+                a.project_code_id = proj_map.get("PRJ-CAP") or proj_map.get("PRJ-OPS")
 
-        print("✅ Demo company seeded with COA, budgets, expenses, assets, payment workflow samples")
+        # ---- Inventory with project-linked postings ----
+        inv_samples = [
+            ("INV-MED-001", "ORS Sachets (box)", "Medical", 2500, 40, "PRJ-HLT"),
+            ("INV-MED-002", "First aid kits", "Medical", 15000, 25, "PRJ-HLT"),
+            ("INV-EDU-001", "Exercise books (carton)", "Education", 8000, 30, "PRJ-EDU"),
+            ("INV-WASH-001", "Water purification tablets", "WASH", 4500, 50, "PRJ-WASH"),
+            ("INV-OPS-001", "Office stationery pack", "Admin", 3500, 20, "PRJ-OPS"),
+        ]
+        for code, name, cat, cost, qty, pcode in inv_samples:
+            if db.query(InventoryItem).filter(InventoryItem.company_id == demo.id, InventoryItem.item_code == code).first():
+                continue
+            total = cost * qty
+            item = InventoryItem(
+                company_id=demo.id, item_code=code, item_name=name, category=cat,
+                cost_price=cost, qty_received=qty, balance_qty=qty, total_value=total,
+                department="Programmes", funding_source="Grant",
+                debit_account_id=coa_map.get("5500"), credit_account_id=coa_map.get("1000"),
+                project_code_id=proj_map.get(pcode),
+            )
+            db.add(item); db.flush()
+            db.add(InventoryMovement(
+                company_id=demo.id, item_id=item.id, movement_type="receive",
+                quantity=qty, unit_cost=cost, total=total, narration=f"Opening stock {pcode}",
+                debit_account_id=coa_map.get("5500"), credit_account_id=coa_map.get("1000"),
+                project_code_id=proj_map.get(pcode), created_by=finance.id,
+            ))
+            eno = f"JE-INV-{code}"
+            if not db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).first():
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=3),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["5500"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=total, credit=0, created_by=finance.id,
+                ))
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno, entry_date=date.today() - _td(days=3),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["1000"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=0, credit=total, created_by=finance.id,
+                ))
+            # partial issue for one item
+            if code == "INV-MED-001":
+                issue_qty = 10
+                issue_total = issue_qty * cost
+                item.qty_issued = issue_qty
+                item.balance_qty = qty - issue_qty
+                item.total_value = item.balance_qty * cost
+                db.add(InventoryMovement(
+                    company_id=demo.id, item_id=item.id, movement_type="issue",
+                    quantity=issue_qty, unit_cost=cost, total=issue_total,
+                    narration="Issued to Kano outreach", debit_account_id=coa_map.get("5500"),
+                    credit_account_id=coa_map.get("1000"), project_code_id=proj_map.get(pcode), created_by=program.id,
+                ))
+                eno2 = f"JE-ISS-{code}"
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno2, entry_date=date.today() - _td(days=1),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["5500"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock issue {code}", narration="Kano outreach", debit=issue_total, credit=0, created_by=program.id,
+                ))
+                db.add(JournalEntry(
+                    company_id=demo.id, entry_no=eno2, entry_date=date.today() - _td(days=1),
+                    source_type="inventory", source_id=item.id, account_id=coa_map["1000"],
+                    project_code_id=proj_map.get(pcode),
+                    description=f"Stock issue {code}", narration="Kano outreach", debit=0, credit=issue_total, created_by=program.id,
+                ))
+        db.commit()
+
+        # ---- Procurement: committee, services, RFQs at multiple stages ----
+        cm = db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first()
+        if not cm:
+            cm = ProcurementCommittee(company_id=demo.id, name="Evaluation Committee", description="Default procurement evaluation panel")
+            db.add(cm); db.flush()
+            for mn, rt in [("Ada Chair", "Chair"), ("Bello Member", "Member"), ("Chidi Secretary", "Secretary")]:
+                db.add(ProcurementCommitteeMember(committee_id=cm.id, member_name=mn, role_title=rt))
+            db.flush()
+        members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == cm.id).all()
+
+        svc_map = {}
+        for sc, sn in [("PROC-MED", "Medical supplies"), ("PROC-IT", "IT equipment"), ("PROC-TRN", "Training services")]:
+            s = db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first()
+            if not s:
+                s = ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn)
+                db.add(s); db.flush()
+            svc_map[sc] = s.id
+
+        # Vendors map by number
+        vmap = {}
+        for v in db.query(Vendor).filter(Vendor.company_id == demo.id).all():
+            vmap[v.vendor_number] = v
+
+        def ensure_rfq(rfq_no, title, svc, status, pcode, debit, credit):
+            r = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id, ProcurementRFQ.rfq_no == rfq_no).first()
+            if r:
+                return r
+            r = ProcurementRFQ(
+                company_id=demo.id, rfq_no=rfq_no, title=title,
+                service_id=svc_map.get(svc), committee_id=cm.id,
+                description=title, status=status,
+                requesting_officer_id=program.id, created_by=program.id,
+                debit_account_id=coa_map.get(debit), credit_account_id=coa_map.get(credit),
+                project_code_id=proj_map.get(pcode),
+            )
+            db.add(r); db.flush()
+            return r
+
+        # 1) OPEN — still collecting quotes
+        rfq_open = ensure_rfq("RFQ-0001", "ORS and first-aid kits for outreach", "PROC-MED", "open", "PRJ-HLT", "5500", "2000")
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_open.id).first():
+            db.add(ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_open.id,
+                vendor_id=vmap.get("V-001").id if vmap.get("V-001") else None,
+                vendor_name="MedSupply Co", amount=980000, tax_amount=73500, total_amount=1053500,
+                delivery_days=14, notes="Includes delivery to Kano", system_score=40, status="submitted",
+            ))
+
+        # 2) EVALUATION — quotes scored, not yet awarded
+        rfq_eval = ensure_rfq("RFQ-0002", "Teacher training venue and materials", "PROC-TRN", "evaluation", "PRJ-EDU", "5300", "2000")
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_eval.id).first():
+            q1 = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_eval.id,
+                vendor_id=vmap.get("V-003").id if vmap.get("V-003") else None,
+                vendor_name="Training Hub Ltd", amount=750000, tax_amount=56250, total_amount=806250,
+                delivery_days=7, system_score=40, committee_score=48, final_score=88, status="scored",
+            )
+            q2 = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_eval.id,
+                vendor_name="LearnRight Services", amount=820000, tax_amount=61500, total_amount=881500,
+                delivery_days=10, system_score=32, committee_score=42, final_score=74, status="scored",
+            )
+            db.add_all([q1, q2]); db.flush()
+            if members:
+                for m in members:
+                    db.add(QuoteMemberScore(quote_id=q1.id, member_id=m.id, score=48 + (m.id % 3), comment="Good capacity"))
+                    db.add(QuoteMemberScore(quote_id=q2.id, member_id=m.id, score=40 + (m.id % 4), comment="Higher price"))
+
+        # 3) AWARDED + PO pending officer (workflow not completed)
+        rfq_aw = ensure_rfq("RFQ-0003", "Project laptops for field teams", "PROC-IT", "awarded", "PRJ-CAP", "1510", "2000")
+        q_win = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id, ProcurementQuote.status == "winner").first()
+        if not q_win:
+            q_win = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_aw.id,
+                vendor_id=vmap.get("V-002").id if vmap.get("V-002") else None,
+                vendor_name="TechMart Nigeria", amount=2400000, tax_amount=180000, total_amount=2580000,
+                delivery_days=21, system_score=40, committee_score=52, final_score=92, status="winner",
+            )
+            q_lose = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_aw.id,
+                vendor_name="ByteStore Ltd", amount=2650000, tax_amount=198750, total_amount=2848750,
+                delivery_days=28, system_score=28, committee_score=45, final_score=73, status="rejected",
+            )
+            db.add_all([q_win, q_lose]); db.flush()
+            if members:
+                for m in members:
+                    db.add(QuoteMemberScore(quote_id=q_win.id, member_id=m.id, score=50, comment="Best value"))
+        po = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0001").first()
+        if not po and q_win:
+            po = PurchaseOrder(
+                company_id=demo.id, po_no="PO-0001", rfq_id=rfq_aw.id, quote_id=q_win.id,
+                vendor_id=q_win.vendor_id, vendor_name=q_win.vendor_name,
+                amount=q_win.total_amount, description=rfq_aw.title,
+                status="pending_officer", requesting_officer_id=program.id,
+                debit_account_id=coa_map.get("1510"), credit_account_id=coa_map.get("2000"),
+                project_code_id=proj_map.get("PRJ-CAP"),
+                approved_at=datetime.utcnow() - _td(days=1), created_by=finance.id,
+            )
+            db.add(po)
+
+        # 4) AWARDED + PO already submitted into payment workflow (still in payment approval)
+        rfq_pay = ensure_rfq("RFQ-0004", "Office furniture top-up", "PROC-IT", "awarded", "PRJ-OPS", "1500", "2000")
+        qf = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first()
+        if not qf:
+            qf = ProcurementQuote(
+                company_id=demo.id, rfq_id=rfq_pay.id,
+                vendor_name="Property Holdings Ltd", amount=600000, tax_amount=45000, total_amount=645000,
+                delivery_days=14, system_score=40, committee_score=50, final_score=90, status="winner",
+            )
+            db.add(qf); db.flush()
+        po2 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0002").first()
+        if not po2:
+            # payment request in program_approved stage from PO
+            npr = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() + 1
+            exp = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).first()
+            if not exp:
+                exp = ExpenseCode(company_id=demo.id, code="EXP-FURN", description="Furniture", budget_code_id=bud_map["BUD-OPS-2026"],
+                                  default_debit_account_id=coa_map.get("1500"), default_credit_account_id=coa_map.get("2000"))
+                db.add(exp); db.flush()
+            pr = PaymentRequest(
+                company_id=demo.id, request_no=f"PR-PO-{npr:04d}",
+                requester_id=program.id, budget_code_id=bud_map["BUD-OPS-2026"],
+                expense_code_id=exp.id,
+                project_code_id=proj_map.get("PRJ-OPS"),
+                amount=645000, amount_in_words="Six Hundred and Forty Five Thousand Naira Only",
+                narration="Office furniture top-up from PO-0002", payee_name="Property Holdings Ltd",
+                debit_account_id=coa_map.get("1500"), credit_account_id=coa_map.get("2000"),
+                designated_approver_id=program.id, status="program_approved",
+                program_approved_by=program.id, program_approved_at=datetime.utcnow() - _td(hours=6),
+            )
+            db.add(pr); db.flush()
+            po2 = PurchaseOrder(
+                company_id=demo.id, po_no="PO-0002", rfq_id=rfq_pay.id, quote_id=qf.id,
+                vendor_name=qf.vendor_name, amount=qf.total_amount, description=rfq_pay.title,
+                status="submitted_payment", requesting_officer_id=program.id,
+                payment_request_id=pr.id,
+                debit_account_id=coa_map.get("1500"), credit_account_id=coa_map.get("2000"),
+                project_code_id=proj_map.get("PRJ-OPS"),
+                approved_at=datetime.utcnow() - _td(days=2), created_by=finance.id,
+            )
+            db.add(po2)
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="submit_from_po", comment="From PO-0002"))
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="program_approve", comment="Program OK"))
+
+        db.commit()
+        print("✅ Demo seeded: projects, inventory postings, procurement (open / evaluation / PO pending / payment in workflow)")
 
         # Second company still pending approval (for superadmin demo)
         pending = db.query(Company).filter(Company.slug == "sunrise-ngo").first()
@@ -380,18 +702,510 @@ def init_defaults(db: Session):
         print("✅ Demo company approved + licensed | admin / Admin@Knowsoft1!")
 
 
+
+def ensure_demo_core_finance(db: Session):
+    """If demo company exists but has no COA/payments, seed core finance data."""
+    from datetime import timedelta as _td
+    demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        demo = Company(
+            name="Demo Organization", slug="demo", address="Lagos, Nigeria",
+            status="approved", license_key=generate_license_key("demo"),
+            license_expires=date.today() + timedelta(days=365),
+            approved_at=datetime.utcnow(), approved_by="system",
+        )
+        db.add(demo); db.commit(); db.refresh(demo)
+        print("Created missing demo company")
+    else:
+        demo.status = "approved"
+        if not demo.license_expires or demo.license_expires < date.today():
+            demo.license_expires = date.today() + timedelta(days=365)
+        if not demo.license_key:
+            demo.license_key = generate_license_key("demo")
+        db.add(demo); db.commit()
+    # Ensure users
+    users = {}
+    for uname, role, pwd, email, perms in [
+        ("admin", "company_admin", "Admin@Knowsoft1!", "admin@demo.local", True),
+        ("finance", "finance", "Finance@Knowsoft1!", "finance@demo.local", True),
+        ("program", "program", "Program@Knowsoft1!", "program@demo.local", True),
+    ]:
+        u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
+        if not u:
+            u = User(
+                company_id=demo.id, username=uname, email=email, full_name=uname.title(),
+                hashed_password=get_password_hash(pwd), role=role, is_active=True,
+                can_access_finance=True, can_access_inventory=True, can_access_assets=True,
+                can_edit_assets=True, can_access_vendors=True, can_access_reports=True,
+                can_approve_payment=True,
+            )
+            db.add(u); db.flush()
+        else:
+            u.hashed_password = get_password_hash(pwd)
+            u.is_active = True
+            db.add(u)
+        users[uname] = u
+    db.commit()
+    admin, finance, program = users["admin"], users["finance"], users["program"]
+
+    coa_count = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).count()
+    if coa_count == 0:
+        print("Seeding core COA for demo…")
+        coa_rows = [
+            ("1000", "Cash at Bank - Main", "Cash"),
+            ("1100", "Petty Cash", "Cash"),
+            ("1200", "Accounts Receivable", "Asset"),
+            ("1500", "Furniture & Fittings", "Asset"),
+            ("1510", "IT Equipment", "Asset"),
+            ("1520", "Motor Vehicles", "Asset"),
+            ("2000", "Accounts Payable", "Liability"),
+            ("3000", "Retained Earnings", "Equity"),
+            ("4000", "Grant Income", "Income"),
+            ("4100", "Other Income", "Income"),
+            ("5000", "Staff Salaries", "Expense"),
+            ("5100", "Office Rent", "Expense"),
+            ("5200", "Travel & Transport", "Expense"),
+            ("5300", "Training & Workshops", "Expense"),
+            ("5400", "Utilities & Communications", "Expense"),
+            ("5500", "Programme Supplies", "Expense"),
+            ("5600", "Professional Fees", "Expense"),
+            ("5700", "Bank Charges", "Expense"),
+        ]
+        coa_map = {}
+        for code, name, typ in coa_rows:
+            row = ChartOfAccount(company_id=demo.id, code=code, name=name, account_type=typ)
+            db.add(row); db.flush()
+            coa_map[code] = row.id
+        db.commit()
+    else:
+        coa_map = {a.code: a.id for a in db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).all()}
+
+    if db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).count() == 0:
+        budgets = [
+            ("BUD-HEALTH-2026", "Health Programme 2026", 25000000, program.id),
+            ("BUD-EDU-2026", "Education Support 2026", 18000000, program.id),
+            ("BUD-OPS-2026", "Operations & Admin 2026", 8000000, finance.id),
+            ("BUD-CAPEX-2026", "Capital Expenditure 2026", 12000000, admin.id),
+        ]
+        for code, desc, amt, approver in budgets:
+            db.add(BudgetCode(company_id=demo.id, code=code, description=desc, amount=amt, spent=0, default_approver_id=approver))
+        db.commit()
+
+    bud_map = {b.code: b.id for b in db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).all()}
+
+    if db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).count() == 0 and bud_map:
+        expenses = [
+            ("EXP-SAL", "Monthly staff salaries", bud_map.get("BUD-OPS-2026"), coa_map.get("5000"), coa_map.get("1000")),
+            ("EXP-RENT", "Office rent payment", bud_map.get("BUD-OPS-2026"), coa_map.get("5100"), coa_map.get("1000")),
+            ("EXP-TRV", "Field travel allowances", bud_map.get("BUD-HEALTH-2026"), coa_map.get("5200"), coa_map.get("1000")),
+            ("EXP-TRN", "Community training workshop", bud_map.get("BUD-EDU-2026"), coa_map.get("5300"), coa_map.get("1000")),
+            ("EXP-SUP", "Medical supplies for outreach", bud_map.get("BUD-HEALTH-2026"), coa_map.get("5500"), coa_map.get("1000")),
+            ("EXP-IT", "Laptops and peripherals", bud_map.get("BUD-CAPEX-2026"), coa_map.get("1510"), coa_map.get("1000")),
+        ]
+        for code, desc, bid, dr, cr in expenses:
+            if bid:
+                db.add(ExpenseCode(
+                    company_id=demo.id, code=code, description=desc, budget_code_id=bid,
+                    default_debit_account_id=dr, default_credit_account_id=cr,
+                ))
+        db.commit()
+
+    exp_list = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).all()
+    bud_list = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).all()
+
+    if db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() < 3 and exp_list and bud_list:
+        print("Seeding sample payment requests…")
+        samples = [
+            ("PR-0001", 850000, "Office rent Q1", "Property Holdings Ltd", "paid", program.id, finance.id),
+            ("PR-0002", 4200000, "March payroll", "Staff Payroll Account", "paid", program.id, finance.id),
+            ("PR-0003", 1250000, "Project laptops", "TechMart Nigeria", "finance_approved", program.id, finance.id),
+            ("PR-0004", 320000, "Training workshop", "Training Hub Ltd", "program_approved", program.id, None),
+            ("PR-0005", 175000, "Field travel", "Cash advance", "submitted", program.id, None),
+        ]
+        for i, (rno, amt, narr, payee, status, prog, fin) in enumerate(samples):
+            exp = exp_list[i % len(exp_list)]
+            pr = PaymentRequest(
+                company_id=demo.id, request_no=rno, requester_id=program.id,
+                budget_code_id=exp.budget_code_id, expense_code_id=exp.id,
+                amount=amt, amount_in_words=amount_to_words(amt),
+                narration=narr, payee_name=payee,
+                debit_account_id=exp.default_debit_account_id, credit_account_id=exp.default_credit_account_id,
+                designated_approver_id=program.id, status=status,
+                program_approved_by=prog if status != "submitted" else None,
+                program_approved_at=datetime.utcnow() - timedelta(days=2) if status != "submitted" else None,
+                finance_approved_by=fin if status in ("finance_approved", "paid") else None,
+                finance_approved_at=datetime.utcnow() - timedelta(days=1) if status in ("finance_approved", "paid") else None,
+                paid_at=datetime.utcnow() - timedelta(hours=12) if status == "paid" else None,
+            )
+            db.add(pr)
+        db.commit()
+
+    if db.query(Vendor).filter(Vendor.company_id == demo.id).count() == 0:
+        for num, name, bank, amt, desc in [
+            ("V-001", "MedSupply Co", "Zenith Bank", 5000000, "Medical supplies"),
+            ("V-002", "TechMart Nigeria", "GTBank", 2750000, "IT equipment"),
+            ("V-003", "Training Hub Ltd", "Access Bank", 980000, "Training services"),
+            ("V-004", "Property Holdings Ltd", "UBA", 850000, "Office rent"),
+        ]:
+            db.add(Vendor(
+                company_id=demo.id, vendor_number=num, name=name, bank=bank, amount=amt,
+                description=desc, tax_clearance="Yes", reg_with_govt="Yes", audit_3yrs="Yes",
+                score=90, debit_account_id=coa_map.get("5600"), credit_account_id=coa_map.get("2000"),
+            ))
+        db.commit()
+
+    if db.query(Asset).filter(Asset.company_id == demo.id).count() == 0:
+        for num, name, cat, cost in [
+            ("AST-001", "Toyota Hilux", "Vehicle", 18000000),
+            ("AST-002", "Dell Server", "IT", 2500000),
+            ("AST-003", "Office desks set", "Furniture", 900000),
+        ]:
+            db.add(Asset(
+                company_id=demo.id, asset_number=num, asset_name=name, category=cat,
+                cost=cost, nbv=cost * 0.8, condition="Good", status="active",
+                debit_account_id=coa_map.get("1510"), credit_account_id=coa_map.get("1000"),
+                created_by=admin.id,
+            ))
+        db.commit()
+
+    print("✅ ensure_demo_core_finance done (COA/budgets/expenses/payments/vendors/assets)")
+
+
+
+def ensure_demo_extended_samples(db: Session):
+    """Idempotent: fill projects, inventory JE, procurement stages for demo company."""
+    demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        return
+    finance = db.query(User).filter(User.company_id == demo.id, User.username == "finance").first()
+    program = db.query(User).filter(User.company_id == demo.id, User.username == "program").first()
+    admin = db.query(User).filter(User.company_id == demo.id, User.username == "admin").first()
+    if not finance or not program:
+        return
+    coa = {a.code: a.id for a in db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).all()}
+    if not coa.get("1000"):
+        return
+
+    # Projects
+    proj_defs = [
+        ("PRJ-HLT", "Health Outreach 2026", 5000000),
+        ("PRJ-EDU", "Education Support 2026", 3500000),
+        ("PRJ-OPS", "Operations & Admin", 1500000),
+        ("PRJ-WASH", "Water & Sanitation", 2800000),
+        ("PRJ-CAP", "Capital / Equipment", 4200000),
+    ]
+    proj_map = {}
+    for code, name, bud in proj_defs:
+        pc = db.query(ProjectCode).filter(ProjectCode.company_id == demo.id, ProjectCode.code == code).first()
+        if not pc:
+            kwargs = dict(company_id=demo.id, code=code, name=name, description=name)
+            if hasattr(ProjectCode, "budget_amount"):
+                kwargs["budget_amount"] = bud
+            pc = ProjectCode(**kwargs)
+            db.add(pc); db.flush()
+        proj_map[code] = pc.id
+
+    # Tag untagged journal lines
+    jes = db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.project_code_id.is_(None)).limit(200).all()
+    codes = list(proj_map.values())
+    for i, j in enumerate(jes):
+        j.project_code_id = codes[i % len(codes)]
+        db.add(j)
+
+    # Project-coded sample journals
+    extra_jes = [
+        ("JE-PRJ-HLT-01", "1000", "4000", 2000000, "Grant received — Health", "PRJ-HLT"),
+        ("JE-PRJ-HLT-02", "5500", "1000", 450000, "Medical kits — field", "PRJ-HLT"),
+        ("JE-PRJ-EDU-01", "1000", "4000", 1500000, "Grant received — Education", "PRJ-EDU"),
+        ("JE-PRJ-EDU-02", "5300", "1000", 320000, "Teacher training workshop", "PRJ-EDU"),
+        ("JE-PRJ-WASH-01", "5500", "1000", 280000, "Water treatment supplies", "PRJ-WASH"),
+        ("JE-PRJ-OPS-01", "5100", "1000", 850000, "HQ rent allocation", "PRJ-OPS"),
+        ("JE-PRJ-CAP-01", "1510", "1000", 1250000, "Project laptops", "PRJ-CAP"),
+        ("JE-PRJ-HLT-03", "5200", "1000", 175000, "Field travel — outreach", "PRJ-HLT"),
+        ("JE-PRJ-EDU-03", "5300", "1000", 210000, "School materials distribution", "PRJ-EDU"),
+    ]
+    for eno, dr, cr, amt, desc, pcode in extra_jes:
+        if eno in [x.entry_no for x in db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).limit(1).all()]:
+            continue
+        if dr not in coa or cr not in coa:
+            continue
+        pid = proj_map.get(pcode)
+        db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=5),
+            source_type="manual", account_id=coa[dr], project_code_id=pid,
+            description=desc, narration=f"Project {pcode}", debit=amt, credit=0, created_by=finance.id))
+        db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=5),
+            source_type="manual", account_id=coa[cr], project_code_id=pid,
+            description=desc, narration=f"Project {pcode}", debit=0, credit=amt, created_by=finance.id))
+
+    # Inventory items + movements + postings
+    inv_samples = [
+        ("INV-MED-001", "ORS Sachets (box)", "Medical", 2500, 40, 10, "PRJ-HLT"),
+        ("INV-MED-002", "First aid kits", "Medical", 15000, 25, 5, "PRJ-HLT"),
+        ("INV-EDU-001", "Exercise books (carton)", "Education", 8000, 30, 8, "PRJ-EDU"),
+        ("INV-EDU-002", "Chalk & markers pack", "Education", 3500, 50, 12, "PRJ-EDU"),
+        ("INV-WASH-001", "Water purification tabs", "WASH", 1200, 100, 20, "PRJ-WASH"),
+        ("INV-OPS-001", "Office stationery kit", "Admin", 4500, 15, 3, "PRJ-OPS"),
+    ]
+    for code, name, cat, cost, recv, issued, pcode in inv_samples:
+        item = db.query(InventoryItem).filter(InventoryItem.company_id == demo.id, InventoryItem.item_code == code).first()
+        if not item:
+            bal = recv - issued
+            item = InventoryItem(
+                company_id=demo.id, item_code=code, item_name=name, category=cat,
+                cost_price=cost, qty_received=recv, qty_issued=issued, balance_qty=bal,
+                total_value=bal * cost, department="Programme",
+                debit_account_id=coa.get("5500"), credit_account_id=coa.get("1000"),
+                project_code_id=proj_map.get(pcode), funding_source="Grant",
+            )
+            db.add(item); db.flush()
+            # receive movement + JE
+            eno = f"JE-INV-RCV-{code}"
+            if not db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno).first():
+                total = recv * cost
+                db.add(InventoryMovement(
+                    company_id=demo.id, item_id=item.id, movement_type="receive",
+                    quantity=recv, unit_cost=cost, total=total, narration=f"Opening stock {code}",
+                    debit_account_id=coa.get("5500"), credit_account_id=coa.get("1000"),
+                    project_code_id=proj_map.get(pcode), created_by=finance.id,
+                ))
+                db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=10),
+                    source_type="inventory", source_id=item.id, account_id=coa["5500"], project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=total, credit=0, created_by=finance.id))
+                db.add(JournalEntry(company_id=demo.id, entry_no=eno, entry_date=date.today() - timedelta(days=10),
+                    source_type="inventory", source_id=item.id, account_id=coa["1000"], project_code_id=proj_map.get(pcode),
+                    description=f"Stock receive {code}", narration=name, debit=0, credit=total, created_by=finance.id))
+            if issued > 0:
+                eno2 = f"JE-INV-ISS-{code}"
+                if not db.query(JournalEntry).filter(JournalEntry.company_id == demo.id, JournalEntry.entry_no == eno2).first():
+                    itotal = issued * cost
+                    db.add(InventoryMovement(
+                        company_id=demo.id, item_id=item.id, movement_type="issue",
+                        quantity=issued, unit_cost=cost, total=itotal, narration="Field distribution",
+                        debit_account_id=coa.get("5500"), credit_account_id=coa.get("1000"),
+                        project_code_id=proj_map.get(pcode), created_by=program.id,
+                    ))
+                    db.add(JournalEntry(company_id=demo.id, entry_no=eno2, entry_date=date.today() - timedelta(days=2),
+                        source_type="inventory", source_id=item.id, account_id=coa["5500"], project_code_id=proj_map.get(pcode),
+                        description=f"Stock issue {code}", narration="Field distribution", debit=itotal, credit=0, created_by=program.id))
+                    db.add(JournalEntry(company_id=demo.id, entry_no=eno2, entry_date=date.today() - timedelta(days=2),
+                        source_type="inventory", source_id=item.id, account_id=coa["1000"], project_code_id=proj_map.get(pcode),
+                        description=f"Stock issue {code}", narration="Field distribution", debit=0, credit=itotal, created_by=program.id))
+
+    # Committee
+    cm = db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first()
+    if not cm:
+        cm = ProcurementCommittee(company_id=demo.id, name="Evaluation Committee", description="Default procurement evaluation panel")
+        db.add(cm); db.flush()
+        for mn, rt in [("Ada Chair", "Chair"), ("Bello Member", "Member"), ("Chidi Secretary", "Secretary")]:
+            db.add(ProcurementCommitteeMember(committee_id=cm.id, member_name=mn, role_title=rt))
+        db.flush()
+    members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == cm.id).all()
+
+    svc_map = {}
+    for sc, sn in [("PROC-MED", "Medical supplies"), ("PROC-IT", "IT equipment"), ("PROC-TRN", "Training services")]:
+        s = db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first()
+        if not s:
+            s = ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn)
+            db.add(s); db.flush()
+        svc_map[sc] = s.id
+
+    vmap = {v.vendor_number: v for v in db.query(Vendor).filter(Vendor.company_id == demo.id).all()}
+
+    def ensure_rfq(rfq_no, title, svc, status, pcode, debit, credit):
+        r = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id, ProcurementRFQ.rfq_no == rfq_no).first()
+        if r:
+            return r
+        r = ProcurementRFQ(
+            company_id=demo.id, rfq_no=rfq_no, title=title,
+            service_id=svc_map.get(svc), committee_id=cm.id,
+            description=title, status=status,
+            requesting_officer_id=program.id, created_by=program.id,
+            debit_account_id=coa.get(debit), credit_account_id=coa.get(credit),
+            project_code_id=proj_map.get(pcode),
+        )
+        db.add(r); db.flush()
+        return r
+
+    # OPEN — incomplete
+    rfq_open = ensure_rfq("RFQ-0001", "ORS and first-aid kits for outreach", "PROC-MED", "open", "PRJ-HLT", "5500", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_open.id).first():
+        db.add(ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_open.id,
+            vendor_id=vmap["V-001"].id if vmap.get("V-001") else None,
+            vendor_name="MedSupply Co", amount=980000, tax_amount=73500, total_amount=1053500,
+            delivery_days=14, notes="Includes delivery to Kano", system_score=40, status="submitted",
+        ))
+
+    # EVALUATION — in committee scoring, not awarded
+    rfq_eval = ensure_rfq("RFQ-0002", "Teacher training venue and materials", "PROC-TRN", "evaluation", "PRJ-EDU", "5300", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_eval.id).first():
+        q1 = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_eval.id,
+            vendor_id=vmap["V-003"].id if vmap.get("V-003") else None,
+            vendor_name="Training Hub Ltd", amount=750000, tax_amount=56250, total_amount=806250,
+            delivery_days=7, system_score=40, committee_score=48, final_score=88, status="scored",
+        )
+        q2 = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_eval.id,
+            vendor_name="LearnRight Services", amount=820000, tax_amount=61500, total_amount=881500,
+            delivery_days=10, system_score=32, committee_score=42, final_score=74, status="scored",
+        )
+        db.add_all([q1, q2]); db.flush()
+        for m in members:
+            db.add(QuoteMemberScore(quote_id=q1.id, member_id=m.id, score=46 + (m.id % 5), comment="Adequate"))
+            db.add(QuoteMemberScore(quote_id=q2.id, member_id=m.id, score=40 + (m.id % 4), comment="Higher price"))
+
+    # AWARDED + PO pending officer (not submitted to payment)
+    rfq_aw = ensure_rfq("RFQ-0003", "Project laptops for field teams", "PROC-IT", "awarded", "PRJ-CAP", "1510", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id).first():
+        qw = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_aw.id,
+            vendor_id=vmap["V-002"].id if vmap.get("V-002") else None,
+            vendor_name="TechMart Nigeria", amount=2500000, tax_amount=187500, total_amount=2687500,
+            delivery_days=21, system_score=40, committee_score=52, final_score=92, status="winner",
+        )
+        ql = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_aw.id,
+            vendor_name="ByteSoft Ltd", amount=2750000, tax_amount=206250, total_amount=2956250,
+            delivery_days=30, system_score=28, committee_score=40, final_score=68, status="rejected",
+        )
+        db.add_all([qw, ql]); db.flush()
+        for m in members:
+            db.add(QuoteMemberScore(quote_id=qw.id, member_id=m.id, score=50 + (m.id % 3), comment="Preferred"))
+    else:
+        qw = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id, ProcurementQuote.status == "winner").first()
+        if not qw:
+            qw = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id).first()
+
+    po1 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0001").first()
+    if not po1 and qw:
+        db.add(PurchaseOrder(
+            company_id=demo.id, po_no="PO-0001", rfq_id=rfq_aw.id, quote_id=qw.id,
+            vendor_id=qw.vendor_id, vendor_name=qw.vendor_name or "TechMart Nigeria",
+            amount=qw.total_amount or 2687500, description=rfq_aw.title,
+            status="pending_officer", requesting_officer_id=program.id,
+            debit_account_id=coa.get("1510"), credit_account_id=coa.get("2000"),
+            project_code_id=proj_map.get("PRJ-CAP"),
+            approved_at=datetime.utcnow() - timedelta(days=1), created_by=finance.id,
+        ))
+
+    # AWARDED + PO submitted → payment still in workflow (program_approved, awaiting finance)
+    rfq_pay = ensure_rfq("RFQ-0004", "Office furniture top-up", "PROC-IT", "awarded", "PRJ-OPS", "1500", "2000")
+    if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first():
+        qf = ProcurementQuote(
+            company_id=demo.id, rfq_id=rfq_pay.id,
+            vendor_id=vmap["V-004"].id if vmap.get("V-004") else None,
+            vendor_name="Property Holdings Ltd", amount=850000, tax_amount=63750, total_amount=913750,
+            delivery_days=14, system_score=40, committee_score=50, final_score=90, status="winner",
+        )
+        db.add(qf); db.flush()
+    else:
+        qf = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first()
+
+    po2 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0002").first()
+    if not po2 and qf:
+        # budget / expense maps
+        bud = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).first()
+        exp = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).first()
+        if bud and exp:
+            pr = PaymentRequest(
+                company_id=demo.id, request_no="PR-PO-0002",
+                requester_id=program.id, budget_code_id=bud.id, expense_code_id=exp.id,
+                project_code_id=proj_map.get("PRJ-OPS"),
+                amount=qf.total_amount or 913750,
+                amount_in_words=amount_to_words(qf.total_amount or 913750),
+                narration="Office furniture top-up from PO-0002", payee_name=qf.vendor_name or "Property Holdings Ltd",
+                debit_account_id=coa.get("1500"), credit_account_id=coa.get("2000"),
+                designated_approver_id=program.id, status="program_approved",
+                program_approved_by=program.id, program_approved_at=datetime.utcnow() - timedelta(hours=6),
+            )
+            db.add(pr); db.flush()
+            db.add(PurchaseOrder(
+                company_id=demo.id, po_no="PO-0002", rfq_id=rfq_pay.id, quote_id=qf.id,
+                vendor_name=qf.vendor_name, amount=qf.total_amount, description=rfq_pay.title,
+                status="submitted_payment", requesting_officer_id=program.id,
+                payment_request_id=pr.id,
+                debit_account_id=coa.get("1500"), credit_account_id=coa.get("2000"),
+                project_code_id=proj_map.get("PRJ-OPS"),
+                approved_at=datetime.utcnow() - timedelta(days=2), created_by=finance.id,
+            ))
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="submit_from_po", comment="From PO-0002"))
+            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="program_approve", comment="Program OK"))
+
+    # Tag sample payments with projects where missing
+    pays = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id, PaymentRequest.project_code_id.is_(None)).all()
+    for i, p in enumerate(pays):
+        p.project_code_id = codes[i % len(codes)]
+        db.add(p)
+
+    db.commit()
+    print("✅ Extended demo samples: projects, inventory JE, procurement open/evaluation/PO pending/payment in workflow")
+
+
+
 @app.on_event("startup")
-def on_startup():
+def _app_startup_entry():
+    """Single startup entry — always opens its own DB session."""
     db = next(get_db())
     try:
-        init_defaults(db)
+        Base.metadata.create_all(bind=engine)
+        try:
+            _migrate_schema(engine)
+        except Exception as e:
+            print("migrate:", e)
+        try:
+            init_defaults(db)
+        except Exception as e:
+            import traceback; print("init_defaults:", e); traceback.print_exc()
+        try:
+            ensure_demo_core_finance(db)
+        except Exception as e:
+            import traceback; print("core finance seed error:", e); traceback.print_exc()
+        try:
+            ensure_demo_extended_samples(db)
+        except Exception as e:
+            import traceback; print("extended seed error:", e); traceback.print_exc()
+        try:
+            demo = db.query(Company).filter(Company.slug == "demo").first()
+            if demo:
+                for uname, pwd in [
+                    ("admin", "Admin@Knowsoft1!"),
+                    ("finance", "Finance@Knowsoft1!"),
+                    ("program", "Program@Knowsoft1!"),
+                ]:
+                    u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
+                    if u:
+                        u.hashed_password = get_password_hash(pwd)
+                        u.is_active = True
+                        db.add(u)
+                db.commit()
+                print("✅ Demo passwords refreshed")
+                n_coa = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).count()
+                n_pay = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count()
+                n_bud = db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).count()
+                print(f"📊 Demo data: COA={n_coa} budgets={n_bud} payments={n_pay}")
+                if n_coa < 5 or n_pay < 3 or n_bud < 1:
+                    ensure_demo_core_finance(db)
+                    ensure_demo_extended_samples(db)
+            sa = db.query(User).filter(User.username == "superadmin", User.company_id.is_(None)).first()
+            if sa:
+                sa.hashed_password = get_password_hash("Knowsoft@Super0160!")
+                db.add(sa); db.commit()
+        except Exception as e:
+            import traceback; print("demo refresh:", e); traceback.print_exc()
         try:
             cleanup_disposed_assets(db)
         except Exception as e:
-            print("cleanup_disposed_assets:", e)
+            print("cleanup:", e)
+    except Exception as e:
+        import traceback
+        print("startup error (app continues):", e)
+        traceback.print_exc()
     finally:
-        db.close()
-
+        try:
+            db.close()
+        except Exception:
+            pass
 
 # ===================== AUTH =====================
 @app.post("/api/auth/register-company")
@@ -399,14 +1213,11 @@ def register_company(data: CompanyRegister, db: Session = Depends(get_db)):
     slug = data.company_slug.lower().strip()
     if db.query(Company).filter(Company.slug == slug).first():
         raise HTTPException(400, "Company slug already taken")
-    # Auto-approve with 15-day free trial (user requirement)
-    trial_days = 15
     company = Company(
         name=data.company_name.strip(),
         slug=slug,
         address=data.address or "",
-        status="active",
-        license_expires=date.today() + timedelta(days=trial_days),
+        status="pending",  # awaits superadmin approval
     )
     db.add(company)
     db.commit()
@@ -429,11 +1240,10 @@ def register_company(data: CompanyRegister, db: Session = Depends(get_db)):
     )
     db.add(admin)
     db.commit()
-    audit(db, company.id, admin, "REGISTER_COMPANY", f"15-day trial activated: {company.name}")
+    audit(db, company.id, admin, "REGISTER_COMPANY", f"Pending approval: {company.name}")
     return {
-        "message": f"Registration successful. Your 15-day free trial is active until {company.license_expires.isoformat()}.",
-        "company": {"name": company.name, "slug": company.slug, "status": "active", "license_expires": company.license_expires.isoformat()},
-        "trial_days": trial_days,
+        "message": "Registration submitted. Awaiting Knowsoft superadmin approval and annual license.",
+        "company": {"name": company.name, "slug": company.slug, "status": "pending"},
     }
 
 
@@ -810,7 +1620,72 @@ async def restore_company_backup(
 # ===================== USERS (company scoped) =====================
 @app.get("/api/admin/users", response_model=list[UserOut])
 def list_users(current_user: User = Depends(get_company_admin), db: Session = Depends(get_db)):
+    """Company admin: users in their firm. Superadmin: all users (or filter company_id)."""
+    if current_user.role == "superadmin":
+        return db.query(User).order_by(User.company_id, User.id).all()
+    if not current_user.company_id:
+        raise HTTPException(400, "No company context")
     return db.query(User).filter(User.company_id == current_user.company_id).order_by(User.id).all()
+
+
+@app.get("/api/superadmin/users", response_model=list[UserOut])
+def superadmin_list_users(current_user: User = Depends(get_superadmin), db: Session = Depends(get_db)):
+    return db.query(User).order_by(User.company_id, User.id).all()
+
+
+@app.post("/api/superadmin/reseed-demo")
+def reseed_demo(current_user: User = Depends(get_superadmin), db: Session = Depends(get_db)):
+    """Wipe demo transactional samples and reload finance masters + sample data."""
+    demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        init_defaults(db)
+        demo = db.query(Company).filter(Company.slug == "demo").first()
+    if not demo:
+        raise HTTPException(500, "Could not create demo company")
+    # delete child data for clean seed
+    try:
+        pay_ids = [p.id for p in db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).all()]
+        if pay_ids:
+            db.query(PaymentApprovalLog).filter(PaymentApprovalLog.payment_request_id.in_(pay_ids)).delete(synchronize_session=False)
+            db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id.in_(pay_ids)).delete(synchronize_session=False)
+        db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).delete(synchronize_session=False)
+        db.query(JournalEntry).filter(JournalEntry.company_id == demo.id).delete(synchronize_session=False)
+        inv_ids = [i.id for i in db.query(InventoryItem).filter(InventoryItem.company_id == demo.id).all()]
+        if inv_ids:
+            db.query(InventoryMovement).filter(InventoryMovement.item_id.in_(inv_ids)).delete(synchronize_session=False)
+        db.query(InventoryItem).filter(InventoryItem.company_id == demo.id).delete(synchronize_session=False)
+        rfq_ids = [r.id for r in db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id).all()]
+        if rfq_ids:
+            qids = [q.id for q in db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id.in_(rfq_ids)).all()]
+            if qids:
+                db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id.in_(qids)).delete(synchronize_session=False)
+            db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id.in_(rfq_ids)).delete(synchronize_session=False)
+            db.query(ProcurementDocument).filter(ProcurementDocument.rfq_id.in_(rfq_ids)).delete(synchronize_session=False)
+        db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id).delete(synchronize_session=False)
+        db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id).delete(synchronize_session=False)
+        db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).delete(synchronize_session=False)
+        db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).delete(synchronize_session=False)
+        db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).delete(synchronize_session=False)
+        db.query(Vendor).filter(Vendor.company_id == demo.id).delete(synchronize_session=False)
+        db.query(Asset).filter(Asset.company_id == demo.id).delete(synchronize_session=False)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print("wipe demo data:", e)
+        import traceback; traceback.print_exc()
+    ensure_demo_core_finance(db)
+    ensure_demo_extended_samples(db)
+    n = {
+        "coa": db.query(ChartOfAccount).filter(ChartOfAccount.company_id == demo.id).count(),
+        "budgets": db.query(BudgetCode).filter(BudgetCode.company_id == demo.id).count(),
+        "expenses": db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).count(),
+        "payments": db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count(),
+        "projects": db.query(ProjectCode).filter(ProjectCode.company_id == demo.id).count(),
+        "inventory": db.query(InventoryItem).filter(InventoryItem.company_id == demo.id).count(),
+    }
+    return {"ok": True, "message": "Demo company reseeded", "counts": n}
+
+
 
 
 @app.get("/api/admin/approvers")
@@ -825,6 +1700,8 @@ def list_approvers(current_user: User = Depends(get_current_active_user), db: Se
 
 @app.post("/api/admin/users", response_model=UserOut)
 def create_user(user_in: UserCreate, current_user: User = Depends(get_company_admin), db: Session = Depends(get_db)):
+    if current_user.role == "superadmin" and not current_user.company_id:
+        raise HTTPException(400, "Superadmin: manage users from a company context, or use company admin login")
     if db.query(User).filter(User.company_id == current_user.company_id, User.username == user_in.username).first():
         raise HTTPException(400, "Username already exists in your company")
     role = user_in.role if user_in.role in (
@@ -934,9 +1811,20 @@ def public_settings(db: Session = Depends(get_db)):
 
 
 # ===================== FINANCE MASTERS =====================
+@app.get("/api/coa")
 @app.get("/api/finance/coa")
 def list_coa(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(ChartOfAccount).filter(ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True).all()
+    if not current_user.company_id:
+        return []
+    rows = db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True
+    ).order_by(ChartOfAccount.code).all()
+    return [{
+        "id": a.id, "code": a.code, "name": a.name, "account_type": a.account_type,
+        "project_code": getattr(a, "project_code", "") or "",
+        "label": f"{a.code} — {a.name}",
+        "is_active": a.is_active,
+    } for a in rows]
 
 
 @app.post("/api/finance/coa")
@@ -1028,21 +1916,12 @@ def submit_payment_request(
         User.company_id == current_user.company_id,
         User.can_approve_payment == True,
     ).first()
+    # Project strongly recommended; allow submit without for backward compatibility
     if not approver:
         raise HTTPException(400, "Select a valid approver for this budget line")
 
-    # Accounts optional at submission — finance sets before payment
-    debit_id = data.debit_account_id or (exp.default_debit_account_id if exp else None)
-    credit_id = data.credit_account_id or (exp.default_credit_account_id if exp else None)
-
-    lines_in = getattr(data, "lines", None) or []
-    total_from_lines = 0.0
-    for ln in lines_in:
-        amt = ln.amount if ln.amount is not None else (float(ln.quantity or 0) * float(ln.unit_cost or 0))
-        total_from_lines += amt
-    final_amount = total_from_lines if lines_in else float(data.amount)
-    if final_amount <= 0:
-        raise HTTPException(400, "Amount must be greater than zero (add line items or amount)")
+    debit_id = data.debit_account_id or exp.default_debit_account_id
+    credit_id = data.credit_account_id or exp.default_credit_account_id
 
     pr = PaymentRequest(
         company_id=current_user.company_id,
@@ -1050,79 +1929,45 @@ def submit_payment_request(
         requester_id=current_user.id,
         budget_code_id=data.budget_code_id,
         expense_code_id=data.expense_code_id,
-        amount=final_amount,
+        amount=data.amount,
         narration=data.narration,
         payee_name=data.payee_name,
-        project_code_id=getattr(data, "project_code_id", None),
         debit_account_id=debit_id,
         credit_account_id=credit_id,
         designated_approver_id=data.designated_approver_id,
+        project_code_id=getattr(data, "project_code_id", None),
+        amount_in_words=amount_to_words(getattr(data, "amount", 0)),
+        line_items_json=__import__("json").dumps([li.dict() if hasattr(li, "dict") else (li.model_dump() if hasattr(li, "model_dump") else li) for li in (getattr(data, "line_items", None) or [])]),
         status="submitted",
     )
     db.add(pr)
     db.commit()
     db.refresh(pr)
-    for i, ln in enumerate(lines_in):
-        amt = ln.amount if ln.amount is not None else (float(ln.quantity or 0) * float(ln.unit_cost or 0))
-        db.add(PaymentLine(
-            payment_request_id=pr.id, description=ln.description,
-            quantity=float(ln.quantity or 0), unit_cost=float(ln.unit_cost or 0),
-            amount=amt, sort_order=i,
-        ))
-    import json as _json
-    db.add(PaymentApprovalLog(
-        payment_request_id=pr.id, actor_id=current_user.id, action="submit",
-        comment="Submitted", amount_snapshot=pr.amount,
-        debit_account_id=debit_id, credit_account_id=credit_id,
-        details_json=_json.dumps({
-            "request_no": pr.request_no, "payee": pr.payee_name, "amount": pr.amount,
-            "budget_code_id": pr.budget_code_id, "expense_code_id": pr.expense_code_id,
-            "project_code_id": pr.project_code_id, "by": current_user.username,
-        }),
-    ))
-    audit(db, current_user.company_id, current_user, "PAYMENT_SUBMIT", f"{pr.request_no} amount={pr.amount}")
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="submit", comment="Submitted"))
     db.commit()
     return pr
 
 
 @app.get("/api/payments")
 def list_payments(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    """Return payment requests filtered so approved/rejected items leave the approver's active queue.
-    - program role: only status=submitted (pending their action)
-    - finance role: only status=program_approved (pending their action)
-    - originator: sees own requests including rejected (for resubmit)
-    - company_admin / superadmin: sees all
-    """
     q = db.query(PaymentRequest).filter(PaymentRequest.company_id == current_user.company_id)
-    role = current_user.role
-    if role == "program" or role == "project_manager":
-        # Approving officers only see items awaiting their decision
-        q = q.filter(PaymentRequest.status == "submitted")
+    # non-finance/program see own or designated
+    if current_user.role not in ("finance", "program", "project_manager", "company_admin", "superadmin"):
         q = q.filter(
-            (PaymentRequest.designated_approver_id == current_user.id) |
-            (PaymentRequest.designated_approver_id == None)
+            (PaymentRequest.requester_id == current_user.id) |
+            (PaymentRequest.designated_approver_id == current_user.id)
         )
-    elif role == "finance":
-        q = q.filter(PaymentRequest.status == "program_approved")
-    elif role in ("company_admin", "superadmin"):
-        pass  # full list
-    else:
-        # originator / other staff: own requests (including rejected for correction)
-        q = q.filter(PaymentRequest.requester_id == current_user.id)
     rows = q.order_by(PaymentRequest.created_at.desc()).all()
     out = []
     for p in rows:
         exp = db.query(ExpenseCode).filter(ExpenseCode.id == p.expense_code_id).first()
         bud = db.query(BudgetCode).filter(BudgetCode.id == p.budget_code_id).first()
-        proj = db.query(ProjectCode).filter(ProjectCode.id == p.project_code_id).first() if p.project_code_id else None
         out.append({
             "id": p.id, "request_no": p.request_no, "amount": p.amount, "status": p.status,
-            "payee_name": p.payee_name, "narration": p.narration,
+            "payee_name": p.payee_name, "project_code_id": getattr(p, "project_code_id", None), "amount_in_words": getattr(p, "amount_in_words", "") or "", "line_items_json": getattr(p, "line_items_json", "[]") or "[]", "narration": p.narration,
             "expense_code": exp.code if exp else None,
             "expense_description": exp.description if exp else None,
             "budget_code": bud.code if bud else None,
-            "project_code": proj.code if proj else None,
-            "project_code_id": p.project_code_id,
             "debit_account_id": p.debit_account_id,
             "credit_account_id": p.credit_account_id,
             "designated_approver_id": p.designated_approver_id,
@@ -1148,36 +1993,20 @@ def program_approve(pid: int, data: PaymentAction, current_user: User = Depends(
 
 @app.post("/api/payments/{pid}/finance-approve")
 def finance_approve(pid: int, data: PaymentAction, current_user: User = Depends(require_roles("finance", "company_admin")), db: Session = Depends(get_db)):
-    import json as _json
     pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
     if not pr or pr.status != "program_approved":
         raise HTTPException(400, "Request not awaiting finance approval")
+    # Finance must ensure accounts
     if data.debit_account_id:
         pr.debit_account_id = data.debit_account_id
     if data.credit_account_id:
         pr.credit_account_id = data.credit_account_id
-    # Debit/credit optional at approval — finance sets them before Mark Paid
-    if not pr.payee_name:
-        raise HTTPException(400, "Payee name is required before final finance approval")
-    if not pr.budget_code_id or not pr.expense_code_id:
-        raise HTTPException(400, "Budget code and expense code are required")
+    if not pr.debit_account_id or not pr.credit_account_id:
+        raise HTTPException(400, "Finance must set debit and credit accounts before approval")
     pr.status = "finance_approved"
     pr.finance_approved_by = current_user.id
     pr.finance_approved_at = datetime.utcnow()
-    db.add(PaymentApprovalLog(
-        payment_request_id=pr.id, actor_id=current_user.id, action="finance_approve",
-        comment=data.comment or "Finance approved with accounts confirmed",
-        debit_account_id=pr.debit_account_id, credit_account_id=pr.credit_account_id,
-        amount_snapshot=pr.amount,
-        details_json=_json.dumps({
-            "request_no": pr.request_no, "payee": pr.payee_name, "amount": pr.amount,
-            "amount_words": amount_to_words(pr.amount),
-            "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id,
-            "budget_code_id": pr.budget_code_id, "expense_code_id": pr.expense_code_id,
-            "project_code_id": pr.project_code_id, "approver": current_user.username,
-        }),
-    ))
-    audit(db, current_user.company_id, current_user, "PAYMENT_FINANCE_APPROVE", f"{pr.request_no} Dr={pr.debit_account_id} Cr={pr.credit_account_id}")
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="finance_approve", comment=data.comment))
     db.commit()
     return {"message": "Finance approved", "status": pr.status}
 
@@ -1202,49 +2031,6 @@ def mark_paid(pid: int, data: PaymentAction, current_user: User = Depends(requir
     )
     db.commit()
     return {"message": "Marked as paid and posted to ledger", "status": pr.status}
-
-
-
-@app.post("/api/payments/{pid}/update-accounts")
-def update_payment_accounts(
-    pid: int,
-    debit_account_id: Optional[int] = Form(None),
-    credit_account_id: Optional[int] = Form(None),
-    budget_code_id: Optional[int] = Form(None),
-    expense_code_id: Optional[int] = Form(None),
-    project_code_id: Optional[int] = Form(None),
-    comment: str = Form(""),
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    """Any reviewing/approving staff (finance, program, admin) can adjust codes before final pay."""
-    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
-    if not pr:
-        raise HTTPException(404, "Not found")
-    if pr.status == "paid":
-        raise HTTPException(400, "Cannot change accounts on a paid request")
-    if debit_account_id is not None:
-        pr.debit_account_id = debit_account_id
-    if credit_account_id is not None:
-        pr.credit_account_id = credit_account_id
-    if budget_code_id is not None:
-        pr.budget_code_id = budget_code_id
-    if expense_code_id is not None:
-        pr.expense_code_id = expense_code_id
-    if project_code_id is not None:
-        pr.project_code_id = project_code_id
-    import json as _json
-    db.add(PaymentApprovalLog(
-        payment_request_id=pr.id, actor_id=current_user.id, action="update_accounts",
-        comment=comment or "Accounts/codes adjusted",
-        debit_account_id=pr.debit_account_id, credit_account_id=pr.credit_account_id,
-        amount_snapshot=pr.amount,
-        details_json=_json.dumps({"debit": pr.debit_account_id, "credit": pr.credit_account_id,
-                                  "budget": pr.budget_code_id, "expense": pr.expense_code_id}),
-    ))
-    audit(db, current_user.company_id, current_user, "PAYMENT_CODES_UPDATE", f"{pr.request_no}")
-    db.commit()
-    return {"message": "Codes updated", "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id}
 
 
 @app.post("/api/payments/{pid}/reject")
@@ -1457,32 +2243,13 @@ def get_payment_detail(pid: int, current_user: User = Depends(get_current_active
     credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
     requester = db.query(User).filter(User.id == pr.requester_id).first()
     approver = db.query(User).filter(User.id == pr.designated_approver_id).first()
-    proj = db.query(ProjectCode).filter(ProjectCode.id == pr.project_code_id).first() if pr.project_code_id else None
     atts = db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id == pr.id).all()
     logs = db.query(PaymentApprovalLog).filter(PaymentApprovalLog.payment_request_id == pr.id).order_by(PaymentApprovalLog.created_at).all()
-    pay_lines = db.query(PaymentLine).filter(PaymentLine.payment_request_id == pr.id).order_by(PaymentLine.sort_order).all()
-    coa = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == current_user.company_id, ChartOfAccount.is_active == True).all()
-    hist = []
-    for l in logs:
-        actor = db.query(User).filter(User.id == l.actor_id).first()
-        hist.append({
-            "action": l.action, "comment": l.comment,
-            "actor": (actor.full_name or actor.username) if actor else str(l.actor_id),
-            "actor_id": l.actor_id,
-            "debit_account_id": l.debit_account_id, "credit_account_id": l.credit_account_id,
-            "amount_snapshot": l.amount_snapshot, "details_json": l.details_json,
-            "at": l.created_at.isoformat() if l.created_at else None,
-        })
     return {
         "id": pr.id, "request_no": pr.request_no, "amount": pr.amount, "status": pr.status,
         "payee_name": pr.payee_name, "narration": pr.narration, "currency": pr.currency,
-        "amount_in_words": amount_to_words(pr.amount),
-        "budget_code_id": pr.budget_code_id,
         "budget_code": bud.code if bud else None, "budget_description": bud.description if bud else None,
-        "expense_code_id": pr.expense_code_id,
         "expense_code": exp.code if exp else None, "expense_description": exp.description if exp else None,
-        "project_code_id": pr.project_code_id,
-        "project_code": proj.code if proj else None, "project_name": proj.name if proj else None,
         "debit_account": f"{debit.code} - {debit.name}" if debit else None,
         "credit_account": f"{credit.code} - {credit.name}" if credit else None,
         "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id,
@@ -1493,15 +2260,8 @@ def get_payment_detail(pid: int, current_user: User = Depends(get_current_active
         "program_approved_at": pr.program_approved_at.isoformat() if pr.program_approved_at else None,
         "finance_approved_at": pr.finance_approved_at.isoformat() if pr.finance_approved_at else None,
         "paid_at": pr.paid_at.isoformat() if pr.paid_at else None,
-        "lines": [{"id": L.id, "description": L.description, "quantity": L.quantity, "unit_cost": L.unit_cost, "amount": L.amount} for L in pay_lines],
         "attachments": [{"id": a.id, "filename": a.filename, "size_bytes": a.size_bytes, "url": a.stored_path} for a in atts],
-        "history": hist,
-        "chart_of_accounts": [{"id": a.id, "code": a.code, "name": a.name, "account_type": a.account_type, "label": f"{a.code} - {a.name}"} for a in coa],
-        "can_edit_accounts": current_user.role in ("finance", "company_admin", "superadmin", "program", "project_manager") or current_user.can_approve_payment,
-        "budget_amount": float(bud.amount or 0) if bud else 0,
-        "budget_spent": float(bud.spent or 0) if bud else 0,
-        "budget_available": float((bud.amount or 0) - (bud.spent or 0)) if bud else 0,
-        "funds_sufficient": (float((bud.amount or 0) - (bud.spent or 0)) >= float(pr.amount or 0)) if bud else True,
+        "history": [{"action": l.action, "comment": l.comment, "at": l.created_at.isoformat() if l.created_at else None} for l in logs],
     }
 
 
@@ -2045,22 +2805,85 @@ def save_bank_session(
     account_id: int = Form(...),
     statement_balance: float = Form(0),
     book_balance: float = Form(0),
+    bank_charges: float = Form(0),
+    bank_charges_note: str = Form(""),
+    unpresented_cheques: float = Form(0),
+    deposits_in_transit: float = Form(0),
     start_date: Optional[str] = Form(None),
     end_date: Optional[str] = Form(None),
     current_user: User = Depends(require_roles("finance", "company_admin")),
     db: Session = Depends(get_db),
 ):
+    """Save recon inputs. Statement balance = closing bank statement; book balance = cashbook after ticks."""
     sd = date.fromisoformat(start_date) if start_date else None
     ed = date.fromisoformat(end_date) if end_date else None
     sess = BankStatementSession(
         company_id=current_user.company_id, account_id=account_id,
-        start_date=sd, end_date=ed, statement_balance=statement_balance,
-        book_balance=book_balance, created_by=current_user.id,
+        start_date=sd, end_date=ed,
+        statement_balance=statement_balance,
+        book_balance=book_balance,
+        bank_charges=bank_charges,
+        bank_charges_note=bank_charges_note or "",
+        unpresented_cheques=unpresented_cheques,
+        deposits_in_transit=deposits_in_transit,
+        status="draft",
+        created_by=current_user.id,
     )
     db.add(sess)
     db.commit()
     db.refresh(sess)
-    return sess
+    return {
+        "id": sess.id,
+        "statement_balance": sess.statement_balance,
+        "book_balance": sess.book_balance,
+        "bank_charges": sess.bank_charges,
+        "status": sess.status,
+    }
+
+
+@app.post("/api/finance/bank-recon/session/{session_id}/approve")
+def approve_bank_session(
+    session_id: int,
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Approve bank recon and apply reviewer stamp (initials + date)."""
+    sess = db.query(BankStatementSession).filter(
+        BankStatementSession.id == session_id,
+        BankStatementSession.company_id == current_user.company_id,
+    ).first()
+    if not sess:
+        raise HTTPException(404, "Session not found")
+    # Initials from full name or username
+    name = (current_user.full_name or current_user.username or "RV").strip()
+    parts = name.replace(".", " ").split()
+    initials = "".join(p[0].upper() for p in parts if p)[:4] or "RV"
+    stamp = f"{initials} · {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    sess.status = "approved"
+    sess.approved_by = current_user.id
+    sess.approved_at = datetime.utcnow()
+    sess.approver_stamp = stamp
+    db.commit()
+    return {"ok": True, "stamp": stamp, "status": "approved", "session_id": sess.id}
+
+
+@app.get("/api/finance/bank-recon/sessions")
+def list_bank_sessions(
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    rows = db.query(BankStatementSession).filter(
+        BankStatementSession.company_id == current_user.company_id
+    ).order_by(BankStatementSession.id.desc()).limit(30).all()
+    return [{
+        "id": s.id, "account_id": s.account_id,
+        "statement_balance": s.statement_balance, "book_balance": s.book_balance,
+        "bank_charges": getattr(s, "bank_charges", 0) or 0,
+        "status": getattr(s, "status", "draft"),
+        "approver_stamp": getattr(s, "approver_stamp", None),
+        "approved_at": str(s.approved_at) if s.approved_at else None,
+        "created_at": str(s.created_at) if s.created_at else None,
+    } for s in rows]
 
 
 @app.get("/api/finance/transaction-trail/{journal_entry_id}")
@@ -2139,10 +2962,26 @@ def create_correction_request(
 
 @app.get("/api/finance/correction-requests")
 def list_corrections(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(CorrectionRequest).filter(
+    rows = db.query(CorrectionRequest).filter(
         CorrectionRequest.company_id == current_user.company_id,
         (CorrectionRequest.to_user_id == current_user.id) | (CorrectionRequest.from_user_id == current_user.id),
     ).order_by(CorrectionRequest.created_at.desc()).limit(100).all()
+    out = []
+    for c in rows:
+        fu = db.query(User).filter(User.id == c.from_user_id).first()
+        tu = db.query(User).filter(User.id == c.to_user_id).first()
+        out.append({
+            "id": c.id,
+            "journal_entry_id": c.journal_entry_id,
+            "message": c.message,
+            "status": c.status,
+            "from_user_id": c.from_user_id,
+            "to_user_id": c.to_user_id,
+            "from_user": (fu.full_name or fu.username) if fu else "",
+            "to_user": (tu.full_name or tu.username) if tu else "",
+            "created_at": str(c.created_at) if c.created_at else None,
+        })
+    return out
 
 
 # ===================== BUDGET VARIANCE (per project) =====================
@@ -2194,7 +3033,46 @@ def budget_variance(
 
 
 # ===================== PDF / EXCEL REPORTS =====================
-from reports import build_pdf, build_csv
+from reports import build_pdf, build_csv, build_bank_recon_pdf, build_payment_voucher_pdf, amount_to_words
+
+def _dashboard_kpis(db, company_id):
+    """Lightweight dashboard metrics for PDF page 1."""
+    from sqlalchemy import func
+    try:
+        pay_pending = db.query(PaymentRequest).filter(
+            PaymentRequest.company_id == company_id,
+            PaymentRequest.status.in_(["submitted", "program_approved"]),
+        ).count()
+        pay_approved = db.query(PaymentRequest).filter(
+            PaymentRequest.company_id == company_id,
+            PaymentRequest.status.in_(["finance_approved", "paid", "approved"]),
+        ).count()
+        je_count = db.query(JournalEntry).filter(JournalEntry.company_id == company_id).count()
+        return {
+            "Payment requests pending": pay_pending,
+            "Payments approved / paid": pay_approved,
+            "Journal entries posted": je_count,
+            "Report generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+        }
+    except Exception:
+        return {"Report generated": datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")}
+
+
+STORED_DIR = Path("stored_reports")
+STORED_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _save_pdf_bytes(company_id, user_id, report_type, title, filename, buf):
+    """Write PDF to internal folder for later sync/view."""
+    safe = filename.replace("/", "_")
+    dest = STORED_DIR / f"c{company_id}_{safe}"
+    data = buf.getvalue() if hasattr(buf, "getvalue") else buf.read()
+    if hasattr(buf, "seek"):
+        buf.seek(0)
+    dest.write_bytes(data if isinstance(data, (bytes, bytearray)) else bytes(data))
+    return str(dest), safe
+
+
 
 
 def _company_and_currency(db, user):
@@ -2204,30 +3082,176 @@ def _company_and_currency(db, user):
     return co, code, sym
 
 
+
+
+@app.post("/api/finance/correction-request/{cid}/resubmit")
+def resubmit_correction(
+    cid: int,
+    debit: float = Form(...),
+    credit: float = Form(...),
+    description: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Staff assigned a correction opens the JE, corrects amounts, and resubmits."""
+    cr = db.query(CorrectionRequest).filter(
+        CorrectionRequest.id == cid, CorrectionRequest.company_id == current_user.company_id
+    ).first()
+    if not cr:
+        raise HTTPException(404, "Correction request not found")
+    if cr.to_user_id != current_user.id and current_user.role not in ("company_admin", "finance"):
+        raise HTTPException(403, "Only the assigned staff can resubmit this correction")
+    j = None
+    if cr.journal_entry_id:
+        j = db.query(JournalEntry).filter(JournalEntry.id == cr.journal_entry_id).first()
+    if j:
+        cr.original_debit = j.debit
+        cr.original_credit = j.credit
+        j.debit = debit
+        j.credit = credit
+        if description:
+            j.description = description
+        db.add(j)
+    cr.corrected_debit = debit
+    cr.corrected_credit = credit
+    cr.corrected_description = description
+    cr.status = "resubmitted"
+    cr.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "message": "Correction resubmitted for review", "status": cr.status}
+
+
+@app.post("/api/finance/correction-request/{cid}/resolve")
+def resolve_correction(
+    cid: int,
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    cr = db.query(CorrectionRequest).filter(
+        CorrectionRequest.id == cid, CorrectionRequest.company_id == current_user.company_id
+    ).first()
+    if not cr:
+        raise HTTPException(404)
+    cr.status = "resolved"
+    cr.resolved_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/reports/stored")
+def list_stored_reports(
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    rows = db.query(StoredReport).filter(
+        StoredReport.company_id == current_user.company_id
+    ).order_by(StoredReport.id.desc()).limit(50).all()
+    return [{
+        "id": r.id, "report_type": r.report_type, "title": r.title,
+        "filename": r.filename, "synced": r.synced,
+        "created_at": str(r.created_at) if r.created_at else None,
+    } for r in rows]
+
+
+@app.post("/api/reports/stored/sync")
+def sync_stored_report(
+    report_type: str = Form(...),
+    title: str = Form(""),
+    filename: str = Form(...),
+    file_path: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Mark a downloaded PDF as synchronised into internal memory."""
+    # Prefer path under STORED_DIR
+    path = file_path or str(STORED_DIR / filename)
+    rec = StoredReport(
+        company_id=current_user.company_id,
+        report_type=report_type,
+        title=title or report_type,
+        filename=filename,
+        file_path=path,
+        synced=True,
+        created_by=current_user.id,
+    )
+    db.add(rec)
+    db.commit()
+    db.refresh(rec)
+    return {"ok": True, "id": rec.id, "message": "Report synchronised to internal memory"}
+
+
+@app.get("/api/reports/stored/{rid}/download")
+def download_stored_report(
+    rid: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    r = db.query(StoredReport).filter(
+        StoredReport.id == rid, StoredReport.company_id == current_user.company_id
+    ).first()
+    if not r:
+        raise HTTPException(404)
+    p = Path(r.file_path)
+    if not p.exists():
+        # try STORED_DIR / filename
+        p2 = STORED_DIR / r.filename
+        if p2.exists():
+            p = p2
+        else:
+            raise HTTPException(404, "File missing from internal storage")
+    return FileResponse(str(p), media_type="application/pdf", filename=r.filename)
+
+
 @app.get("/api/reports/bank-recon/pdf")
 def bank_recon_pdf(
     account_id: Optional[int] = None,
+    session_id: Optional[int] = None,
     current_user: User = Depends(require_roles("finance", "company_admin")),
     db: Session = Depends(get_db),
 ):
     data = bank_recon_lines(account_id, None, None, current_user, db)
     co, code, sym = _company_and_currency(db, current_user)
-    headers = ["Tick", "Date", "Entry", "Account", "Description", f"Debit ({sym})", f"Credit ({sym})", "Balance"]
-    rows = []
-    for L in data["lines"]:
-        rows.append([
-            "✓" if L["ticked"] else "",
-            L["date"], L["entry_no"], L["account"], L["description"] or "",
-            f"{L['debit']:,.2f}", f"{L['credit']:,.2f}", f"{L['balance']:,.2f}",
-        ])
-    foot = [
-        f"Reconciled: {sym}{data['totals']['reconciled']:,.2f}",
-        f"Outstanding: {sym}{data['totals']['outstanding']:,.2f}",
-        f"Book balance: {sym}{data['totals']['book_balance']:,.2f}",
-    ]
-    buf = build_pdf(co, "BANK RECONCILIATION STATEMENT", headers, rows, code, sym, True, foot)
+    ticked = [L for L in data["lines"] if L.get("ticked")]
+    unticked = [L for L in data["lines"] if not L.get("ticked")]
+    sess = None
+    if session_id:
+        sess = db.query(BankStatementSession).filter(
+            BankStatementSession.id == session_id,
+            BankStatementSession.company_id == current_user.company_id,
+        ).first()
+    if not sess:
+        sess = db.query(BankStatementSession).filter(
+            BankStatementSession.company_id == current_user.company_id
+        ).order_by(BankStatementSession.id.desc()).first()
+    stmt_bal = float(sess.statement_balance) if sess else float(data["totals"].get("book_balance") or 0)
+    book_bal = float(sess.book_balance) if sess else float(data["totals"].get("book_balance") or 0)
+    # If book balance not entered, use cashbook running balance after ticks concept
+    if sess is None or not sess.book_balance:
+        book_bal = float(data["totals"].get("book_balance") or 0)
+    charges = float(getattr(sess, "bank_charges", 0) or 0) if sess else 0
+    charges_note = getattr(sess, "bank_charges_note", "") or "" if sess else ""
+    unp = float(getattr(sess, "unpresented_cheques", 0) or 0) if sess else float(data["totals"].get("outstanding") or 0)
+    dep = float(getattr(sess, "deposits_in_transit", 0) or 0) if sess else 0
+    stamp = getattr(sess, "approver_stamp", None) if sess else None
+    if sess and getattr(sess, "status", "") != "approved":
+        # still allow download draft, without stamp
+        pass
+    kpis = _dashboard_kpis(db, current_user.company_id)
+    buf = build_bank_recon_pdf(
+        co, stmt_bal, book_bal, charges, charges_note, unp, dep,
+        ticked, unticked, code, sym,
+        period_label=f"Session #{sess.id}" if sess else "Current reconciliation",
+        stamp_text=stamp, kpis=kpis,
+    )
+    fname = f"bank_reconciliation_{sess.id if sess else 'current'}.pdf"
+    path, safe = _save_pdf_bytes(current_user.company_id, current_user.id, "bank_recon", "Bank Reconciliation", fname, buf)
+    buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": "attachment; filename=bank_reconciliation.pdf"})
+                             headers={
+                                 "Content-Disposition": f"attachment; filename={safe}",
+                                 "X-Stored-Path": path,
+                                 "X-Report-Type": "bank_recon",
+                             })
 
 
 @app.get("/api/reports/trial-balance/pdf")
@@ -2272,7 +3296,7 @@ def assets_pdf(current_user: User = Depends(get_current_active_user), db: Sessio
     co, code, sym = _company_and_currency(db, current_user)
     headers = ["Number", "Name", "Category", "Assigned", "Cost", "NBV", "Condition", "Status", "Insurance"]
     rows = [[a.asset_number, a.asset_name, a.category or "", a.assigned_to or "", f"{(a.cost or 0):,.2f}", f"{(a.nbv or 0):,.2f}", a.condition or "", a.status or "", a.insurance or ""] for a in assets]
-    buf = build_pdf(co, "FIXED ASSET REGISTER", headers, rows, code, sym, True)
+    buf = build_pdf(co, "FIXED ASSET REGISTER", headers, rows, code, sym, True, kpis=_dashboard_kpis(db, current_user.company_id))
     return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=assets.pdf"})
 
 
@@ -2282,7 +3306,7 @@ def inventory_pdf(current_user: User = Depends(get_current_active_user), db: Ses
     co, code, sym = _company_and_currency(db, current_user)
     headers = ["Code", "Name", "Category", "Dept", "Cost", "Balance", "Value"]
     rows = [[i.item_code, i.item_name, i.category or "", i.department or "", f"{(i.cost_price or 0):,.2f}", i.balance_qty, f"{(i.total_value or 0):,.2f}"] for i in items]
-    buf = build_pdf(co, "INVENTORY REGISTER", headers, rows, code, sym, True)
+    buf = build_pdf(co, "INVENTORY REGISTER", headers, rows, code, sym, True, kpis=_dashboard_kpis(db, current_user.company_id))
     return StreamingResponse(buf, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=inventory.pdf"})
 
 
@@ -2309,1571 +3333,939 @@ def payments_pdf(current_user: User = Depends(get_current_active_user), db: Sess
 # Single payment voucher PDF
 @app.get("/api/reports/voucher/{pid}/pdf")
 def voucher_pdf(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    try:
-        from reports import company_header, table_style
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
-        from reportlab.lib.pagesizes import A4
-        from reportlab.lib.units import mm, cm
-        from reportlab.lib import colors
-        from io import BytesIO
-
-        pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
-        if not pr:
-            raise HTTPException(404, "Payment request not found")
-        co, code, sym = _company_and_currency(db, current_user)
-        exp = db.query(ExpenseCode).filter(ExpenseCode.id == pr.expense_code_id).first() if pr.expense_code_id else None
-        bud = db.query(BudgetCode).filter(BudgetCode.id == pr.budget_code_id).first() if pr.budget_code_id else None
-        debit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.debit_account_id).first() if pr.debit_account_id else None
-        credit = db.query(ChartOfAccount).filter(ChartOfAccount.id == pr.credit_account_id).first() if pr.credit_account_id else None
-        proj = None
-        try:
-            if pr.project_code_id:
-                proj = db.query(ProjectCode).filter(ProjectCode.id == pr.project_code_id).first()
-        except Exception:
-            pass
-        requester = db.query(User).filter(User.id == pr.requester_id).first()
-        prog_u = db.query(User).filter(User.id == pr.program_approved_by).first() if pr.program_approved_by else None
-        fin_u = db.query(User).filter(User.id == pr.finance_approved_by).first() if pr.finance_approved_by else None
-        lines = db.query(PaymentLine).filter(PaymentLine.payment_request_id == pr.id).order_by(PaymentLine.sort_order).all()
-
-        buf = BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
-        story = []
-        styles = company_header(story, co, "PAYMENT VOUCHER", code, sym)
-        data = [
-            ["Field", "Value"],
-            ["Voucher No", pr.request_no or ""],
-            ["Status", pr.status or ""],
-            ["Date", pr.created_at.strftime("%Y-%m-%d") if pr.created_at else ""],
-            ["Payee", pr.payee_name or ""],
-            ["Amount (figures)", f"{sym}{float(pr.amount or 0):,.2f}"],
-            ["Amount (words)", amount_to_words(pr.amount or 0)],
-            ["Budget code", f"{getattr(bud,'code','') or ''} — {getattr(bud,'description','') or ''}"],
-            ["Expense code", f"{getattr(exp,'code','') or ''} — {getattr(exp,'description','') or ''}"],
-            ["Project code", f"{getattr(proj,'code','') or ''} — {getattr(proj,'name','') or ''}"],
-            ["Account debited", f"{debit.code} - {debit.name}" if debit else "NOT SET"],
-            ["Account credited", f"{credit.code} - {credit.name}" if credit else "NOT SET"],
-            ["Narration", (pr.narration or "")[:500]],
-            ["Requested by", (requester.full_name or requester.username) if requester else ""],
-            ["Program approved by", (prog_u.full_name or prog_u.username) if prog_u else ""],
-            ["Finance approved by", (fin_u.full_name or fin_u.username) if fin_u else ""],
-        ]
-        # wrap cells
-        wrapped = []
-        for row in data:
-            wrapped.append([Paragraph(str(row[0]), styles["Cell"]), Paragraph(str(row[1]).replace("\n","<br/>"), styles["Cell"])])
-        tbl = Table(wrapped, colWidths=[50*mm, 120*mm])
-        tbl.setStyle(table_style())
-        story.append(tbl)
-        if lines:
-            story.append(Spacer(1, 10))
-            story.append(Paragraph("Line items", styles["ReportH"]))
-            ld = [["Description", "Qty", "Unit cost", "Amount"]]
-            for L in lines:
-                ld.append([L.description or "", f"{L.quantity or 0}", f"{L.unit_cost or 0:,.2f}", f"{L.amount or 0:,.2f}"])
-            lt = Table(ld, colWidths=[80*mm, 25*mm, 30*mm, 35*mm])
-            lt.setStyle(table_style())
-            story.append(lt)
-        story.append(Spacer(1, 12))
-        story.append(Paragraph(
-            "Posted under double-entry principles to the general ledger on final payment (status: paid).",
-            styles["Small"],
-        ))
-        doc.build(story)
-        buf.seek(0)
-        return StreamingResponse(buf, media_type="application/pdf",
-                                 headers={"Content-Disposition": f"attachment; filename=voucher_{pr.request_no or pid}.pdf"})
-    except HTTPException:
-        raise
-    except Exception as ex:
-        raise HTTPException(500, f"Voucher PDF failed: {ex}")
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404, "Payment request not found")
+    if pr.status not in ("finance_approved", "paid", "approved", "program_approved", "submitted"):
+        raise HTTPException(400, "Voucher available after submission")
+    co, code, sym = _company_and_currency(db, current_user)
+    approvers = {}
+    if pr.program_approved_by:
+        u = db.query(User).filter(User.id == pr.program_approved_by).first()
+        approvers["Program approver"] = f"{(u.full_name or u.username) if u else pr.program_approved_by} @ {pr.program_approved_at or ''}"
+    if pr.finance_approved_by:
+        u = db.query(User).filter(User.id == pr.finance_approved_by).first()
+        approvers["Finance approver"] = f"{(u.full_name or u.username) if u else pr.finance_approved_by} @ {pr.finance_approved_at or ''}"
+    if pr.designated_approver_id:
+        u = db.query(User).filter(User.id == pr.designated_approver_id).first()
+        approvers["Designated approver"] = (u.full_name or u.username) if u else str(pr.designated_approver_id)
+    kpis = _dashboard_kpis(db, current_user.company_id)
+    buf = build_payment_voucher_pdf(co, pr, approvers, code, sym, kpis)
+    fname = f"voucher_{pr.request_no}.pdf"
+    path, safe = _save_pdf_bytes(current_user.company_id, current_user.id, "payment_voucher", f"Voucher {pr.request_no}", fname, buf)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={safe}",
+                                      "X-Stored-Path": path, "X-Report-Type": "payment_voucher"})
 
 
 
-@app.post("/api/users/me/signature")
-async def upload_my_signature(
-    file: UploadFile = File(...),
+# ===================== PROJECTS & FINANCIAL STATEMENTS =====================
+@app.get("/api/projects")
+def list_projects(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(ProjectCode).filter(
+        ProjectCode.company_id == current_user.company_id, ProjectCode.is_active == True
+    ).order_by(ProjectCode.code).all()
+    return [{
+        "id": p.id, "code": p.code, "name": p.name, "description": p.description or "",
+        "budget_amount": getattr(p, "budget_amount", 0) or 0,
+        "start_date": str(p.start_date) if getattr(p, "start_date", None) else None,
+        "end_date": str(p.end_date) if getattr(p, "end_date", None) else None,
+    } for p in rows]
+
+
+@app.get("/api/reports/project/{project_id}")
+def project_report_data(
+    project_id: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    ext = Path(file.filename or "").suffix.lower()
-    if ext not in {".png", ".jpg", ".jpeg", ".webp"}:
-        raise HTTPException(400, "Upload a PNG or JPG signature image")
-    content = await file.read()
-    if len(content) > 500 * 1024:
-        raise HTTPException(400, "Signature image max 500KB")
-    fname = f"sig_user_{current_user.id}{ext}"
-    dest = UPLOADS_DIR / fname
-    dest.write_bytes(content)
-    current_user.signature_path = f"/static/uploads/{fname}"
-    db.commit()
-    audit(db, current_user.company_id, current_user, "SIGNATURE_UPLOAD", fname)
-    return {"signature_path": current_user.signature_path}
-
-
-@app.get("/api/users/me/signature")
-def get_my_signature(current_user: User = Depends(get_current_active_user)):
-    return {"signature_path": current_user.signature_path}
-
-
-
-
-
-# ===================== CURRENCY / EXCHANGE RATES =====================
-@app.get("/api/finance/exchange-rates")
-def list_exchange_rates(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    """List exchange rates for the company (stored in company settings JSON or default)."""
-    co = db.query(Company).filter(Company.id == current_user.company_id).first()
-    rates = []
-    if co and getattr(co, "settings_json", None):
-        import json as _json
-        try:
-            s = _json.loads(co.settings_json or "{}")
-            rates = s.get("exchange_rates", [])
-        except Exception:
-            rates = []
-    return {"reporting_currency": getattr(co, "reporting_currency_code", "NGN") if co else "NGN", "rates": rates}
-
-
-@app.post("/api/finance/exchange-rates")
-def set_exchange_rate(
-    from_currency: str = Form(...),
-    to_currency: str = Form(...),
-    rate: float = Form(...),
-    current_user: User = Depends(require_roles("company_admin", "finance", "superadmin")),
-    db: Session = Depends(get_db),
-):
-    """Add or update an exchange rate factor (from → to)."""
-    import json as _json
-    co = db.query(Company).filter(Company.id == current_user.company_id).first()
-    if not co:
-        raise HTTPException(404, "Company not found")
-    try:
-        s = _json.loads(co.settings_json or "{}")
-    except Exception:
-        s = {}
-    rates = s.get("exchange_rates", [])
-    # upsert
-    found = False
-    for r in rates:
-        if r.get("from") == from_currency.upper() and r.get("to") == to_currency.upper():
-            r["rate"] = rate
-            r["updated"] = datetime.utcnow().isoformat()
-            found = True
-            break
-    if not found:
-        rates.append({
-            "from": from_currency.upper(), "to": to_currency.upper(),
-            "rate": rate, "updated": datetime.utcnow().isoformat(),
-        })
-    s["exchange_rates"] = rates
-    co.settings_json = _json.dumps(s)
-    db.commit()
-    return {"message": "Rate saved", "rates": rates}
-
-
-@app.post("/api/reports/convert")
-def convert_report(
-    report_type: str = Form("financial-position"),
-    target_currency: str = Form(...),
-    rate: float = Form(...),
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    """Convert a report to target currency using provided rate factor. Returns IFRS-style rows."""
-    if report_type == "financial-performance":
-        data = ifrs_financial_performance(current_user, db)
-    else:
-        data = ifrs_financial_position(current_user, db)
-    for row in data.get("rows", []):
-        if "amount" in row:
-            row["amount_original"] = row["amount"]
-            row["amount"] = round((row["amount"] or 0) * rate, 2)
-            row["currency"] = target_currency.upper()
-    data["converted"] = True
-    data["target_currency"] = target_currency.upper()
-    data["rate_applied"] = rate
-    data["title"] = data.get("title", "Report") + f" (converted to {target_currency.upper()})"
-    return data
-
-
-@app.get("/api/reports/ifrs/financial-position")
-def ifrs_financial_position(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    """Statement of Financial Position (IAS 1) — balances by account type."""
-    from reports import ifrs_for
-    cid = current_user.company_id
-    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid).all()
-    rows = []
-    totals = {"Asset": 0.0, "Liability": 0.0, "Equity": 0.0, "Cash": 0.0}
-    for acc in accounts:
-        lines = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id).all()
-        bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
-        if abs(bal) < 0.0001:
-            continue
-        # for liabilities/equity/income typically credit-normal: present as positive credit balance
-        at = acc.account_type or "Asset"
-        display = bal
-        if at in ("Liability", "Equity", "Income"):
-            display = -bal  # credit balances shown positive
-        if at in totals:
-            totals[at] = totals.get(at, 0) + display
-        elif at == "Cash":
-            totals["Cash"] += display
-            totals["Asset"] += display
-        rows.append({
-            "code": acc.code, "name": acc.name, "type": at,
-            "amount": display, "ifrs": ifrs_for(acc.name, at),
-            "project_code": acc.project_code or "",
-        })
-    assets_total = totals.get("Asset", 0) + totals.get("Cash", 0)
-    liab_eq = totals.get("Liability", 0) + totals.get("Equity", 0)
-    # Ensure SoFP always balances: any difference goes to Capital / Retained Earnings
-    difference = round(assets_total - liab_eq, 2)
-    balancing_note = None
-    if abs(difference) >= 0.01:
-        balancing_note = f"Balancing figure of {difference:,.2f} applied to Capital (investigate root postings)"
-        rows.append({
-            "code": "BAL", "name": "Capital balancing figure (auto)", "type": "Equity",
-            "amount": difference, "ifrs": "IAS 1 — Equity",
-            "project_code": "", "is_balancing": True,
-        })
-        totals["Equity"] = totals.get("Equity", 0) + difference
-        liab_eq = totals.get("Liability", 0) + totals.get("Equity", 0)
-    return {
-        "title": "Statement of Financial Position",
-        "standard": "IAS 1 Presentation of Financial Statements",
-        "rows": rows,
-        "totals": totals,
-        "assets_total": assets_total,
-        "liabilities_equity_total": liab_eq,
-        "balancing_difference": difference,
-        "balancing_note": balancing_note,
-    }
-
-
-@app.get("/api/reports/ifrs/financial-performance")
-def ifrs_financial_performance(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    """Statement of Financial Performance / P&L (IAS 1 / IFRS 15)."""
-    from reports import ifrs_for
-    cid = current_user.company_id
-    accounts = db.query(ChartOfAccount).filter(
-        ChartOfAccount.company_id == cid,
-        ChartOfAccount.account_type.in_(["Income", "Expense"]),
+    p = db.query(ProjectCode).filter(
+        ProjectCode.id == project_id, ProjectCode.company_id == current_user.company_id
+    ).first()
+    if not p:
+        raise HTTPException(404, "Project not found")
+    q = db.query(JournalEntry).filter(
+        JournalEntry.company_id == current_user.company_id,
+        JournalEntry.project_code_id == project_id,
+    )
+    if start_date:
+        try: q = q.filter(JournalEntry.entry_date >= date.fromisoformat(start_date))
+        except Exception: pass
+    if end_date:
+        try: q = q.filter(JournalEntry.entry_date <= date.fromisoformat(end_date))
+        except Exception: pass
+    lines = q.order_by(JournalEntry.entry_date).all()
+    payments = db.query(PaymentRequest).filter(
+        PaymentRequest.company_id == current_user.company_id,
+        PaymentRequest.project_code_id == project_id,
     ).all()
-    rows = []
-    income = expense = 0.0
-    for acc in accounts:
-        lines = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id).all()
-        bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
-        if acc.account_type == "Income":
-            amt = -bal  # credits increase income
-            income += amt
-        else:
-            amt = bal
-            expense += amt
-        if abs(amt) < 0.0001:
-            continue
-        rows.append({
-            "code": acc.code, "name": acc.name, "type": acc.account_type,
-            "amount": amt, "ifrs": ifrs_for(acc.name, acc.account_type),
-            "project_code": acc.project_code or "",
-        })
+    total_dr = sum(l.debit or 0 for l in lines)
+    total_cr = sum(l.credit or 0 for l in lines)
+    pay_total = sum(x.amount or 0 for x in payments if x.status in ("paid", "finance_approved", "program_approved", "submitted"))
     return {
-        "title": "Statement of Financial Performance",
-        "standard": "IAS 1; IFRS 15 Revenue from Contracts with Customers",
-        "rows": rows,
-        "total_income": income,
-        "total_expense": expense,
-        "surplus_deficit": income - expense,
+        "project": {"id": p.id, "code": p.code, "name": p.name, "budget_amount": getattr(p, "budget_amount", 0) or 0},
+        "lines": [{
+            "id": l.id, "date": str(l.entry_date), "entry_no": l.entry_no,
+            "description": l.description, "debit": l.debit, "credit": l.credit,
+            "account_id": l.account_id, "source_type": l.source_type, "source_id": l.source_id,
+        } for l in lines],
+        "payments": [{
+            "id": x.id, "request_no": x.request_no, "amount": x.amount,
+            "status": x.status, "payee": x.payee_name,
+        } for x in payments],
+        "totals": {"debit": total_dr, "credit": total_cr, "payments": pay_total,
+                   "budget": getattr(p, "budget_amount", 0) or 0,
+                   "variance": (getattr(p, "budget_amount", 0) or 0) - pay_total},
     }
 
 
-@app.get("/api/reports/ifrs/cash-flow")
-def ifrs_cash_flow(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    """Statement of Cash Flows (IAS 7) — simplified classification by source_type."""
-    from reports import ifrs_for
-    cid = current_user.company_id
-    cash_ids = [a.id for a in db.query(ChartOfAccount).filter(
-        ChartOfAccount.company_id == cid, ChartOfAccount.account_type == "Cash"
-    ).all()]
-    lines = db.query(JournalEntry).filter(
-        JournalEntry.company_id == cid,
-        JournalEntry.account_id.in_(cash_ids) if cash_ids else False,
-    ).order_by(JournalEntry.entry_date).all()
-    buckets = {"Operating activities": 0.0, "Investing activities": 0.0, "Financing activities": 0.0}
-    rows = []
-    for j in lines:
-        net = (j.debit or 0) - (j.credit or 0)
-        src = (j.source_type or "manual").lower()
-        if src in ("payment", "inventory", "manual", "vendor"):
-            bucket = "Operating activities"
-        elif src in ("asset", "asset_adjustment"):
-            bucket = "Investing activities"
-        else:
-            bucket = "Operating activities"
-        buckets[bucket] += net
-        rows.append({
-            "date": str(j.entry_date), "entry_no": j.entry_no,
-            "description": j.description, "source_type": j.source_type,
-            "amount": net, "classification": bucket,
-            "ifrs": ifrs_for(bucket, "Cash"),
-        })
-    return {
-        "title": "Statement of Cash Flows",
-        "standard": "IAS 7 Statement of Cash Flows",
-        "rows": rows,
-        "totals": buckets,
-        "net_change": sum(buckets.values()),
-    }
+@app.get("/api/reports/project/{project_id}/pdf")
+def project_report_pdf(
+    project_id: int,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    data = project_report_data(project_id, start_date, end_date, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    headers = ["Date", "Entry", "Description", f"Debit ({sym})", f"Credit ({sym})", "Source"]
+    rows = [[L["date"], L["entry_no"], (L["description"] or "")[:40],
+             f"{L['debit']:,.2f}", f"{L['credit']:,.2f}",
+             f"{L.get('source_type') or ''}:{L.get('source_id') or ''}"] for L in data["lines"]]
+    foot = [
+        f"Project: {data['project']['code']} — {data['project']['name']}",
+        f"Budget: {sym}{data['totals']['budget']:,.2f} | Payments: {sym}{data['totals']['payments']:,.2f} | Variance: {sym}{data['totals']['variance']:,.2f}",
+        "Figures are trailable via Entry No / Source on the project report screen.",
+    ]
+    buf = build_pdf(co, f"PROJECT REPORT — {data['project']['code']}", headers, rows, code, sym, True,
+                    foot, description=data["project"]["name"],
+                    kpis=_dashboard_kpis(db, current_user.company_id))
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename=project_{data['project']['code']}.pdf"})
 
 
-@app.get("/api/reports/ifrs/{report_type}/pdf")
-def ifrs_report_pdf(report_type: str, from_date: Optional[str] = None, to_date: Optional[str] = None, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    try:
-        from ifrs_statements import build_sfp, build_pl, build_equity, build_cashflow
-        co, code, sym = _company_and_currency(db, current_user)
-        year = str(datetime.utcnow().year)
-        prior = str(datetime.utcnow().year - 1)
-        cid = current_user.company_id
-        amounts = {}
-        fd = td = None
+def _period_filter(q, start_date, end_date, year):
+    if year:
         try:
-            if from_date:
-                fd = datetime.strptime(from_date[:10], "%Y-%m-%d").date()
-            if to_date:
-                td = datetime.strptime(to_date[:10], "%Y-%m-%d").date()
+            y = int(year)
+            q = q.filter(JournalEntry.entry_date >= date(y, 1, 1), JournalEntry.entry_date <= date(y, 12, 31))
+            return q
         except Exception:
             pass
-        if cid:
-            accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid).all()
-            for acc in accounts:
-                q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == acc.id)
-                if fd:
-                    q = q.filter(JournalEntry.entry_date >= fd)
-                if td:
-                    q = q.filter(JournalEntry.entry_date <= td)
-                lines = q.all()
-                bal = sum((l.debit or 0) - (l.credit or 0) for l in lines)
-                at = (acc.account_type or "").lower()
-                name = (acc.name or "").lower()
-                if at == "cash" or "cash" in name or "bank" in name:
-                    amounts["cash"] = amounts.get("cash", 0) + bal
-                elif at == "asset":
-                    if "receivable" in name:
-                        amounts["receivables"] = amounts.get("receivables", 0) + bal
-                    elif "inventor" in name:
-                        amounts["inventory"] = amounts.get("inventory", 0) + bal
-                    elif any(x in name for x in ("property", "plant", "equipment", "ppe", "fixed")):
-                        amounts["ppe"] = amounts.get("ppe", 0) + bal
-                    else:
-                        amounts["other_ca"] = amounts.get("other_ca", 0) + bal
-                elif at == "liability":
-                    if "payable" in name:
-                        amounts["payables"] = amounts.get("payables", 0) + (-bal)
-                    else:
-                        amounts["other_cl"] = amounts.get("other_cl", 0) + (-bal)
-                elif at == "equity":
-                    amounts["retained"] = amounts.get("retained", 0) + (-bal)
-                elif at == "income":
-                    amounts["revenue"] = amounts.get("revenue", 0) + (-bal)
-                elif at == "expense":
-                    amounts["admin"] = amounts.get("admin", 0) + bal
-        amounts["total_ca"] = sum(amounts.get(k, 0) for k in ("cash", "receivables", "inventory", "other_ca", "cta"))
-        amounts["total_nca"] = sum(amounts.get(k, 0) for k in ("ppe", "inv_prop", "intangible", "associates", "fin_assets", "dta", "other_nca"))
-        amounts["total_assets"] = amounts.get("total_ca", 0) + amounts.get("total_nca", 0)
-        amounts["total_cl"] = sum(amounts.get(k, 0) for k in ("payables", "c_borrowings", "ctl", "c_provisions", "other_cl"))
-        amounts["total_ncl"] = sum(amounts.get(k, 0) for k in ("nc_borrowings", "dtl", "nc_provisions", "other_ncl"))
-        amounts["total_liab"] = amounts.get("total_cl", 0) + amounts.get("total_ncl", 0)
-        amounts["total_equity"] = amounts.get("retained", 0) + amounts.get("share_capital", 0) + amounts.get("share_premium", 0) + amounts.get("other_reserves", 0)
-        amounts["total_equity_owners"] = amounts["total_equity"]
-        amounts["total_equity_liab"] = amounts["total_equity"] + amounts["total_liab"]
-        amounts["gross_profit"] = amounts.get("revenue", 0) - amounts.get("cos", 0)
-        amounts["operating_profit"] = amounts["gross_profit"] + amounts.get("other_income", 0) - amounts.get("admin", 0) - amounts.get("distribution", 0) - amounts.get("other_exp", 0)
-        amounts["pbt"] = amounts["operating_profit"] + amounts.get("fin_income", 0) - amounts.get("fin_costs", 0)
-        amounts["profit_year"] = amounts["pbt"] - amounts.get("tax", 0)
-        amounts["profit_cont"] = amounts["profit_year"]
-        amounts["tci"] = amounts["profit_year"]
-        amounts["cash_close"] = amounts.get("cash", 0)
-        amounts["net_ops"] = amounts.get("pbt", 0)
-        rt = (report_type or "").lower().replace("_", "-")
-        if rt in ("financial-position", "position", "sfp"):
-            buf = build_sfp(co, year, prior, amounts)
-            fname = "statement_of_financial_position.pdf"
-        elif rt in ("financial-performance", "performance", "pl"):
-            buf = build_pl(co, year, prior, amounts)
-            fname = "statement_of_profit_or_loss.pdf"
-        elif rt in ("equity", "changes-in-equity"):
-            buf = build_equity(co, year, amounts)
-            fname = "statement_of_changes_in_equity.pdf"
-        elif rt in ("cash-flow", "cashflow"):
-            buf = build_cashflow(co, year, prior, amounts)
-            fname = "statement_of_cash_flows.pdf"
+    if start_date:
+        try: q = q.filter(JournalEntry.entry_date >= date.fromisoformat(start_date))
+        except Exception: pass
+    if end_date:
+        try: q = q.filter(JournalEntry.entry_date <= date.fromisoformat(end_date))
+        except Exception: pass
+    return q
+
+
+@app.get("/api/reports/financial-position")
+def statement_financial_position(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    year: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Statement of Financial Position (Balance Sheet) as at end date / year-end."""
+    cid = current_user.company_id
+    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid, ChartOfAccount.is_active == True).all()
+    assets, liabilities, equity = [], [], []
+    ta = tl = te = 0.0
+    for a in accounts:
+        q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == a.id)
+        q = _period_filter(q, start_date, end_date, year)
+        lines = q.all()
+        bal = sum((x.debit or 0) - (x.credit or 0) for x in lines)
+        row = {"id": a.id, "code": a.code, "name": a.name, "balance": bal,
+               "trail": f"/api/finance/transaction-trail by account {a.id}"}
+        t = (a.account_type or "").lower()
+        if t in ("asset", "cash", "fixed asset", "inventory"):
+            assets.append(row); ta += bal
+        elif t in ("liability", "payable"):
+            liabilities.append(row); tl += bal
+        elif t in ("equity", "capital"):
+            equity.append(row); te += bal
         else:
-            raise HTTPException(404, f"Unknown IFRS report type: {report_type}")
-        return StreamingResponse(buf, media_type="application/pdf",
-                                 headers={"Content-Disposition": f"attachment; filename={fname}"})
-    except HTTPException:
-        raise
-    except Exception as ex:
-        raise HTTPException(500, f"IFRS PDF failed: {ex}")
+            # net income proxy not classified here
+            pass
+    return {
+        "as_at": end_date or (f"{year}-12-31" if year else str(date.today())),
+        "assets": assets, "liabilities": liabilities, "equity": equity,
+        "total_assets": ta, "total_liabilities": tl, "total_equity": te,
+    }
+
+
+@app.get("/api/reports/financial-performance")
+def statement_financial_performance(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    year: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Statement of Financial Performance (Income Statement / P&L)."""
+    cid = current_user.company_id
+    accounts = db.query(ChartOfAccount).filter(ChartOfAccount.company_id == cid, ChartOfAccount.is_active == True).all()
+    income, expenses = [], []
+    ti = te = 0.0
+    for a in accounts:
+        q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id == a.id)
+        q = _period_filter(q, start_date, end_date, year)
+        lines = q.all()
+        # income credit-nature, expense debit-nature
+        bal = sum((x.credit or 0) - (x.debit or 0) for x in lines)
+        t = (a.account_type or "").lower()
+        row = {"id": a.id, "code": a.code, "name": a.name, "balance": abs(bal),
+               "raw": bal, "trail_hint": f"Account {a.code} journal lines"}
+        if t in ("income", "revenue"):
+            income.append(row); ti += abs(bal)
+        elif t in ("expense", "cost"):
+            # expenses: debit - credit
+            ebal = sum((x.debit or 0) - (x.credit or 0) for x in lines)
+            row["balance"] = ebal
+            expenses.append(row); te += ebal
+    return {
+        "period": {"start": start_date, "end": end_date, "year": year},
+        "income": income, "expenses": expenses,
+        "total_income": ti, "total_expenses": te, "surplus_deficit": ti - te,
+    }
+
+
+@app.get("/api/reports/cash-flow")
+def statement_cash_flow(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    year: Optional[int] = None,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Simplified Statement of Cash Flows from cash account movements."""
+    cid = current_user.company_id
+    cash_accs = db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == cid,
+        ChartOfAccount.account_type.in_(["Cash", "cash", "Asset"]),
+    ).all()
+    # Prefer name containing bank/cash
+    cash_ids = [a.id for a in cash_accs if "cash" in (a.name or "").lower() or "bank" in (a.name or "").lower() or (a.account_type or "").lower() == "cash"]
+    if not cash_ids:
+        cash_ids = [a.id for a in cash_accs]
+    q = db.query(JournalEntry).filter(JournalEntry.company_id == cid, JournalEntry.account_id.in_(cash_ids or [-1]))
+    q = _period_filter(q, start_date, end_date, year)
+    lines = q.order_by(JournalEntry.entry_date).all()
+    operating = investing = financing = 0.0
+    detail = []
+    for L in lines:
+        net = (L.debit or 0) - (L.credit or 0)
+        st = (L.source_type or "").lower()
+        bucket = "operating"
+        if st in ("asset", "asset_adjustment"):
+            bucket = "investing"; investing += net
+        elif st in ("equity",):
+            bucket = "financing"; financing += net
+        else:
+            operating += net
+        detail.append({
+            "id": L.id, "date": str(L.entry_date), "entry_no": L.entry_no,
+            "description": L.description, "net": net, "bucket": bucket,
+            "source_type": L.source_type, "source_id": L.source_id,
+        })
+    return {
+        "period": {"start": start_date, "end": end_date, "year": year},
+        "operating": operating, "investing": investing, "financing": financing,
+        "net_change": operating + investing + financing,
+        "lines": detail,
+    }
+
+
+def _fs_pdf(title, headers, rows, foot, user, db):
+    co, code, sym = _company_and_currency(db, user)
+    buf = build_pdf(co, title, headers, rows, code, sym, False, foot,
+                    kpis=_dashboard_kpis(db, user.company_id))
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={title.lower().replace(' ','_')}.pdf"})
+
+
+@app.get("/api/reports/financial-position/pdf")
+def sfp_pdf(start_date: Optional[str] = None, end_date: Optional[str] = None, year: Optional[int] = None,
+            current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = statement_financial_position(start_date, end_date, year, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    rows = [["ASSETS", "", ""]]
+    for a in data["assets"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total assets", "", f"{data['total_assets']:,.2f}"])
+    rows.append(["LIABILITIES", "", ""])
+    for a in data["liabilities"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total liabilities", "", f"{data['total_liabilities']:,.2f}"])
+    rows.append(["EQUITY", "", ""])
+    for a in data["equity"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total equity", "", f"{data['total_equity']:,.2f}"])
+    return _fs_pdf("STATEMENT OF FINANCIAL POSITION", ["Code", "Account", f"Amount ({sym})"], rows,
+                   [f"As at {data['as_at']}", "Click trail on screen for source journals"], current_user, db)
+
+
+@app.get("/api/reports/financial-performance/pdf")
+def sfpn_pdf(start_date: Optional[str] = None, end_date: Optional[str] = None, year: Optional[int] = None,
+             current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = statement_financial_performance(start_date, end_date, year, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    rows = [["INCOME", "", ""]]
+    for a in data["income"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total income", "", f"{data['total_income']:,.2f}"])
+    rows.append(["EXPENSES", "", ""])
+    for a in data["expenses"]:
+        rows.append([a["code"], a["name"], f"{a['balance']:,.2f}"])
+    rows.append(["Total expenses", "", f"{data['total_expenses']:,.2f}"])
+    rows.append(["Surplus / (Deficit)", "", f"{data['surplus_deficit']:,.2f}"])
+    return _fs_pdf("STATEMENT OF FINANCIAL PERFORMANCE", ["Code", "Account", f"Amount ({sym})"], rows,
+                   ["Trail each line on-screen to journal source"], current_user, db)
+
+
+@app.get("/api/reports/cash-flow/pdf")
+def scf_pdf(start_date: Optional[str] = None, end_date: Optional[str] = None, year: Optional[int] = None,
+            current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = statement_cash_flow(start_date, end_date, year, current_user, db)
+    co, code, sym = _company_and_currency(db, current_user)
+    rows = [
+        ["Operating activities", f"{data['operating']:,.2f}"],
+        ["Investing activities", f"{data['investing']:,.2f}"],
+        ["Financing activities", f"{data['financing']:,.2f}"],
+        ["Net change in cash", f"{data['net_change']:,.2f}"],
+    ]
+    return _fs_pdf("STATEMENT OF CASH FLOWS", ["Particulars", f"Amount ({sym})"], rows,
+                   ["Detail lines trailable on the Cash Flow report page"], current_user, db)
+
+
+@app.patch("/api/payments/{pid}/accounts")
+def finance_change_accounts(
+    pid: int,
+    debit_account_id: Optional[int] = Form(None),
+    credit_account_id: Optional[int] = Form(None),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Finance can change COA codes on a request awaiting finance approval."""
+    pr = db.query(PaymentRequest).filter(
+        PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id
+    ).first()
+    if not pr:
+        raise HTTPException(404)
+    if pr.status not in ("submitted", "program_approved", "returned", "finance_approved"):
+        raise HTTPException(400, "Only open / program-approved requests can be adjusted")
+    if debit_account_id is not None:
+        pr.debit_account_id = debit_account_id
+    if credit_account_id is not None:
+        pr.credit_account_id = credit_account_id
+    if project_code_id is not None:
+        pr.project_code_id = project_code_id
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="accounts_updated", comment="Account codes updated by finance"))
+    db.commit()
+    return {"ok": True, "debit_account_id": pr.debit_account_id, "credit_account_id": pr.credit_account_id}
+
+
+@app.post("/api/payments/{pid}/request-correction")
+def payment_request_correction(
+    pid: int,
+    message: str = Form(...),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Finance messages originator to correct and resubmit the payment request."""
+    pr = db.query(PaymentRequest).filter(
+        PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id
+    ).first()
+    if not pr:
+        raise HTTPException(404)
+    if pr.status not in ("submitted", "program_approved", "returned", "finance_approved"):
+        raise HTTPException(400, "Cannot request correction on this status")
+    pr.status = "returned"
+    pr.rejection_reason = message
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="request_correction", comment=message))
+    # Also create correction-style inbox message to requester
+    db.add(CorrectionRequest(
+        company_id=current_user.company_id,
+        journal_entry_id=None,
+        source_type="payment",
+        source_id=pr.id,
+        from_user_id=current_user.id,
+        to_user_id=pr.requester_id,
+        message=f"Payment {pr.request_no}: {message}",
+        status="open",
+    ))
+    db.commit()
+    return {"ok": True, "message": "Originator notified to correct and resubmit", "status": "returned"}
+
+
+@app.post("/api/payments/{pid}/resubmit")
+def payment_resubmit(
+    pid: int,
+    amount: Optional[float] = Form(None),
+    narration: Optional[str] = Form(None),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    pr = db.query(PaymentRequest).filter(
+        PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id
+    ).first()
+    if not pr:
+        raise HTTPException(404)
+    if pr.requester_id != current_user.id and current_user.role not in ("company_admin",):
+        raise HTTPException(403, "Only the originator can resubmit")
+    if pr.status != "returned":
+        raise HTTPException(400, "Only returned requests can be resubmitted")
+    if amount is not None:
+        pr.amount = amount
+        pr.amount_in_words = amount_to_words(amount)
+    if narration is not None:
+        pr.narration = narration
+    pr.status = "submitted"
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="resubmit", comment="Resubmitted after correction"))
+    db.commit()
+    return {"ok": True, "status": "submitted"}
 
 
 
+# ===================== PROCUREMENT (RFQ / quotes / scoring) =====================
+@app.get("/api/procurement/services")
+def list_proc_services(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(ProcurementService).filter(
+        ProcurementService.company_id == current_user.company_id, ProcurementService.is_active == True
+    ).order_by(ProcurementService.code).all()
 
-def _rfq_no(db, cid):
-    try:
-        n = db.query(RFQ).filter(RFQ.company_id == cid).count() + 1
-    except Exception:
-        n = 1
-    return f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
 
-
-def _public_base():
-    import os
-    return (os.getenv("PUBLIC_BASE_URL") or os.getenv("RENDER_EXTERNAL_URL") or "").rstrip("/")
+@app.post("/api/procurement/services")
+def create_proc_service(
+    code: str = Form(...), name: str = Form(...), description: str = Form(""),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    row = ProcurementService(company_id=current_user.company_id, code=code, name=name, description=description)
+    db.add(row); db.commit(); db.refresh(row)
+    return row
 
 
 @app.get("/api/procurement/rfqs")
 def list_rfqs(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    if not (current_user.can_access_vendors or current_user.role in ("company_admin", "finance", "superadmin", "project_manager")):
-        raise HTTPException(403, "No procurement access")
-    rows = db.query(RFQ).filter(RFQ.company_id == current_user.company_id).order_by(RFQ.id.desc()).all()
-    return rows
+    rows = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == current_user.company_id).order_by(ProcurementRFQ.id.desc()).all()
+    out = []
+    for r in rows:
+        svc = db.query(ProcurementService).filter(ProcurementService.id == r.service_id).first() if r.service_id else None
+        da = db.query(ChartOfAccount).filter(ChartOfAccount.id == r.debit_account_id).first() if r.debit_account_id else None
+        ca = db.query(ChartOfAccount).filter(ChartOfAccount.id == r.credit_account_id).first() if r.credit_account_id else None
+        out.append({
+            "id": r.id, "rfq_no": r.rfq_no, "title": r.title, "status": r.status,
+            "description": r.description, "service": f"{svc.code} — {svc.name}" if svc else "",
+            "debit_account": f"{da.code} — {da.name}" if da else "",
+            "credit_account": f"{ca.code} — {ca.name}" if ca else "",
+            "debit_account_id": r.debit_account_id, "credit_account_id": r.credit_account_id,
+            "project_code_id": r.project_code_id, "created_at": str(r.created_at) if r.created_at else None,
+        })
+    return out
 
 
 @app.post("/api/procurement/rfqs")
-async def create_rfq(
+def create_rfq(
     title: str = Form(...),
     description: str = Form(""),
-    deadline: str = Form(...),
-    items_json: str = Form("[]"),
-    budget_code_id: Optional[int] = Form(None),
-    project_code_id: Optional[int] = Form(None),
+    service_id: Optional[int] = Form(None),
+    committee_id: Optional[int] = Form(None),
     debit_account_id: Optional[int] = Form(None),
     credit_account_id: Optional[int] = Form(None),
-    currency: str = Form("NGN"),
-    file: UploadFile = File(None),
-    current_user: User = Depends(get_current_active_user),
+    project_code_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin", "program")),
     db: Session = Depends(get_db),
 ):
-    if not current_user.company_id:
-        raise HTTPException(403, "Company users only")
-    if not (getattr(current_user, "can_access_vendors", False) or current_user.role in ("company_admin", "superadmin", "finance", "project_manager")):
-        raise HTTPException(403, "Procurement access required")
-    try:
-        dl = datetime.fromisoformat(deadline.replace("Z", "").replace("+00:00", ""))
-    except Exception:
-        try:
-            dl = datetime.strptime(deadline[:16], "%Y-%m-%dT%H:%M")
-        except Exception:
-            try:
-                dl = datetime.strptime(deadline[:10], "%Y-%m-%d").replace(hour=23, minute=59)
-            except Exception:
-                raise HTTPException(400, "Invalid deadline format")
-    try:
-        try:
-            rno = _rfq_no(db, current_user.company_id)
-        except NameError:
-            n = db.query(RFQ).filter(RFQ.company_id == current_user.company_id).count() + 1
-            rno = f"RFQ-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
-        att = None
-        if file and file.filename:
-            content = await file.read()
-            if len(content) > 25 * 1024 * 1024:
-                raise HTTPException(400, "RFQ attachment max 25MB")
-            ext = Path(file.filename).suffix.lower() or ".bin"
-            fname = f"rfq_{secrets.token_hex(6)}{ext}"
-            (UPLOADS_DIR / fname).write_bytes(content)
-            att = f"/static/uploads/{fname}"
-        if not budget_code_id or not debit_account_id or not credit_account_id:
-            raise HTTPException(400, "Budget code, debit account and credit account are required when raising an RFQ")
-        rfq = RFQ(
-            company_id=current_user.company_id,
-            rfq_no=rno,
-            title=title.strip(), description=description or "", deadline=dl,
-            status="open", created_by=current_user.id,
-            attachment_path=att,
-            budget_code_id=budget_code_id, project_code_id=project_code_id,
-            debit_account_id=debit_account_id, credit_account_id=credit_account_id,
-            currency=(currency or "NGN")[:10],
-        )
-        db.add(rfq)
-        db.commit()
-        db.refresh(rfq)
-        import json as _json
-        try:
-            items = _json.loads(items_json or "[]")
-        except Exception:
-            items = []
-        for i, it in enumerate(items):
-            db.add(RFQLineItem(
-                rfq_id=rfq.id,
-                description=str(it.get("description") or "Item"),
-                quantity=float(it.get("quantity") or 1),
-                unit=str(it.get("unit") or "unit"),
-                conditions=str(it.get("conditions") or ""),
-                sort_order=i,
-            ))
-        db.commit()
-        audit(db, current_user.company_id, current_user, "RFQ_CREATE", rfq.rfq_no)
-        return {
-            "id": rfq.id, "rfq_no": rfq.rfq_no, "title": rfq.title,
-            "description": rfq.description, "deadline": rfq.deadline.isoformat() if rfq.deadline else None,
-            "status": rfq.status, "attachment_path": rfq.attachment_path,
-        }
-    except HTTPException:
-        raise
-    except Exception as ex:
-        db.rollback()
-        raise HTTPException(500, f"Could not create RFQ: {ex}")
-
-
-@app.get("/api/procurement/rfqs/{rfq_id}")
-def get_rfq(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    links = db.query(RFQQuoteLink).filter(RFQQuoteLink.rfq_id == rfq.id).all()
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq.id).all()
-    members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq.id).all()
-    scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq.id).all()
-    pos = db.query(PurchaseOrder).filter(PurchaseOrder.rfq_id == rfq.id).all()
-    scored_member_ids = {s.member_id for s in scores}
-    pending_scorers = []
-    for m in members:
-        if m.user_id not in scored_member_ids:
-            u = db.query(User).filter(User.id == m.user_id).first()
-            pending_scorers.append({
-                "user_id": m.user_id,
-                "username": u.username if u else None,
-                "full_name": (u.full_name if u else None) or (u.username if u else str(m.user_id)),
-                "email": u.email if u else None,
-            })
-    base = _public_base()
-    return {
-        "rfq": rfq,
-        "pending_scorers": pending_scorers,
-        "links": [{
-            "id": L.id, "token": L.token, "vendor_name": L.vendor_name, "vendor_email": L.vendor_email,
-            "status": L.status, "expires_at": L.expires_at.isoformat() if L.expires_at else None,
-            "url": f"{base}/quote/{L.token}" if base else f"/quote/{L.token}",
-        } for L in links],
-        "quotes": quotes,
-        "committee": [{
-            "id": m.id, "user_id": m.user_id, "role_label": m.role_label,
-            "name": (db.query(User).filter(User.id == m.user_id).first() or User()).full_name
-                or (db.query(User).filter(User.id == m.user_id).first() or User()).username,
-        } for m in members],
-        "scores": scores,
-        "purchase_orders": pos,
-    }
-
-
-@app.post("/api/procurement/rfqs/{rfq_id}/invite")
-def create_quote_link(
-    rfq_id: int,
-    vendor_name: str = Form(...),
-    vendor_email: str = Form(""),
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    if rfq.status not in ("open",):
-        raise HTTPException(400, "RFQ is not open for invites")
-    if rfq.deadline < datetime.utcnow():
-        rfq.status = "closed"
-        db.commit()
-        raise HTTPException(400, "RFQ deadline has passed")
-    token = secrets.token_urlsafe(24)
-    link = RFQQuoteLink(
-        company_id=current_user.company_id, rfq_id=rfq.id, token=token,
-        vendor_name=vendor_name, vendor_email=vendor_email,
-        status="pending", expires_at=rfq.deadline,
+    n = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == current_user.company_id).count() + 1
+    row = ProcurementRFQ(
+        company_id=current_user.company_id,
+        rfq_no=f"RFQ-{n:04d}",
+        title=title, description=description, service_id=service_id,
+        committee_id=committee_id,
+        requesting_officer_id=current_user.id,
+        debit_account_id=debit_account_id, credit_account_id=credit_account_id,
+        project_code_id=project_code_id, created_by=current_user.id, status="open",
     )
-    db.add(link)
-    db.commit()
-    db.refresh(link)
-    base = _public_base()
-    url = f"{base}/quote/{token}" if base else f"/quote/{token}"
-    audit(db, current_user.company_id, current_user, "RFQ_INVITE", f"{rfq.rfq_no} → {vendor_name}")
-    return {"id": link.id, "token": token, "url": url, "expires_at": link.expires_at.isoformat(), "vendor_name": vendor_name}
+    db.add(row); db.commit(); db.refresh(row)
+    return row
 
 
-# ---- Public quote form (no auth) ----
-@app.get("/api/public/quote/{token}")
-def public_quote_get(token: str, db: Session = Depends(get_db)):
-    link = db.query(RFQQuoteLink).filter(RFQQuoteLink.token == token).first()
-    if not link:
-        raise HTTPException(404, "Invalid link")
-    rfq = db.query(RFQ).filter(RFQ.id == link.rfq_id).first()
-    co = db.query(Company).filter(Company.id == link.company_id).first()
-    items = db.query(RFQLineItem).filter(RFQLineItem.rfq_id == link.rfq_id).order_by(RFQLineItem.sort_order).all()
-    existing = db.query(RFQQuote).filter(RFQQuote.link_id == link.id).first()
-    expired = bool(link.expires_at and link.expires_at < datetime.utcnow())
-    received = link.status == "received"
-    valid = link.status == "pending" and not expired and not existing
-    msg = ""
-    if received:
-        msg = "Your submission has been received by the procurement officer. This link is closed."
-    elif existing:
-        msg = "You have already submitted a quotation. Awaiting procurement acknowledgement."
-    elif expired or link.status == "expired":
-        msg = "This quotation link has expired."
-    return {
-        "valid": valid,
-        "received": received,
-        "already_submitted": bool(existing),
-        "message": msg,
-        "rfq_no": rfq.rfq_no if rfq else "",
-        "title": rfq.title if rfq else "",
-        "description": rfq.description if rfq else "",
-        "deadline": rfq.deadline.isoformat() if rfq and rfq.deadline else None,
-        "conditions": rfq.description if rfq else "",
-        "vendor_name": link.vendor_name,
-        "vendor_email": link.vendor_email,
-        "company_label": (co.name if co else "Organisation"),
-        "attachment_path": getattr(rfq, "attachment_path", None) if rfq else None,
-        "items": [{"id": it.id, "description": it.description, "quantity": it.quantity, "unit": it.unit, "conditions": it.conditions} for it in items],
-    }
+@app.get("/api/procurement/rfqs/{rid}/quotes")
+def list_quotes(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    return db.query(ProcurementQuote).filter(
+        ProcurementQuote.company_id == current_user.company_id, ProcurementQuote.rfq_id == rid
+    ).order_by(ProcurementQuote.final_score.desc()).all()
 
 
-@app.post("/api/public/quote/{token}")
-async def public_quote_submit(
-    token: str,
-    vendor_name: str = Form(...),
-    vendor_email: str = Form(""),
-    vendor_phone: str = Form(""),
-    amount: float = Form(0),
+@app.post("/api/procurement/rfqs/{rid}/quotes")
+def submit_quote(
+    rid: int,
+    vendor_id: Optional[int] = Form(None),
+    vendor_name: str = Form(""),
+    amount: float = Form(...),
+    tax_amount: float = Form(0),
+    delivery_days: int = Form(0),
     notes: str = Form(""),
-    cac_number: str = Form(""),
-    tax_clearance: str = Form(""),
-    qualification: str = Form(""),
-    bank_name: str = Form(""),
-    bank_account: str = Form(""),
-    bank_account_name: str = Form(""),
-    consent_capable: str = Form("false"),
-    validity_days: int = Form(30),
-    lines_json: str = Form("[]"),
-    file: UploadFile = File(None),
-    db: Session = Depends(get_db),
-):
-    link = db.query(RFQQuoteLink).filter(RFQQuoteLink.token == token).first()
-    if not link:
-        raise HTTPException(404, "Invalid link")
-    if link.status != "pending" or (link.expires_at and link.expires_at < datetime.utcnow()):
-        raise HTTPException(400, "This link is no longer accepting submissions")
-    if db.query(RFQQuote).filter(RFQQuote.link_id == link.id).first():
-        raise HTTPException(400, "Quote already submitted")
-    if consent_capable.lower() not in ("true", "1", "yes", "on"):
-        raise HTTPException(400, "You must consent that you are ready and able to provide the goods/services")
-    att = None
-    if file and file.filename:
-        content = await file.read()
-        # practical limit 25MB (browser uploads; 500MB is not viable for typical hosting)
-        if len(content) > 25 * 1024 * 1024:
-            raise HTTPException(400, "Attachment max 25MB")
-        ext = Path(file.filename).suffix.lower()
-        if ext not in (".pdf", ".png", ".jpg", ".jpeg"):
-            raise HTTPException(400, "Upload PDF or image of letter-head quotation")
-        fname = f"quote_{link.id}_{secrets.token_hex(4)}{ext}"
-        (UPLOADS_DIR / fname).write_bytes(content)
-        att = f"/static/uploads/{fname}"
-    quote = RFQQuote(
-        company_id=link.company_id, rfq_id=link.rfq_id, link_id=link.id,
-        vendor_name=vendor_name or link.vendor_name,
-        vendor_email=vendor_email or link.vendor_email,
-        vendor_phone=vendor_phone, amount=amount, notes=notes,
-        validity_days=validity_days, attachment_path=att, status="submitted",
-        cac_number=cac_number, tax_clearance=tax_clearance, qualification=qualification,
-        bank_name=bank_name, bank_account=bank_account, bank_account_name=bank_account_name,
-        consent_capable=True,
-    )
-    link.status = "submitted"
-    existing = db.query(Vendor).filter(Vendor.company_id == link.company_id, Vendor.name == quote.vendor_name).first()
-    if not existing:
-        db.add(Vendor(
-            company_id=link.company_id, vendor_number=f"V-RFQ-{link.id}", name=quote.vendor_name,
-            description=f"CAC:{cac_number} Tax:{tax_clearance}", amount=amount,
-            cac_number=cac_number or "", tax_clearance=tax_clearance or "",
-            bank=bank_name or "",
-        ))
-    db.add(quote)
-    db.commit()
-    db.refresh(quote)
-    import json as _json
-    try:
-        qlines = _json.loads(lines_json or "[]")
-    except Exception:
-        qlines = []
-    total_lines = 0.0
-    for L in qlines:
-        qty = float(L.get("quantity") or 1)
-        uc = float(L.get("unit_cost") or 0)
-        amt = float(L.get("amount") or qty * uc)
-        total_lines += amt
-        try:
-            db.add(RFQQuoteLine(
-                quote_id=quote.id, description=L.get("description") or "",
-                quantity=qty, unit=L.get("unit") or "unit", unit_cost=uc, amount=amt,
-            ))
-        except Exception:
-            pass
-    if total_lines > 0:
-        quote.amount = total_lines
-    db.commit()
-    return {"message": "Quotation submitted. Await procurement acknowledgement that your submission was received.", "quote_id": quote.id}
-
-
-@app.post("/api/procurement/quotes/{quote_id}/receive")
-def mark_quote_received(quote_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    q = db.query(RFQQuote).filter(RFQQuote.id == quote_id, RFQQuote.company_id == current_user.company_id).first()
-    if not q:
-        raise HTTPException(404, "Quote not found")
-    q.status = "received"
-    q.received_at = datetime.utcnow()
-    if q.link_id:
-        link = db.query(RFQQuoteLink).filter(RFQQuoteLink.id == q.link_id).first()
-        if link:
-            link.status = "received"
-            link.received_at = datetime.utcnow()
-            link.received_by = current_user.id
-            # expire link
-            link.expires_at = datetime.utcnow()
-    db.commit()
-    audit(db, current_user.company_id, current_user, "QUOTE_RECEIVED", f"quote {quote_id}")
-    return {"message": "Marked received. Vendor link now shows acknowledgement and is closed."}
-
-
-@app.post("/api/procurement/rfqs/{rfq_id}/committee")
-def add_committee_member(
-    rfq_id: int,
-    user_id: int = Form(...),
-    role_label: str = Form("Member"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
     if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    u = db.query(User).filter(User.id == user_id, User.company_id == current_user.company_id).first()
-    if not u:
-        raise HTTPException(400, "User not in company")
-    m = RFQCommitteeMember(company_id=current_user.company_id, rfq_id=rfq_id, user_id=user_id, role_label=role_label)
-    db.add(m)
+        raise HTTPException(404)
+    total = float(amount) + float(tax_amount or 0)
+    # system score: lower price ranks higher among quotes later recalculated
+    q = ProcurementQuote(
+        company_id=current_user.company_id, rfq_id=rid, vendor_id=vendor_id,
+        vendor_name=vendor_name, amount=amount, tax_amount=tax_amount, total_amount=total,
+        delivery_days=delivery_days, notes=notes, status="submitted",
+    )
+    db.add(q); db.commit(); db.refresh(q)
+    _rescore_rfq(db, rid)
+    return q
+
+
+def _rescore_rfq(db, rid):
+    quotes = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).all()
+    if not quotes:
+        return
+    totals = [q.total_amount or 0 for q in quotes]
+    mn, mx = min(totals), max(totals)
+    for q in quotes:
+        if mx > mn:
+            # cheaper = higher system score out of 40
+            price_score = 40 * (1 - ((q.total_amount or 0) - mn) / (mx - mn))
+        else:
+            price_score = 40.0
+        q.system_score = round(price_score, 2)
+        q.final_score = round((q.system_score or 0) + (q.committee_score or 0), 2)
+        db.add(q)
     db.commit()
-    db.refresh(m)
+
+
+@app.post("/api/procurement/quotes/{qid}/committee-score")
+def committee_score(
+    qid: int,
+    score: float = Form(...),  # 0-60
+    current_user: User = Depends(require_roles("finance", "company_admin", "program")),
+    db: Session = Depends(get_db),
+):
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404)
+    q.committee_score = max(0, min(60, float(score)))
+    q.final_score = round((q.system_score or 0) + (q.committee_score or 0), 2)
+    q.status = "scored"
+    db.add(q); db.commit()
+    _rescore_rfq(db, q.rfq_id)
+    return {"ok": True, "final_score": q.final_score}
+
+
+@app.post("/api/procurement/rfqs/{rid}/award")
+def award_rfq(
+    rid: int,
+    quote_id: int = Form(...),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == quote_id, ProcurementQuote.rfq_id == rid).first()
+    if not rfq or not q:
+        raise HTTPException(404)
+    for other in db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).all():
+        other.status = "winner" if other.id == quote_id else "rejected"
+        db.add(other)
+    rfq.status = "awarded"
+    db.add(rfq)
+    # post commitment if accounts set
+    if rfq.debit_account_id and rfq.credit_account_id and (q.total_amount or 0) > 0:
+        post_double_entry(
+            db, current_user.company_id, current_user.id, "vendor", q.vendor_id,
+            f"Award {rfq.rfq_no}", q.vendor_name or rfq.title,
+            rfq.debit_account_id, rfq.credit_account_id, q.total_amount, rfq.project_code_id,
+        )
+    db.commit()
+    return {"ok": True, "message": f"Awarded to {q.vendor_name}"}
+
+
+@app.get("/api/finance/coa/options")
+def coa_options(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Lightweight list for all dropdowns: id, label with code."""
+    rows = db.query(ChartOfAccount).filter(
+        ChartOfAccount.company_id == current_user.company_id,
+        ChartOfAccount.is_active == True,
+    ).order_by(ChartOfAccount.code).all()
+    return [{"id": a.id, "code": a.code, "name": a.name, "type": a.account_type,
+             "label": f"{a.code} — {a.name} ({a.account_type})"} for a in rows]
+
+
+
+# ===================== COMMITTEE + PO + ARCHIVES =====================
+@app.get("/api/procurement/committees")
+def list_committees(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(ProcurementCommittee).filter(
+        ProcurementCommittee.company_id == current_user.company_id, ProcurementCommittee.is_active == True
+    ).order_by(ProcurementCommittee.name).all()
+    out = []
+    for c in rows:
+        members = db.query(ProcurementCommitteeMember).filter(
+            ProcurementCommitteeMember.committee_id == c.id, ProcurementCommitteeMember.is_active == True
+        ).all()
+        out.append({
+            "id": c.id, "name": c.name, "description": c.description or "",
+            "members": [{"id": m.id, "name": m.member_name, "role": m.role_title, "user_id": m.user_id} for m in members],
+        })
+    return out
+
+
+@app.post("/api/procurement/committees")
+def create_committee(
+    name: str = Form(...), description: str = Form(""),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    c = ProcurementCommittee(company_id=current_user.company_id, name=name, description=description)
+    db.add(c); db.commit(); db.refresh(c)
+    return c
+
+
+@app.post("/api/procurement/committees/{cid}/members")
+def add_committee_member(
+    cid: int,
+    member_name: str = Form(...),
+    role_title: str = Form("Member"),
+    user_id: Optional[int] = Form(None),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    c = db.query(ProcurementCommittee).filter(ProcurementCommittee.id == cid, ProcurementCommittee.company_id == current_user.company_id).first()
+    if not c:
+        raise HTTPException(404)
+    m = ProcurementCommitteeMember(committee_id=cid, member_name=member_name, role_title=role_title, user_id=user_id)
+    db.add(m); db.commit(); db.refresh(m)
     return m
 
 
-@app.post("/api/procurement/quotes/{quote_id}/score")
-def score_quote(
-    quote_id: int,
+@app.post("/api/procurement/quotes/{qid}/member-score")
+def member_score_quote(
+    qid: int,
+    member_id: int = Form(...),
     score: float = Form(...),
-    comments: str = Form(""),
+    comment: str = Form(""),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    if score < 0 or score > 100:
-        raise HTTPException(400, "Score must be 0–100")
-    q = db.query(RFQQuote).filter(RFQQuote.id == quote_id, RFQQuote.company_id == current_user.company_id).first()
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
     if not q:
-        raise HTTPException(404, "Quote not found")
-    # must be committee member or admin
-    is_member = db.query(RFQCommitteeMember).filter(
-        RFQCommitteeMember.rfq_id == q.rfq_id, RFQCommitteeMember.user_id == current_user.id
-    ).first()
-    if not is_member and current_user.role not in ("company_admin", "superadmin"):
-        raise HTTPException(403, "Only committee members can score")
-    existing = db.query(RFQQuoteScore).filter(
-        RFQQuoteScore.quote_id == quote_id, RFQQuoteScore.member_id == current_user.id
-    ).first()
+        raise HTTPException(404)
+    sc = max(0.0, min(60.0, float(score)))
+    existing = db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id == qid, QuoteMemberScore.member_id == member_id).first()
     if existing:
-        raise HTTPException(400, "You have already scored this quote. Only one score per committee member is allowed.")
-    db.add(RFQQuoteScore(
-        company_id=current_user.company_id, rfq_id=q.rfq_id, quote_id=quote_id,
-        member_id=current_user.id, score=score, comments=comments,
-    ))
+        existing.score = sc; existing.comment = comment; existing.scored_at = datetime.utcnow()
+        db.add(existing)
+    else:
+        db.add(QuoteMemberScore(quote_id=qid, member_id=member_id, score=sc, comment=comment))
     db.commit()
-    # recompute average
-    all_s = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == quote_id).all()
-    q.total_score = sum(s.score for s in all_s) / max(len(all_s), 1)
-    q.status = "scored"
-    db.commit()
-    return {"message": "Score saved", "total_score": q.total_score}
+    # average member scores → committee_score (0-60)
+    scores = db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id == qid).all()
+    if scores:
+        avg = sum(s.score or 0 for s in scores) / len(scores)
+        q.committee_score = round(avg, 2)
+        q.final_score = round((q.system_score or 0) + (q.committee_score or 0), 2)
+        q.status = "scored"
+        db.add(q); db.commit()
+    return {"ok": True, "committee_score": q.committee_score, "final_score": q.final_score, "members_scored": len(scores)}
 
 
-@app.post("/api/procurement/rfqs/{rfq_id}/declare-winner")
-def declare_winner(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).all()
-    if not quotes:
-        raise HTTPException(400, "No quotes to evaluate")
-    winner = max(quotes, key=lambda q: (q.total_score or 0, -(q.amount or 0)))
-    for q in quotes:
-        q.status = "winner" if q.id == winner.id else "rejected"
-    rfq.winner_quote_id = winner.id
+@app.post("/api/procurement/rfqs/{rid}/award-with-po")
+def award_with_po(
+    rid: int,
+    quote_id: int = Form(...),
+    current_user: User = Depends(require_roles("finance", "company_admin")),
+    db: Session = Depends(get_db),
+):
+    """Committee approval: award winner, create PO for requesting officer review."""
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == quote_id, ProcurementQuote.rfq_id == rid).first()
+    if not rfq or not q:
+        raise HTTPException(404)
+    for other in db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).all():
+        other.status = "winner" if other.id == quote_id else "rejected"
+        db.add(other)
     rfq.status = "awarded"
-    token = secrets.token_urlsafe(24)
+    db.add(rfq)
+    n = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == current_user.company_id).count() + 1
     po = PurchaseOrder(
         company_id=current_user.company_id,
-        po_no=_po_no(db, current_user.company_id),
-        rfq_id=rfq.id, quote_id=winner.id,
-        vendor_name=winner.vendor_name, vendor_email=winner.vendor_email or "",
-        amount=winner.amount, description=f"PO from {rfq.rfq_no}: {rfq.title}",
-        status="pending_vendor", result_token=token, created_by=current_user.id,
+        po_no=f"PO-{n:04d}",
+        rfq_id=rid, quote_id=quote_id,
+        vendor_id=q.vendor_id, vendor_name=q.vendor_name or "",
+        amount=q.total_amount or q.amount or 0,
+        description=f"{rfq.title} — {rfq.rfq_no}",
+        status="pending_officer",
+        requesting_officer_id=rfq.requesting_officer_id or rfq.created_by,
+        debit_account_id=rfq.debit_account_id, credit_account_id=rfq.credit_account_id,
+        project_code_id=rfq.project_code_id,
+        approved_at=datetime.utcnow(), created_by=current_user.id,
     )
-    db.add(po)
-    # result links for all vendors (share on each line)
-    for q in quotes:
-        if q.id == winner.id:
-            continue
-        # losers can still get a token via quote-level result - store on a simple field via new PO only for winner
-        pass
-    db.commit()
-    db.refresh(po)
-    audit(db, current_user.company_id, current_user, "RFQ_WINNER", f"{rfq.rfq_no} → {winner.vendor_name}")
-    base = _public_base()
-    return {
-        "winner": winner,
-        "purchase_order": po,
-        "result_url": f"{base}/po-result/{token}" if base else f"/po-result/{token}",
-        "message": f"Winner: {winner.vendor_name} (score {winner.total_score})",
-    }
+    db.add(po); db.commit(); db.refresh(po)
+    return {"ok": True, "po_id": po.id, "po_no": po.po_no, "message": f"PO {po.po_no} created for requesting officer"}
 
 
-
-@app.delete("/api/procurement/rfqs/{rfq_id}")
-def delete_rfq(rfq_id: int, current_user: User = Depends(require_roles("company_admin", "superadmin")), db: Session = Depends(get_db)):
-    """Delete an RFQ opened by mistake (only if no quotes received yet)."""
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).count()
-    if quotes > 0:
-        raise HTTPException(400, "Cannot delete RFQ that already has vendor quotes. Close it instead.")
-    # cascade clean
-    db.query(RFQQuoteLink).filter(RFQQuoteLink.rfq_id == rfq_id).delete()
-    db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id).delete()
-    db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.rfq_id == rfq_id).delete()
-    db.query(RFQLineItem).filter(RFQLineItem.rfq_id == rfq_id).delete()
-    db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq_id).delete()
-    db.delete(rfq)
-    db.commit()
-    audit(db, current_user.company_id, current_user, "RFQ_DELETE", f"Deleted RFQ id={rfq_id}")
-    return {"message": "RFQ deleted"}
-
-
-@app.delete("/api/procurement/rfqs/{rfq_id}/links/{link_id}")
-def delete_rfq_link(rfq_id: int, link_id: int, current_user: User = Depends(require_roles("company_admin", "superadmin")), db: Session = Depends(get_db)):
-    """Revoke a vendor quote link generated by mistake."""
-    link = db.query(RFQQuoteLink).filter(
-        RFQQuoteLink.id == link_id, RFQQuoteLink.rfq_id == rfq_id
-    ).first()
-    if not link:
-        raise HTTPException(404, "Link not found")
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    # prevent delete if quote already submitted on this link
-    existing_q = db.query(RFQQuote).filter(RFQQuote.link_id == link_id).first()
-    if existing_q:
-        raise HTTPException(400, "Cannot delete link: a quote was already submitted")
-    db.delete(link)
-    db.commit()
-    audit(db, current_user.company_id, current_user, "RFQ_LINK_DELETE", f"link={link_id} rfq={rfq_id}")
-    return {"message": "Quote link revoked"}
-
-
-
-@app.get("/api/procurement/rfqs/{rfq_id}/committee-report/pdf")
-def committee_report_pdf(rfq_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    from reports import company_header, table_style
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from io import BytesIO
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    co, code, sym = _company_and_currency(db, current_user)
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id).order_by(RFQQuote.total_score.desc()).all()
-    members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id).all()
-    scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.rfq_id == rfq_id).all()
-    winner = next((q for q in quotes if q.status == "winner"), None)
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
-    story = []
-    styles = company_header(story, co, "PROCUREMENT COMMITTEE EVALUATION REPORT", code, sym)
-    story.append(Paragraph(f"<b>1. INTRODUCTION</b>", styles["ReportH"]))
-    story.append(Paragraph(
-        f"This report presents the evaluation of quotations received under RFQ <b>{rfq.rfq_no}</b> — {rfq.title}. "
-        f"A total of <b>{len(quotes)}</b> vendor(s) submitted bids. The procurement committee assessed each submission "
-        f"and awarded scores. The vendor with the highest average score is recommended for award.",
-        styles["Cell"],
-    ))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("<b>2. COMMITTEE MEMBERS</b>", styles["ReportH"]))
-    for m in members:
-        u = db.query(User).filter(User.id == m.user_id).first()
-        story.append(Paragraph(f"• {(u.full_name or u.username) if u else m.user_id} — {m.role_label}", styles["Cell"]))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("<b>3. BID EVALUATION SUMMARY</b>", styles["ReportH"]))
-    data = [["Vendor", "Amount", "Avg Score", "Status", "Email"]]
-    for q in quotes:
-        data.append([q.vendor_name, f"{sym}{q.amount:,.2f}", f"{(q.total_score or 0):.1f}", q.status, q.vendor_email or ""])
-    t = Table(data, colWidths=[45*mm, 30*mm, 25*mm, 25*mm, 45*mm])
-    t.setStyle(table_style())
-    story.append(t)
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("<b>4. DETAILED SCORES & COMMENTS</b>", styles["ReportH"]))
-    for q in quotes:
-        story.append(Paragraph(f"<b>{q.vendor_name}</b> (Amount {sym}{q.amount:,.2f})", styles["Cell"]))
-        for s in scores:
-            if s.quote_id == q.id:
-                mu = db.query(User).filter(User.id == s.member_id).first()
-                nm = (mu.full_name or mu.username) if mu else str(s.member_id)
-                story.append(Paragraph(f"&nbsp;&nbsp;{nm}: score {s.score} — {s.comments or 'No comment'}", styles["Small"]))
-    story.append(Spacer(1, 8))
-    story.append(Paragraph("<b>5. RECOMMENDATION</b>", styles["ReportH"]))
-    if winner:
-        story.append(Paragraph(
-            f"The committee recommends <b>{winner.vendor_name}</b> with average score <b>{(winner.total_score or 0):.1f}</b> "
-            f"and quoted amount <b>{sym}{winner.amount:,.2f}</b> for award of the purchase order.",
-            styles["Cell"],
-        ))
-    else:
-        story.append(Paragraph("Winner not yet declared.", styles["Cell"]))
-    story.append(Spacer(1, 16))
-    story.append(Paragraph("___________________________ &nbsp;&nbsp; ___________________________", styles["Small"]))
-    story.append(Paragraph("Committee Chair &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Procurement Officer", styles["Small"]))
-    doc.build(story)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename=committee_{rfq.rfq_no}.pdf"})
-
-
-
-@app.get("/api/procurement/pos/{po_id}/pdf")
-def purchase_order_pdf(po_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    from reports import company_header, table_style
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from io import BytesIO
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
-    if not po:
-        raise HTTPException(404, "PO not found")
-    co, code, sym = _company_and_currency(db, current_user)
-    quote = db.query(RFQQuote).filter(RFQQuote.id == po.quote_id).first() if po.quote_id else None
-    qlines = []
-    if quote:
-        try:
-            qlines = db.query(RFQQuoteLine).filter(RFQQuoteLine.quote_id == quote.id).all()
-        except Exception:
-            qlines = []
-    buf = BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=14*mm, rightMargin=14*mm, topMargin=12*mm, bottomMargin=12*mm)
-    story = []
-    styles = company_header(story, co, "PURCHASE ORDER", code, sym)
-    story.append(Paragraph(f"<b>PO No:</b> {po.po_no} &nbsp;&nbsp; <b>Date:</b> {po.created_at.strftime('%Y-%m-%d') if po.created_at else ''}", styles["Cell"]))
-    story.append(Paragraph(f"<b>Vendor:</b> {po.vendor_name}", styles["Cell"]))
-    story.append(Paragraph(f"<b>Status:</b> {po.status}", styles["Cell"]))
-    story.append(Spacer(1, 8))
-    if qlines:
-        data = [["Description", "Qty", "Unit", "Unit cost", "Amount"]]
-        for L in qlines:
-            data.append([L.description or "", f"{L.quantity or 0}", L.unit or "", f"{L.unit_cost or 0:,.2f}", f"{L.amount or 0:,.2f}"])
-        data.append(["", "", "", "TOTAL", f"{po.amount or 0:,.2f}"])
-    else:
-        data = [["Description", "Amount"], [po.description or "Supply as per RFQ quotation", f"{sym}{po.amount or 0:,.2f}"]]
-    t = Table(data, colWidths=[70*mm, 25*mm, 25*mm, 30*mm, 30*mm][:len(data[0])])
-    t.setStyle(table_style())
-    story.append(t)
-    story.append(Spacer(1, 16))
-    story.append(Paragraph("Authorised for and on behalf of the organisation.", styles["Small"]))
-    story.append(Paragraph("_________________________ &nbsp;&nbsp;&nbsp; _________________________", styles["Small"]))
-    story.append(Paragraph("Procurement &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; Approving officer", styles["Small"]))
-    doc.build(story)
-    buf.seek(0)
-    return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename={po.po_no}.pdf"})
-
-
-@app.get("/api/procurement/pos")
+@app.get("/api/procurement/purchase-orders")
 def list_pos(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(PurchaseOrder).filter(PurchaseOrder.company_id == current_user.company_id).order_by(PurchaseOrder.id.desc()).all()
+    q = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == current_user.company_id)
+    # officers see theirs; finance/admin see all
+    if current_user.role not in ("finance", "company_admin", "superadmin"):
+        q = q.filter(
+            (PurchaseOrder.requesting_officer_id == current_user.id) | (PurchaseOrder.created_by == current_user.id)
+        )
+    rows = q.order_by(PurchaseOrder.id.desc()).all()
+    return [{
+        "id": p.id, "po_no": p.po_no, "vendor_name": p.vendor_name, "amount": p.amount,
+        "description": p.description, "status": p.status, "rfq_id": p.rfq_id,
+        "payment_request_id": p.payment_request_id,
+        "created_at": str(p.created_at) if p.created_at else None,
+    } for p in rows]
 
 
-@app.get("/api/procurement/pos/{po_id}/result-link")
-def po_result_link(po_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
-    if not po:
-        raise HTTPException(404, "PO not found")
-    if not po.result_token:
-        po.result_token = secrets.token_urlsafe(24)
-        db.commit()
-    base = _public_base()
-    return {"url": f"{base}/po-result/{po.result_token}" if base else f"/po-result/{po.result_token}", "token": po.result_token}
-
-
-@app.get("/api/public/po-result/{token}")
-def public_po_result(token: str, db: Session = Depends(get_db)):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.result_token == token).first()
-    if not po:
-        raise HTTPException(404, "Invalid link")
-    return {
-        "po_no": po.po_no,
-        "vendor_name": po.vendor_name,
-        "amount": po.amount,
-        "description": po.description,
-        "status": po.status,
-        "vendor_response": po.vendor_response,
-        "successful": po.status in ("pending_vendor", "accepted", "sent_to_finance", "paid") and True,
-        "can_respond": po.status == "pending_vendor" and not po.vendor_response,
-    }
-
-
-@app.post("/api/public/po-result/{token}")
-def public_po_respond(token: str, response: str = Form(...), db: Session = Depends(get_db)):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.result_token == token).first()
-    if not po:
-        raise HTTPException(404, "Invalid link")
-    if po.status != "pending_vendor":
-        raise HTTPException(400, "This offer can no longer be accepted or rejected")
-    response = response.lower().strip()
-    if response not in ("accepted", "rejected"):
-        raise HTTPException(400, "response must be accepted or rejected")
-    po.vendor_response = response
-    po.vendor_response_at = datetime.utcnow()
-    po.status = "accepted" if response == "accepted" else "rejected"
-    db.commit()
-    return {"message": f"You have {response} the purchase order {po.po_no}", "status": po.status}
-
-
-@app.post("/api/procurement/pos/{po_id}/send-to-finance")
-def po_to_finance(
-    po_id: int,
-    debit_account_id: int = Form(...),
-    credit_account_id: int = Form(...),
-    project_code_id: Optional[int] = Form(None),
-    budget_code_id: Optional[int] = Form(None),
-    expense_code_id: Optional[int] = Form(None),
-    designated_approver_id: Optional[int] = Form(None),
+@app.post("/api/procurement/purchase-orders/{poid}/submit-payment")
+def po_submit_payment(
+    poid: int,
+    budget_code_id: int = Form(...),
+    expense_code_id: int = Form(...),
+    designated_approver_id: int = Form(...),
+    narration: str = Form(""),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
+    """Requesting officer reviews PO and submits into payment approval workflow."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == poid, PurchaseOrder.company_id == current_user.company_id).first()
     if not po:
-        raise HTTPException(404, "PO not found")
-    if po.status != "accepted":
-        raise HTTPException(400, "Vendor must accept the PO before sending to finance")
-    # need budget/expense - use first available if not provided
-    if not budget_code_id:
-        b = db.query(BudgetCode).filter(BudgetCode.company_id == current_user.company_id, BudgetCode.is_active == True).first()
-        budget_code_id = b.id if b else None
-    if not expense_code_id:
-        e = db.query(ExpenseCode).filter(ExpenseCode.company_id == current_user.company_id, ExpenseCode.is_active == True).first()
-        expense_code_id = e.id if e else None
-    if not budget_code_id or not expense_code_id:
-        raise HTTPException(400, "Company must have at least one budget code and expense code")
-    if not designated_approver_id:
-        designated_approver_id = current_user.id
+        raise HTTPException(404)
+    if po.status not in ("pending_officer",):
+        raise HTTPException(400, "PO already submitted or closed")
+    if po.requesting_officer_id and po.requesting_officer_id != current_user.id and current_user.role not in ("finance", "company_admin"):
+        raise HTTPException(403, "Only the requesting officer can submit this PO")
+    n = db.query(PaymentRequest).filter(PaymentRequest.company_id == current_user.company_id).count() + 1
+    words = amount_to_words(po.amount or 0)
     pr = PaymentRequest(
         company_id=current_user.company_id,
-        request_no=next_request_no(db, current_user.company_id),
+        request_no=f"PR-PO-{n:04d}",
         requester_id=current_user.id,
         budget_code_id=budget_code_id,
         expense_code_id=expense_code_id,
-        amount=po.amount,
-        narration=f"PO {po.po_no}: {po.description}",
-        payee_name=po.vendor_name,
-        project_code_id=project_code_id,
-        debit_account_id=debit_account_id,
-        credit_account_id=credit_account_id,
+        project_code_id=po.project_code_id,
+        amount=po.amount or 0,
+        amount_in_words=words,
+        narration=narration or po.description or "",
+        payee_name=po.vendor_name or "",
+        debit_account_id=po.debit_account_id,
+        credit_account_id=po.credit_account_id,
         designated_approver_id=designated_approver_id,
         status="submitted",
     )
-    db.add(pr)
-    db.commit()
-    db.refresh(pr)
+    db.add(pr); db.commit(); db.refresh(pr)
+    po.status = "submitted_payment"
     po.payment_request_id = pr.id
-    po.debit_account_id = debit_account_id
-    po.credit_account_id = credit_account_id
-    po.project_code_id = project_code_id
-    po.status = "sent_to_finance"
-    db.add(PaymentApprovalLog(
-        payment_request_id=pr.id, actor_id=current_user.id, action="submit",
-        comment=f"From PO {po.po_no}", amount_snapshot=pr.amount,
-        debit_account_id=debit_account_id, credit_account_id=credit_account_id,
-    ))
-    db.commit()
-    audit(db, current_user.company_id, current_user, "PO_TO_FINANCE", f"{po.po_no} → {pr.request_no}")
-    return {"message": "Purchase order sent to finance as payment request", "payment_request_id": pr.id, "request_no": pr.request_no}
-
-
-@app.get("/api/reports/po/{po_id}/pdf")
-def po_pdf(po_id: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
-    if not po:
-        raise HTTPException(404, "Not found")
-    co, code, sym = _company_and_currency(db, current_user)
-    headers = ["Field", "Value"]
-    rows = [
-        ["PO No", po.po_no], ["Vendor", po.vendor_name], ["Amount", f"{sym}{po.amount:,.2f}"],
-        ["Amount in words", amount_to_words(po.amount)], ["Description", po.description or ""],
-        ["Status", po.status], ["Vendor response", po.vendor_response or "Pending"],
-    ]
-    buf = build_pdf(co, "PURCHASE ORDER", headers, rows, code, sym, False)
-    return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": f"attachment; filename={po.po_no}.pdf"})
-
-
-
-
-@app.post("/api/procurement/rfqs/{rfq_id}/committee-invite")
-def committee_invite(
-    rfq_id: int,
-    user_id: Optional[int] = Form(None),
-    invite_name: str = Form(""),
-    invite_email: str = Form(""),
-    password: str = Form(""),
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    """Invite existing staff by user_id, or register a new committee user and return scoring link."""
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id, RFQ.company_id == current_user.company_id).first()
-    if not rfq:
-        raise HTTPException(404, "RFQ not found")
-    uid = user_id
-    if not uid and invite_email:
-        # create user with limited access
-        uname = (invite_email.split("@")[0] + "_cm")[:40]
-        existing = db.query(User).filter(User.company_id == current_user.company_id, User.username == uname).first()
-        if existing:
-            uid = existing.id
-        else:
-            u = User(
-                company_id=current_user.company_id, username=uname, email=invite_email,
-                full_name=invite_name or uname,
-                hashed_password=get_password_hash(password or secrets.token_urlsafe(8)),
-                role="user", is_active=True, can_access_reports=True, can_access_vendors=True,
-            )
-            db.add(u)
-            db.commit()
-            db.refresh(u)
-            uid = u.id
-    if not uid:
-        raise HTTPException(400, "Provide user_id or invite_email")
-    if not db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id, RFQCommitteeMember.user_id == uid).first():
-        db.add(RFQCommitteeMember(company_id=current_user.company_id, rfq_id=rfq_id, user_id=uid, role_label="Committee"))
-    tok = secrets.token_urlsafe(24)
-    inv = RFQCommitteeInvite(
-        company_id=current_user.company_id, rfq_id=rfq_id, user_id=uid,
-        invite_email=invite_email, invite_name=invite_name, token=tok,
-    )
-    db.add(inv)
-    db.commit()
-    base = _public_base() if "_public_base" in dir() else ""
-    try:
-        base = _public_base()
-    except Exception:
-        base = ""
-    url = f"{base}/committee-score/{tok}" if base else f"/committee-score/{tok}"
-    return {"token": tok, "url": url, "user_id": uid, "message": "Share this scoring link with the committee member"}
-
-
-def _try_auto_award(db, rfq_id, company_id):
-    members = db.query(RFQCommitteeMember).filter(RFQCommitteeMember.rfq_id == rfq_id).all()
-    if not members:
-        return None
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == rfq_id, RFQQuote.status.in_(["submitted", "received", "scored"])).all()
-    if not quotes:
-        return None
-    for q in quotes:
-        scores = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id).all()
-        if len(scores) < len(members):
-            return None  # not all members scored every quote
-    # all scored — declare winner
-    for q in quotes:
-        sc = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id).all()
-        q.total_score = sum(s.score for s in sc) / len(sc) if sc else 0
-        q.status = "scored"
-    winner = max(quotes, key=lambda x: (x.total_score or 0, -(x.amount or 0)))
-    for q in quotes:
-        q.status = "winner" if q.id == winner.id else "rejected"
-    rfq = db.query(RFQ).filter(RFQ.id == rfq_id).first()
-    rfq.status = "awarded"
-    rfq.winner_quote_id = winner.id
-    token = secrets.token_urlsafe(24)
-    po = PurchaseOrder(
-        company_id=company_id, po_no=f"PO-{datetime.utcnow().strftime('%Y%m')}-{db.query(PurchaseOrder).filter(PurchaseOrder.company_id==company_id).count()+1:04d}",
-        rfq_id=rfq_id, quote_id=winner.id, vendor_name=winner.vendor_name,
-        amount=winner.amount, currency=winner.currency or "NGN",
-        description=f"PO from {rfq.rfq_no}: {rfq.title}",
-        status="pending_vendor", result_token=token,
-    )
     db.add(po)
+    db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=current_user.id, action="submit_from_po", comment=f"From {po.po_no}"))
     db.commit()
-    db.refresh(po)
-    return po
+    return {"ok": True, "payment_request_id": pr.id, "request_no": pr.request_no, "message": "Submitted to payment approval workflow"}
 
 
-@app.get("/api/public/committee-score/{token}")
-def public_committee_get(token: str, db: Session = Depends(get_db)):
-    inv = db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.token == token).first()
-    if not inv:
-        raise HTTPException(404, "Invalid committee link")
-    rfq = db.query(RFQ).filter(RFQ.id == inv.rfq_id).first()
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == inv.rfq_id).all()
-    out_q = []
+@app.get("/api/procurement/rfqs/{rid}/committee-report")
+def committee_report(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    quotes = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rid).order_by(ProcurementQuote.final_score.desc()).all()
+    committee = None
+    members = []
+    if getattr(rfq, "committee_id", None):
+        committee = db.query(ProcurementCommittee).filter(ProcurementCommittee.id == rfq.committee_id).first()
+        members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == rfq.committee_id).all()
+    detail = []
     for q in quotes:
-        my = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id, RFQQuoteScore.member_id == inv.user_id).first()
-        out_q.append({
-            "id": q.id, "vendor_name": q.vendor_name, "amount": q.amount,
-            "notes": q.notes, "attachment_path": q.attachment_path,
-            "cac_number": getattr(q, "cac_number", ""), "tax_clearance": getattr(q, "tax_clearance", ""),
-            "qualification": getattr(q, "qualification", ""),
-            "my_score": my.score if my else None, "my_comments": my.comments if my else "",
-            "locked": my is not None,
+        ms = db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id == q.id).all()
+        detail.append({
+            "quote_id": q.id, "vendor": q.vendor_name, "total": q.total_amount,
+            "system_score": q.system_score, "committee_score": q.committee_score,
+            "final_score": q.final_score, "status": q.status,
+            "member_scores": [{"member_id": s.member_id, "score": s.score, "comment": s.comment} for s in ms],
         })
     return {
-        "rfq_no": rfq.rfq_no if rfq else "", "title": rfq.title if rfq else "",
-        "submitted_all": inv.submitted, "quotes": out_q, "member_name": inv.invite_name,
+        "rfq": {"id": rfq.id, "rfq_no": rfq.rfq_no, "title": rfq.title, "status": rfq.status},
+        "committee": {"id": committee.id, "name": committee.name} if committee else None,
+        "members": [{"id": m.id, "name": m.member_name, "role": m.role_title} for m in members],
+        "quotes": detail,
     }
 
 
-
-@app.post("/api/public/committee-score/{token}/submit-all")
-async def public_committee_score_all(token: str, request: dict, db: Session = Depends(get_db)):
-    """Body: { scores: [{quote_id, score, comments}] } — one submission for all vendors."""
-    inv = db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.token == token).first()
-    if not inv:
-        raise HTTPException(404, "Invalid link")
-    if inv.submitted:
-        raise HTTPException(400, "You have already submitted scores for this RFQ")
-    scores_in = (request or {}).get("scores") or []
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == inv.rfq_id).all()
-    qids = {q.id for q in quotes}
-    if not quotes:
-        raise HTTPException(400, "No quotes to score")
-    submitted_map = {}
-    for s in scores_in:
-        try:
-            qid = int(s.get("quote_id"))
-            sc = float(s.get("score"))
-        except Exception:
-            raise HTTPException(400, "Invalid score entry")
-        if qid not in qids:
-            raise HTTPException(400, f"Unknown quote {qid}")
-        if sc is None or sc < 0 or sc > 100:
-            raise HTTPException(400, "Each score must be between 0 and 100 (no empty or negative scores)")
-        submitted_map[qid] = {"score": sc, "comments": s.get("comments") or ""}
-    missing = [q.id for q in quotes if q.id not in submitted_map]
-    if missing:
-        raise HTTPException(400, "Score every vendor before submitting (empty scores not allowed)")
-    for qid, val in submitted_map.items():
-        existing = db.query(RFQQuoteScore).filter(
-            RFQQuoteScore.quote_id == qid, RFQQuoteScore.member_id == inv.user_id
-        ).first()
-        if existing:
-            raise HTTPException(400, "Scores already locked for this member")
-        db.add(RFQQuoteScore(
-            company_id=inv.company_id, rfq_id=inv.rfq_id, quote_id=qid,
-            member_id=inv.user_id, score=val["score"], comments=val["comments"],
-        ))
-    inv.submitted = True
-    db.commit()
-    # refresh averages
-    for q in quotes:
-        scs = db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id).all()
-        if scs:
-            q.total_score = sum(x.score for x in scs) / len(scs)
-            q.status = "scored"
-    db.commit()
-    po = _try_auto_award(db, inv.rfq_id, inv.company_id)
-    msg = "All scores submitted and locked."
-    if po:
-        msg += f" Winner auto-declared. PO {po.po_no} created."
-    return {"message": msg, "auto_awarded": bool(po), "po_no": getattr(po, "po_no", None)}
-
-
-
-@app.post("/api/public/committee-score/{token}")
-def public_committee_score(
-    token: str,
-    quote_id: int = Form(...),
-    score: float = Form(...),
-    comments: str = Form(""),
-    db: Session = Depends(get_db),
-):
-    inv = db.query(RFQCommitteeInvite).filter(RFQCommitteeInvite.token == token).first()
-    if not inv:
-        raise HTTPException(404, "Invalid link")
-    if score < 0 or score > 100:
-        raise HTTPException(400, "Score 0-100")
-    existing = db.query(RFQQuoteScore).filter(
-        RFQQuoteScore.quote_id == quote_id, RFQQuoteScore.member_id == inv.user_id
-    ).first()
-    if existing:
-        raise HTTPException(400, "Score already submitted and cannot be edited")
-    db.add(RFQQuoteScore(
-        company_id=inv.company_id, rfq_id=inv.rfq_id, quote_id=quote_id,
-        member_id=inv.user_id, score=score, comments=comments,
-    ))
-    db.commit()
-    # mark invite submitted if all quotes scored
-    quotes = db.query(RFQQuote).filter(RFQQuote.rfq_id == inv.rfq_id).all()
-    done = True
-    for q in quotes:
-        if not db.query(RFQQuoteScore).filter(RFQQuoteScore.quote_id == q.id, RFQQuoteScore.member_id == inv.user_id).first():
-            done = False
-            break
-    if done:
-        inv.submitted = True
-        db.commit()
-        po = _try_auto_award(db, inv.rfq_id, inv.company_id)
-        if po:
-            return {"message": "Scores complete. Winner auto-declared and PO created.", "auto_awarded": True, "po_no": po.po_no}
-    return {"message": "Score submitted (locked)", "auto_awarded": False}
-
-
-
-
-@app.get("/api/reports/bank-recon/pdf")
-def bank_recon_pdf_std(
-    account_id: int = None,
-    statement_balance: float = 0,
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    from ifrs_statements import build_bank_recon
+@app.get("/api/procurement/rfqs/{rid}/committee-report/pdf")
+def committee_report_pdf(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    data = committee_report(rid, current_user, db)
     co, code, sym = _company_and_currency(db, current_user)
-    # book balance from ledger for cash account
-    book = 0.0
-    name = "Cash account"
-    if account_id:
-        acc = db.query(ChartOfAccount).filter(ChartOfAccount.id == account_id, ChartOfAccount.company_id == current_user.company_id).first()
-        if acc:
-            name = f"{acc.code} — {acc.name}"
-            lines = db.query(JournalEntry).filter(JournalEntry.company_id == current_user.company_id, JournalEntry.account_id == account_id).all()
-            book = sum((l.debit or 0) - (l.credit or 0) for l in lines)
-    # outstanding from unticked recon items if any
-    outstanding = deposits = 0.0
-    try:
-        # optional: sum unticked credits/debits if BankReconState exists
-        pass
-    except Exception:
-        pass
-    period = datetime.utcnow().strftime("%B %Y")
-    buf = build_bank_recon(co, name, statement_balance or book, book, outstanding, deposits, 0, 0, period)
+    headers = ["Vendor", "Total", "System 40", "Committee 60", "Final", "Status"]
+    rows = [[q["vendor"], f"{q['total']:,.2f}", q["system_score"], q["committee_score"], q["final_score"], q["status"]] for q in data["quotes"]]
+    foot = [
+        f"RFQ: {data['rfq']['rfq_no']} — {data['rfq']['title']}",
+        f"Committee: {(data['committee'] or {}).get('name') or '—'}",
+        "Member scores form the committee component (average, max 60).",
+    ]
+    buf = build_pdf(co, "PROCUREMENT COMMITTEE REPORT", headers, rows, code, sym, True, foot,
+                    kpis=_dashboard_kpis(db, current_user.company_id))
     return StreamingResponse(buf, media_type="application/pdf",
-                             headers={"Content-Disposition": "attachment; filename=bank_reconciliation.pdf"})
+                             headers={"Content-Disposition": f"attachment; filename=committee_report_{data['rfq']['rfq_no']}.pdf"})
 
 
-
-
-@app.get("/api/income")
-def list_income(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(IncomeReceipt).filter(IncomeReceipt.company_id == current_user.company_id).order_by(IncomeReceipt.id.desc()).all()
-
-
-@app.post("/api/income")
-def create_income(
-    received_from: str = Form(...),
-    amount: float = Form(0),
-    narration: str = Form(""),
-    project_code_id: Optional[int] = Form(None),
-    income_account_id: Optional[int] = Form(None),
-    cash_account_id: Optional[int] = Form(None),
-    lines_json: str = Form("[]"),
+@app.post("/api/procurement/rfqs/{rid}/documents")
+async def upload_proc_doc(
+    rid: int,
+    file: UploadFile = File(...),
+    doc_type: str = Form("support"),
     current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ):
-    import json as _json
-    lines = _json.loads(lines_json or "[]")
-    total = sum(float(L.get("amount") or (float(L.get("quantity") or 0) * float(L.get("unit_cost") or 0))) for L in lines) if lines else float(amount)
-    if total <= 0:
-        raise HTTPException(400, "Amount must be greater than zero")
-    n = db.query(IncomeReceipt).filter(IncomeReceipt.company_id == current_user.company_id).count() + 1
-    rno = f"INC-{datetime.utcnow().strftime('%Y%m')}-{n:04d}"
-    rec = IncomeReceipt(
-        company_id=current_user.company_id, receipt_no=rno, received_from=received_from,
-        amount=total, narration=narration, project_code_id=project_code_id,
-        income_account_id=income_account_id, cash_account_id=cash_account_id,
-        status="draft", created_by=current_user.id,
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    data = await file.read()
+    dest_dir = ARCHIVE_DIR / f"rfq_{rid}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = f"{secrets.token_hex(4)}_{file.filename}"
+    path = dest_dir / safe
+    path.write_bytes(data)
+    doc = ProcurementDocument(
+        company_id=current_user.company_id, rfq_id=rid, filename=file.filename,
+        stored_path=str(path), content_type=file.content_type or "application/octet-stream",
+        size_bytes=len(data), doc_type=doc_type, uploaded_by=current_user.id,
     )
-    db.add(rec)
-    db.commit()
-    db.refresh(rec)
-    for i, L in enumerate(lines):
-        amt = float(L.get("amount") or (float(L.get("quantity") or 0) * float(L.get("unit_cost") or 0)))
-        db.add(IncomeReceiptLine(
-            income_receipt_id=rec.id, description=L.get("description") or "Income line",
-            quantity=float(L.get("quantity") or 1), unit_cost=float(L.get("unit_cost") or 0),
-            amount=amt, sort_order=i,
-        ))
-    db.commit()
-    return rec
+    db.add(doc); db.commit(); db.refresh(doc)
+    return {"id": doc.id, "filename": doc.filename}
 
 
-@app.post("/api/income/{rid}/post")
-def post_income(rid: int, current_user: User = Depends(require_roles("finance", "company_admin")), db: Session = Depends(get_db)):
-    rec = db.query(IncomeReceipt).filter(IncomeReceipt.id == rid, IncomeReceipt.company_id == current_user.company_id).first()
-    if not rec or rec.status == "posted":
-        raise HTTPException(400, "Invalid receipt")
-    if not rec.income_account_id or not rec.cash_account_id:
-        raise HTTPException(400, "Set debit (cash/bank) and credit (income) accounts before posting")
-    # Dr Cash, Cr Income
-    post_double_entry(
-        db, current_user.company_id, current_user.id,
-        "income", rec.id,
-        f"Income {rec.receipt_no}: {rec.received_from}",
-        rec.narration or "",
-        rec.cash_account_id, rec.income_account_id, rec.amount,
-        project_code_id=rec.project_code_id,
-    )
-    rec.status = "posted"
-    rec.posted_at = datetime.utcnow()
-    db.commit()
-    audit(db, current_user.company_id, current_user, "INCOME_POST", rec.receipt_no)
-    return {"message": "Income posted to ledger", "status": rec.status}
-
-
-
-
-@app.get("/api/todos")
-def list_todos(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    return db.query(TodoItem).filter(TodoItem.user_id == current_user.id).order_by(TodoItem.done, TodoItem.due_at).all()
-
-
-@app.post("/api/todos")
-def create_todo(
-    title: str = Form(...),
-    due_at: str = Form(""),
-    current_user: User = Depends(get_current_active_user),
-    db: Session = Depends(get_db),
-):
-    due = None
-    if due_at:
+@app.get("/api/procurement/rfqs/{rid}/archive.zip")
+def procurement_archive(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """ZIP of all documents for this procurement + committee report PDF."""
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        docs = db.query(ProcurementDocument).filter(ProcurementDocument.rfq_id == rid).all()
+        for d in docs:
+            p = Path(d.stored_path)
+            if p.exists():
+                zf.write(p, arcname=f"documents/{d.filename}")
+        # embed committee report
         try:
-            due = datetime.fromisoformat(due_at.replace("Z", ""))
-        except Exception:
-            try:
-                due = datetime.strptime(due_at[:16], "%Y-%m-%dT%H:%M")
-            except Exception:
-                due = None
-    item = TodoItem(company_id=current_user.company_id, user_id=current_user.id, title=title.strip(), due_at=due)
-    db.add(item)
-    db.commit()
-    db.refresh(item)
-    return item
+            from reports import build_pdf
+            data = committee_report(rid, current_user, db)
+            co, code, sym = _company_and_currency(db, current_user)
+            headers = ["Vendor", "Total", "System", "Committee", "Final", "Status"]
+            rows = [[q["vendor"], q["total"], q["system_score"], q["committee_score"], q["final_score"], q["status"]] for q in data["quotes"]]
+            pdfbuf = build_pdf(co, "COMMITTEE REPORT", headers, rows, code, sym, True, kpis=_dashboard_kpis(db, current_user.company_id))
+            zf.writestr(f"committee_report_{rfq.rfq_no}.pdf", pdfbuf.getvalue())
+        except Exception as e:
+            zf.writestr("committee_report_error.txt", str(e))
+        # PO if any
+        pos = db.query(PurchaseOrder).filter(PurchaseOrder.rfq_id == rid).all()
+        for po in pos:
+            zf.writestr(f"po_{po.po_no}.txt", f"PO {po.po_no}\nVendor: {po.vendor_name}\nAmount: {po.amount}\nStatus: {po.status}\n{po.description}")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip",
+                             headers={"Content-Disposition": f"attachment; filename=procurement_archive_{rfq.rfq_no}.zip"})
 
 
-@app.post("/api/todos/{tid}/toggle")
-def toggle_todo(tid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    item = db.query(TodoItem).filter(TodoItem.id == tid, TodoItem.user_id == current_user.id).first()
-    if not item:
-        raise HTTPException(404, "Not found")
-    item.done = not item.done
-    item.done_at = datetime.utcnow() if item.done else None
-    db.commit()
-    return item
+@app.get("/api/payments/{pid}/archive.zip")
+def payment_archive(pid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """ZIP: payment voucher PDF + all support attachments."""
+    pr = db.query(PaymentRequest).filter(PaymentRequest.id == pid, PaymentRequest.company_id == current_user.company_id).first()
+    if not pr:
+        raise HTTPException(404)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # voucher
+        try:
+            co, code, sym = _company_and_currency(db, current_user)
+            approvers = {}
+            if pr.program_approved_by:
+                u = db.query(User).filter(User.id == pr.program_approved_by).first()
+                approvers["Program"] = (u.full_name or u.username) if u else str(pr.program_approved_by)
+            if pr.finance_approved_by:
+                u = db.query(User).filter(User.id == pr.finance_approved_by).first()
+                approvers["Finance"] = (u.full_name or u.username) if u else str(pr.finance_approved_by)
+            vbuf = build_payment_voucher_pdf(co, pr, approvers, code, sym, _dashboard_kpis(db, current_user.company_id))
+            zf.writestr(f"voucher_{pr.request_no}.pdf", vbuf.getvalue())
+        except Exception as e:
+            zf.writestr("voucher_error.txt", str(e))
+        atts = db.query(PaymentAttachment).filter(PaymentAttachment.payment_request_id == pid).all()
+        for a in atts:
+            p = Path(a.stored_path)
+            if p.exists():
+                zf.writestr(f"attachments/{a.filename}", p.read_bytes())
+            else:
+                # try relative
+                p2 = UPLOADS_DIR / Path(a.stored_path).name
+                if p2.exists():
+                    zf.writestr(f"attachments/{a.filename}", p2.read_bytes())
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/zip",
+                             headers={"Content-Disposition": f"attachment; filename=payment_archive_{pr.request_no}.zip"})
 
 
-@app.delete("/api/todos/{tid}")
-def delete_todo(tid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    item = db.query(TodoItem).filter(TodoItem.id == tid, TodoItem.user_id == current_user.id).first()
-    if not item:
-        raise HTTPException(404, "Not found")
-    db.delete(item)
-    db.commit()
-    return {"message": "Deleted"}
+@app.get("/manifest.webmanifest")
+@app.get("/manifest.json")
+def pwa_manifest():
+    for p in (
+        STATIC_DIR / "manifest.webmanifest",
+        FRONTEND_DIR / "manifest.webmanifest",
+        STATIC_DIR / "manifest.json",
+    ):
+        if p.exists():
+            return FileResponse(str(p), media_type="application/manifest+json", headers={"Cache-Control": "no-cache"})
+    raise HTTPException(404, "manifest not found")
 
 
-@app.get("/api/company/currency")
-def get_currency(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
-    co = db.query(Company).filter(Company.id == current_user.company_id).first() if current_user.company_id else None
-    return {
-        "code": getattr(co, "reporting_currency_code", None) or "NGN",
-        "symbol": getattr(co, "reporting_currency_symbol", None) or "₦",
-    }
+@app.get("/sw.js")
+def pwa_sw():
+    for p in (STATIC_DIR / "sw.js", FRONTEND_DIR / "sw.js"):
+        if p.exists():
+            return FileResponse(str(p), media_type="application/javascript", headers={"Cache-Control": "no-cache", "Service-Worker-Allowed": "/"})
+    raise HTTPException(404, "sw not found")
 
 
-@app.post("/api/company/currency")
-def set_currency(
-    code: str = Form(...),
-    symbol: str = Form(...),
-    current_user: User = Depends(require_roles("company_admin", "finance", "superadmin")),
-    db: Session = Depends(get_db),
-):
-    co = db.query(Company).filter(Company.id == current_user.company_id).first()
-    if not co:
-        raise HTTPException(404, "Company not found")
-    co.reporting_currency_code = code[:10]
-    co.reporting_currency_symbol = symbol[:8]
-    db.commit()
-    return {"code": co.reporting_currency_code, "symbol": co.reporting_currency_symbol}
+@app.head("/manifest.webmanifest")
+@app.head("/manifest.json")
+def pwa_manifest_head():
+    return pwa_manifest()
 
 
+# ===== SPA (must be last routes) =====
 
-FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
-
-def _public_html(name: str):
-    p = FRONTEND_DIR / "public" / name
-    if p.exists():
-        return FileResponse(str(p), media_type="text/html")
-    return None
-
-@app.get("/quote/{token}")
-def vendor_quote_portal(token: str):
-    """Standalone vendor quotation portal (no ERP chrome)."""
-    resp = _public_html("quote.html")
-    if resp:
-        return resp
-    raise HTTPException(404, "Vendor portal page missing on server")
-
-@app.get("/po-result/{token}")
-def vendor_po_result_portal(token: str):
-    resp = _public_html("po-result.html")
-    if resp:
-        return resp
-    raise HTTPException(404, "Result page missing")
-
-@app.get("/committee-score/{token}")
-def committee_score_portal(token: str):
-    resp = _public_html("committee-score.html")
-    if resp:
-        return resp
-    raise HTTPException(404, "Committee page missing")
 
 @app.get("/")
 def serve_index():
     index = FRONTEND_DIR / "index.html"
     return FileResponse(index) if index.exists() else {"msg": "API up"}
 
-@app.get("/styles.css")
-def serve_css():
-    p = FRONTEND_DIR / "styles.css"
-    return FileResponse(p) if p.exists() else HTTPException(404)
-
-@app.get("/app.js")
-def serve_js():
-    p = FRONTEND_DIR / "app.js"
-    return FileResponse(p) if p.exists() else HTTPException(404)
-
 @app.get("/{full_path:path}")
 def serve_frontend(full_path: str):
-    if full_path.startswith("api/"):
-        raise HTTPException(404)
-    # never swallow vendor portals
-    if full_path.startswith("quote/") or full_path.startswith("po-result/") or full_path.startswith("committee-score/"):
-        raise HTTPException(404, "Use the dedicated portal route")
+    if full_path.startswith("api/") or full_path.startswith("static/"):
+        raise HTTPException(404, "Not found")
     fp = FRONTEND_DIR / full_path
     if fp.exists() and fp.is_file():
         return FileResponse(fp)
     index = FRONTEND_DIR / "index.html"
     return FileResponse(index) if index.exists() else HTTPException(404)
+
