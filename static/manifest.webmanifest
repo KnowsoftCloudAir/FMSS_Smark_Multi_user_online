@@ -2,7 +2,7 @@
   "id": "/",
   "name": "Knowsoft FMSS Multi-User Online",
   "short_name": "FMSS",
-  "description": "Knowsoft FMSS Multi-User Online \u2014 professional financial management, workflow approvals, assets, inventory, bank reconciliation, procurement and project reporting for multi-company teams.",
+  "description": "Knowsoft FMSS Multi-User Online (Knowsoft ERP) \u2014 financial management, workflow approvals, assets, inventory, bank reconciliation, procurement and project reporting for multi-company teams.",
   "start_url": "/?source=pwa",
   "scope": "/",
   "display": "standalone",
@@ -12,8 +12,8 @@
     "browser"
   ],
   "orientation": "any",
-  "background_color": "#0a1a20",
-  "theme_color": "#0b6e6e",
+  "background_color": "#0055ee",
+  "theme_color": "#0066ff",
   "lang": "en",
   "dir": "ltr",
   "categories": [
@@ -60,12 +60,6 @@
       "purpose": "any"
     },
     {
-      "src": "/static/icons/maskable-192.png",
-      "sizes": "192x192",
-      "type": "image/png",
-      "purpose": "maskable"
-    },
-    {
       "src": "/static/icons/icon-384.png",
       "sizes": "384x384",
       "type": "image/png",
@@ -76,6 +70,12 @@
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/static/icons/maskable-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
     },
     {
       "src": "/static/icons/maskable-512.png",
