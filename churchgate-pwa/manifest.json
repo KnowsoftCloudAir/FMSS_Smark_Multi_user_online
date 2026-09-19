@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Eleon — Knowsoft Presentation Partner",
+  "name": "Konwsoft ERP",
   "short_name": "Eleon",
-  "description": "Design and present slides with Eleon, your Knowsoft presentation partner.",
+  "description": "Get your controls under control.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

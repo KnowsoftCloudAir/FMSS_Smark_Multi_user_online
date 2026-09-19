@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Platform admin</h2>
+
+<div class="card" style="margin-bottom:1rem;">
+  <h3>User tracking</h3>
+  <p style="margin:0.25rem 0;">Demo users: <strong>{{ demo_count or 0 }}</strong> · Registered: <strong>{{ reg_count or 0 }}</strong> · Total logins: <strong>{{ total_logins or 0 }}</strong></p>
+  <a class="btn btn-sm" href="/ks-admin/users">Open full user tracking</a>
+</div>
+
+
+{% if request.query_params.get('approved_code') %}
+<div class="alert alert-success">
+  Approved <strong>{{ request.query_params.get('biz') }}</strong><br/>
+  One-time login code: <code style="font-size:1.3rem;letter-spacing:0.12em;">{{ request.query_params.get('approved_code') }}</code><br/>
+  {% if request.query_params.get('email') %}Email to use at login: <strong>{{ request.query_params.get('email') }}</strong><br/>{% endif %}
+  User must open Sign in → enter that email + this code (password optional on first login).
+</div>
+{% endif %}
+{% if request.query_params.get('reset_code') %}
+<div class="alert alert-success">User reset code for <strong>{{ request.query_params.get('for_user') }}</strong>: <code>{{ request.query_params.get('reset_code') }}</code></div>
+{% endif %}
+{% if request.query_params.get('admin_reset_code') %}
+<div class="alert alert-success">Admin password code: <code>{{ request.query_params.get('admin_reset_code') }}</code> (use within 2 hours)</div>
+{% endif %}
+{% if request.query_params.get('pwd') == 'ok' %}
+<div class="alert alert-success">Admin password updated.</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:1rem;border:2px solid var(--accent);">
+  <h3 style="margin-top:0;">① Subscription price &amp; duration (per shop)</h3>
+  <p style="color:var(--muted);font-size:0.85rem;">Demo and all approved businesses. Set price and days, click Save.</p>
+  {% for b in approved or [] %}
+  <form method="post" action="/ks-admin/business/{{ b.id }}/subscription"
+        style="border-bottom:1px solid var(--card-border);padding:0.75rem 0;display:grid;grid-template-columns:1.5fr 120px 100px auto;gap:0.5rem;align-items:end;">
+    <div>
+      <strong>{{ b.name }}</strong><br/>
+      <small style="color:var(--muted)">{{ b.email }} · {{ b.subscription_status }} · id {{ b.id }}</small>
+    </div>
+    <div class="form-group" style="margin:0;">
+      <label>Price (₦)</label>
+      <input type="number" step="1" name="subscription_price" value="{{ b.subscription_price or b.monthly_fee or 5000 }}" required />
+    </div>
+    <div class="form-group" style="margin:0;">
+      <label>Days</label>
+      <input type="number" name="subscription_days" value="{{ b.subscription_days or 30 }}" min="1" required />
+    </div>
+    <button class="btn btn-sm" type="submit">Save</button>
+  </form>
+  {% else %}
+  <p style="color:var(--muted);">No approved businesses. Approve a registration first.</p>
+  {% endfor %}
+</div>
+
+<div class="card" style="margin-bottom:1rem;border:2px solid var(--accent2);">
+  <h3 style="margin-top:0;">② Change admin password</h3>
+  <form method="post" action="/ks-admin/self-reset-code" style="margin-bottom:0.75rem;">
+    <button class="btn btn-sm btn-secondary" type="submit">Step 1 — Generate reset code</button>
+  </form>
+  <form method="post" action="/ks-admin/admin-password">
+    <div class="form-group"><label>Code from step 1</label><input name="code" required autocomplete="off"/></div>
+    <div class="form-group"><label>New password</label><input type="password" name="new_password" required minlength="6"/></div>
+    <div class="form-group"><label>Confirm</label><input type="password" name="confirm" required/></div>
+    <button class="btn btn-sm" type="submit">Step 2 — Update admin password</button>
+  </form>
+</div>
+
+<div class="card" style="margin-bottom:1rem;">
+  <h3>③ User password codes</h3>
+  <table class="data">
+    <thead><tr><th>User</th><th>Email</th><th></th></tr></thead>
+    <tbody>
+    {% for u in all_users or [] %}
+      <tr>
+        <td>{{ u.username }}</td>
+        <td>{{ u.email }}</td>
+        <td>
+          <form method="post" action="/ks-admin/issue-reset-code/{{ u.id }}" style="display:inline;">
+            <button class="btn btn-sm" type="submit">Issue code</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}<tr><td colspan="3">No users</td></tr>{% endfor %}
+    </tbody>
+  </table>
+</div>
+
+<div class="card" style="margin-bottom:1rem;">
+  <h3>App download link</h3>
+  <form method="post" action="/ks-admin/app-link">
+    <div class="form-group"><input name="app_download_url" value="{{ settings.app_download_url if settings else '' }}" placeholder="https://play.google.com/..." style="width:100%;"/></div>
+    <button class="btn btn-sm" type="submit">Save download link</button>
+  </form>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <h3>Pending businesses</h3>
+    {% for b in pending %}
+    <div style="border-bottom:1px solid var(--card-border);padding:0.6rem 0;">
+      <strong>{{ b.name }}</strong><br/><small>{{ b.email }} · {{ b.phone }}</small>
+      <form method="post" action="/ks-admin/approve/{{ b.id }}" style="margin-top:0.35rem;"><button class="btn btn-sm" type="submit">Approve &amp; generate code</button></form>
+    </div>
+    {% else %}<p style="color:var(--muted);">No pending</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h3>Approved</h3>
+    {% for b in approved %}
+    <div style="padding:0.5rem 0;border-bottom:1px solid var(--card-border);">
+      <strong>{{ b.name }}</strong> · {{ b.subscription_status }}
+      <br/><small>{{ b.email }} · code used: {{ b.approval_code_used }}</small>
+      {% if b.approval_code and not b.approval_code_used %}
+      <div style="margin:0.25rem 0;font-weight:800;letter-spacing:0.08em;">Login code: {{ b.approval_code }}</div>
+      {% endif %}
+      <form method="post" action="/ks-admin/reissue-code/{{ b.id }}" style="display:inline;margin-right:0.35rem;">
+        <button class="btn btn-sm btn-secondary" type="submit">Re-issue login code</button>
+      </form>
+      <form method="post" action="/ks-admin/suspend/{{ b.id }}" style="display:inline;">
+        <button class="btn btn-danger btn-sm" type="submit">Suspend</button>
+      </form>
+    </div>
+    {% else %}<p style="color:var(--muted);">None</p>{% endfor %}
+  </div>
+  <div class="card">
+    <h3>Subscription payments</h3>
+    {% for s in subs %}
+    <div style="padding:0.4rem 0;">Biz #{{ s.business_id }} · ₦{{ s.amount }} · {{ s.reference }}
+      <form method="post" action="/ks-admin/subscription/{{ s.id }}/confirm" style="display:inline;"><button class="btn btn-sm" type="submit">Confirm</button></form>
+    </div>
+    {% else %}<p style="color:var(--muted);">None pending</p>{% endfor %}
+  </div>
+</div>
+
+<div class="card" style="margin-top:1rem;">
+  <h3>User feedback</h3>
+  {% for f in feedbacks or [] %}
+  <div style="border-bottom:1px solid var(--card-border);padding:0.5rem 0;font-size:0.9rem;">
+    <strong>{{ f.name }}</strong> · {{ f.email }} · {{ f.created_at }}<br/>{{ f.message }}
+  </div>
+  {% else %}<p style="color:var(--muted);">No feedback yet</p>{% endfor %}
+</div>
+{% endblock %}
+
+<div class="card" style="margin-top:1rem;">
+  <h3>Recent user activity</h3>
+  {% for a in activities or [] %}
+  <div style="border-bottom:1px solid var(--card-border);padding:0.4rem 0;font-size:0.85rem;">
+    <strong>{{ a.username }}</strong> · {{ a.action }} · {{ a.detail }}
+    <span style="color:var(--muted);float:right;">{{ a.created_at }}</span>
+  </div>
+  {% else %}<p style="color:var(--muted);">No activity yet</p>{% endfor %}
+</div>
