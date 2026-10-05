@@ -330,18 +330,31 @@ class Vendor(Base):
     vendor_number = Column(String(50), nullable=False)
     name = Column(String(200), nullable=False)
     address = Column(Text, default="")
+    contact_email = Column(String(150), default="")
+    contact_phone = Column(String(50), default="")
     cac_number = Column(String(100), default="")
-    experience = Column(String(100), default="")
-    tax_clearance = Column(String(50), default="")
+    experience_years = Column(Integer, default=0)  # min 3 for medical
+    similar_contracts_count = Column(Integer, default=0)  # min 2
+    tax_clearance = Column(String(50), default="")  # years or "valid"
     bank = Column(String(150), default="")
     reg_with_govt = Column(String(50), default="")
     audit_3yrs = Column(String(50), default="")
+    logistics_footprint = Column(Text, default="")  # warehouse / delivery to Benin City
+    nafdac_status = Column(String(50), default="")  # valid / pending
+    pcn_license = Column(String(100), default="")  # for Lot 2 pharma
+    iso_13485 = Column(Boolean, default=False)
+    cgm_p = Column(Boolean, default=False)
+    experience = Column(String(100), default="")  # legacy free-text
     description = Column(Text, default="")
     amount = Column(Float, default=0.0)
     score = Column(Float, default=0.0)
+    is_prequalified = Column(Boolean, default=False)
+    eligibility_status = Column(String(30), default="pending")  # pending | eligible | ineligible
     debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
     credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Soft-delete for demo data
+    is_demo = Column(Boolean, default=False)
 
 
 class AssetAccountingEntry(Base):
@@ -450,26 +463,35 @@ class ProcurementService(Base):
 
 
 class ProcurementRFQ(Base):
-    """Request for quotation."""
+    """Request for quotation / LTA tender."""
     __tablename__ = "procurement_rfqs"
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     rfq_no = Column(String(50), nullable=False, index=True)
     title = Column(String(200), nullable=False)
+    lot = Column(String(50), default="")  # Lot 1 FP Commodities | Lot 2 Medical Consumables
     service_id = Column(Integer, ForeignKey("procurement_services.id"), nullable=True)
     committee_id = Column(Integer, ForeignKey("procurement_committees.id"), nullable=True)
     description = Column(Text, default="")
-    status = Column(String(30), default="open")  # open | evaluation | awarded | closed
+    technical_specs = Column(Text, default="")  # JSON or text from TOR annexes
+    evaluation_method = Column(String(50), default="lowest_price_technically_compliant")  # or QCBS
+    status = Column(String(30), default="open")  # open | preliminary | technical_eval | financial_eval | awarded | closed
+    submission_deadline = Column(DateTime, nullable=True)
+    delivery_location = Column(String(200), default="Benin City, Edo State, Nigeria")
+    min_shelf_life_months = Column(Integer, default=6)  # 6 for FP; 75% or 24m for consumables
+    is_lta = Column(Boolean, default=True)
+    lta_duration_months = Column(Integer, default=18)
     requesting_officer_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     debit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
     credit_account_id = Column(Integer, ForeignKey("chart_of_accounts.id"), nullable=True)
     project_code_id = Column(Integer, ForeignKey("project_codes.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    is_demo = Column(Boolean, default=False)
 
 
 class ProcurementQuote(Base):
-    """Vendor quotation against an RFQ."""
+    """Vendor bid / quotation against an RFQ. Mandatory docs + validation before accept."""
     __tablename__ = "procurement_quotes"
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
@@ -480,12 +502,24 @@ class ProcurementQuote(Base):
     tax_amount = Column(Float, default=0.0)
     total_amount = Column(Float, default=0.0)
     delivery_days = Column(Integer, default=0)
+    lead_time_weeks_larc = Column(Integer, default=12)  # for Implants/IUCDs
+    lead_time_weeks_other = Column(Integer, default=8)
     notes = Column(Text, default="")
+    # Evaluation stages (per TOR)
+    preliminary_pass = Column(Boolean, default=False)  # docs complete, signed forms
+    technical_pass = Column(Boolean, default=False)  # pass/fail on specs, NAFDAC, experience
+    technical_score = Column(Float, default=0.0)
+    financial_rank = Column(Integer, nullable=True)  # 1 = lowest among technical pass
     system_score = Column(Float, default=0.0)  # price/docs 40%
     committee_score = Column(Float, default=0.0)  # 60%
     final_score = Column(Float, default=0.0)
-    status = Column(String(30), default="submitted")  # submitted | scored | winner | rejected
+    status = Column(String(30), default="draft")  # draft | submitted | preliminary | technical | financial | winner | rejected
+    mandatory_docs_complete = Column(Boolean, default=False)
+    shelf_life_commitment = Column(Boolean, default=False)  # written commitment ≥6 months / 75%
+    manufacturer_auth = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+    submitted_at = Column(DateTime, nullable=True)
+    is_demo = Column(Boolean, default=False)
 
 
 class ProcurementCommittee(Base):
@@ -544,17 +578,72 @@ class PurchaseOrder(Base):
 
 
 class ProcurementDocument(Base):
-    """Archive documents attached to RFQ / PO / quote."""
+    """Archive / mandatory documents attached to RFQ / PO / quote / vendor / delivery."""
     __tablename__ = "procurement_documents"
     id = Column(Integer, primary_key=True, index=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
     rfq_id = Column(Integer, ForeignKey("procurement_rfqs.id"), nullable=True, index=True)
     po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=True, index=True)
-    quote_id = Column(Integer, ForeignKey("procurement_quotes.id"), nullable=True)
+    quote_id = Column(Integer, ForeignKey("procurement_quotes.id"), nullable=True, index=True)
+    vendor_id = Column(Integer, ForeignKey("vendors.id"), nullable=True, index=True)
+    delivery_id = Column(Integer, nullable=True, index=True)  # FK to goods_receipts.id (defined below)
     filename = Column(String(255), nullable=False)
     stored_path = Column(String(500), nullable=False)
-    content_type = Column(String(100), default="application/octet-stream")
+    content_type = Column(String(100), default="application/pdf")
     size_bytes = Column(Integer, default=0)
-    doc_type = Column(String(50), default="support")  # support | committee_report | po | other
+    # Mandatory types aligned to TORs:
+    # vendor: cac, tax_clearance, nafdac, maf, pcn_license, iso_cert, experience_letter, logistics_proof, sop_recall
+    # bid: technical_proposal, financial_proposal, shelf_life_commitment, manufacturer_auth, batch_docs
+    # delivery: packing_list, coa, expiry_docs, storage_guidance, grn
+    doc_type = Column(String(80), default="support")
+    is_mandatory = Column(Boolean, default=False)
+    is_verified = Column(Boolean, default=False)
+    verified_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     uploaded_by = Column(Integer, ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class GoodsReceipt(Base):
+    """Delivery acceptance – all conditions (shelf-life, quality, packing, guidance doc) must be met."""
+    __tablename__ = "goods_receipts"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    grn_no = Column(String(50), nullable=False, index=True)
+    delivery_date = Column(Date, default=date.today)
+    received_by = Column(String(150), default="")
+    store_location = Column(String(200), default="Benin City central store")
+    # Condition checks
+    quantities_ok = Column(Boolean, default=False)
+    package_integrity_ok = Column(Boolean, default=False)
+    shelf_life_ok = Column(Boolean, default=False)  # ≥6 months or 75%/24m
+    regulatory_docs_ok = Column(Boolean, default=False)
+    storage_guidance_received = Column(Boolean, default=False)
+    all_conditions_met = Column(Boolean, default=False)
+    rejection_reason = Column(Text, default="")
+    status = Column(String(30), default="pending")  # pending | accepted | rejected | partial
+    notes = Column(Text, default="")
+    accepted_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    accepted_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_demo = Column(Boolean, default=False)
+
+
+class ProcurementInvoice(Base):
+    """Final invoice from vendor after accepted GRN – flows to Finance for payment request."""
+    __tablename__ = "procurement_invoices"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    po_id = Column(Integer, ForeignKey("purchase_orders.id"), nullable=False, index=True)
+    grn_id = Column(Integer, ForeignKey("goods_receipts.id"), nullable=True)
+    invoice_no = Column(String(80), nullable=False)
+    invoice_date = Column(Date, default=date.today)
+    amount = Column(Float, default=0.0)
+    tax_amount = Column(Float, default=0.0)
+    total_amount = Column(Float, default=0.0)
+    status = Column(String(30), default="received")  # received | under_review | approved_for_payment | paid | disputed
+    payment_request_id = Column(Integer, ForeignKey("payment_requests.id"), nullable=True)
+    finance_notes = Column(Text, default="")
+    submitted_to_finance_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    is_demo = Column(Boolean, default=False)

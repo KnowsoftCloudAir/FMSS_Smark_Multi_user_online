@@ -21,10 +21,10 @@ Or use **Docker** with the included `Dockerfile`.
 ## Demo logins (seeded on startup)
 
 ```
-demo/program  / Program@Knowsoft1!
-demo/finance  / Finance@Knowsoft1!
-demo/admin    / Admin@Knowsoft1!
-superadmin    / Knowsoft@Super0160!
+demo/program  / Program@FMSS2026!
+demo/finance  / Finance@FMSS2026!
+demo/admin    / Admin@FMSS2026!
+superadmin    / SuperAdmin@FMSS2026!
 ```
 
 Company users use `company-slug/username`. Login page shows the program manager demo only.

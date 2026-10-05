@@ -36,14 +36,15 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta, date
 from typing import Optional, List, Dict, Any
 from pathlib import Path
+from werkzeug.utils import secure_filename
 import os, shutil, re, json, zipfile, io, csv, secrets
 
 from database import engine, get_db, Base
 from models import (
     User, Company, AuditLog, CompanySettings, PasswordResetToken,
     ChartOfAccount, BudgetCode, ExpenseCode, PaymentRequest, PaymentApprovalLog, Asset,
-    PaymentAttachment, ProjectCode, JournalEntry, InventoryItem, InventoryMovement,
-    Vendor, AssetAccountingEntry, ProcurementService, ProcurementRFQ, ProcurementQuote, ProcurementCommittee, ProcurementCommitteeMember, QuoteMemberScore, PurchaseOrder, ProcurementDocument, BankReconState, CorrectionRequest, BankStatementSession, StoredReport, PaymentLineItem, ProjectCode
+    PaymentAttachment, JournalEntry, InventoryItem, InventoryMovement,
+    Vendor, AssetAccountingEntry, ProcurementService, ProcurementRFQ, ProcurementQuote, ProcurementCommittee, ProcurementCommitteeMember, QuoteMemberScore, PurchaseOrder, ProcurementDocument, GoodsReceipt, ProcurementInvoice, BankReconState, CorrectionRequest, BankStatementSession, StoredReport, PaymentLineItem, ProjectCode
 )
 from schemas import (
     Token, UserCreate, UserUpdate, UserOut, CompanyRegister, CompanyOut, CompanyUpdate,
@@ -123,7 +124,7 @@ def init_defaults(db: Session):
             username="superadmin",
             email="superadmin@knowsoft.local",
             full_name="Platform Super Admin",
-            hashed_password=get_password_hash("Knowsoft@Super0160!"),
+            hashed_password=get_password_hash("SuperAdmin@FMSS2026!"),
             role="superadmin",
             is_active=True,
             can_access_finance=True,
@@ -136,7 +137,7 @@ def init_defaults(db: Session):
         )
         db.add(sa)
         db.commit()
-        print("✅ Superadmin: superadmin / Knowsoft@Super0160!")
+        print("✅ Superadmin: superadmin / SuperAdmin@FMSS2026!")
 
     demo = db.query(Company).filter(Company.slug == "demo").first()
     if not demo:
@@ -158,7 +159,7 @@ def init_defaults(db: Session):
             username="admin",
             email="admin@demo.local",
             full_name="Demo Company Admin",
-            hashed_password=get_password_hash("Admin@Knowsoft1!"),
+            hashed_password=get_password_hash("Admin@FMSS2026!"),
             role="company_admin",
             is_active=True,
             can_access_finance=True,
@@ -174,7 +175,7 @@ def init_defaults(db: Session):
             username="finance",
             email="finance@demo.local",
             full_name="Demo Finance Officer",
-            hashed_password=get_password_hash("Finance@Knowsoft1!"),
+            hashed_password=get_password_hash("Finance@FMSS2026!"),
             role="finance",
             is_active=True,
             can_access_finance=True,
@@ -187,7 +188,7 @@ def init_defaults(db: Session):
             username="program",
             email="program@demo.local",
             full_name="Demo Program Manager",
-            hashed_password=get_password_hash("Program@Knowsoft1!"),
+            hashed_password=get_password_hash("Program@FMSS2026!"),
             role="program",
             is_active=True,
             can_access_reports=True,
@@ -521,151 +522,169 @@ def init_defaults(db: Session):
                 ))
         db.commit()
 
-        # ---- Procurement: committee, services, RFQs at multiple stages ----
+        # ---- Procurement: CONTRAconnect-aligned robust LTA (Lot 1 FP + Lot 2 Consumables) ----
         cm = db.query(ProcurementCommittee).filter(ProcurementCommittee.company_id == demo.id).first()
         if not cm:
-            cm = ProcurementCommittee(company_id=demo.id, name="Evaluation Committee", description="Default procurement evaluation panel")
+            cm = ProcurementCommittee(company_id=demo.id, name="CONTRAconnect Evaluation Committee",
+                description="Pass/Fail technical then lowest-price among compliant bids (per TOR evaluation methodology)")
             db.add(cm); db.flush()
-            for mn, rt in [("Ada Chair", "Chair"), ("Bello Member", "Member"), ("Chidi Secretary", "Secretary")]:
+            for mn, rt in [("Dr. Ada Okoro", "Chair"), ("Engr. Bello Yusuf", "Member"), ("Pharm. Chidi Eze", "Secretary")]:
                 db.add(ProcurementCommitteeMember(committee_id=cm.id, member_name=mn, role_title=rt))
             db.flush()
         members = db.query(ProcurementCommitteeMember).filter(ProcurementCommitteeMember.committee_id == cm.id).all()
 
         svc_map = {}
-        for sc, sn in [("PROC-MED", "Medical supplies"), ("PROC-IT", "IT equipment"), ("PROC-TRN", "Training services")]:
+        for sc, sn in [("PROC-FP", "Family Planning Commodities Lot 1"), ("PROC-MEDC", "Medical Consumables Lot 2"), ("PROC-IT", "IT equipment")]:
             s = db.query(ProcurementService).filter(ProcurementService.company_id == demo.id, ProcurementService.code == sc).first()
             if not s:
                 s = ProcurementService(company_id=demo.id, code=sc, name=sn, description=sn)
                 db.add(s); db.flush()
             svc_map[sc] = s.id
 
-        # Vendors map by number
+        # Ensure prequalified vendors with eligibility fields
         vmap = {}
-        for v in db.query(Vendor).filter(Vendor.company_id == demo.id).all():
-            vmap[v.vendor_number] = v
+        vendor_defs = [
+            ("V-FP01", "PharmaLink Nigeria Ltd", 5, 3, "valid", "Valid NAFDAC & MAF", True, True, True),
+            ("V-FP02", "MediCare Distributors", 4, 2, "valid", "NAFDAC listed", True, False, True),
+            ("V-MED01", "SafeHealth Consumables Ltd", 6, 4, "valid", "PCN + NAFDAC", True, True, True),
+            ("V-001", "MedSupply Co", 3, 2, "valid", "Legacy demo", False, False, True),
+            ("V-002", "TechMart Nigeria", 2, 1, "pending", "", False, False, True),
+            ("V-003", "Training Hub Ltd", 4, 2, "n/a", "", False, False, True),
+        ]
+        for vn, name, yrs, sims, naf, logi, iso, pcn, demoflag in vendor_defs:
+            v = db.query(Vendor).filter(Vendor.company_id == demo.id, Vendor.vendor_number == vn).first()
+            if not v:
+                v = Vendor(company_id=demo.id, vendor_number=vn, name=name,
+                    experience_years=yrs, similar_contracts_count=sims, nafdac_status=naf,
+                    logistics_footprint=logi or "Warehouse + delivery to Benin City",
+                    iso_13485=iso, cgm_p=pcn, is_prequalified=(yrs >= 3 and sims >= 2),
+                    eligibility_status="eligible" if (yrs >= 3 and sims >= 2) else "pending",
+                    is_demo=demoflag, address="Lagos / Benin City", tax_clearance="valid 2024-2026")
+                db.add(v); db.flush()
+            vmap[vn] = v
 
-        def ensure_rfq(rfq_no, title, svc, status, pcode, debit, credit):
+        def ensure_rfq(rfq_no, title, svc, status, pcode, debit, credit, lot="", specs="", shelf=6):
             r = db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == demo.id, ProcurementRFQ.rfq_no == rfq_no).first()
             if r:
                 return r
             r = ProcurementRFQ(
-                company_id=demo.id, rfq_no=rfq_no, title=title,
+                company_id=demo.id, rfq_no=rfq_no, title=title, lot=lot,
                 service_id=svc_map.get(svc), committee_id=cm.id,
-                description=title, status=status,
+                description=title, technical_specs=specs, status=status,
+                evaluation_method="lowest_price_technically_compliant",
+                delivery_location="Benin City central store, Egor LGA, Edo State",
+                min_shelf_life_months=shelf, is_lta=True, lta_duration_months=18,
                 requesting_officer_id=program.id, created_by=program.id,
                 debit_account_id=coa_map.get(debit), credit_account_id=coa_map.get(credit),
-                project_code_id=proj_map.get(pcode),
+                project_code_id=proj_map.get(pcode), is_demo=True,
             )
             db.add(r); db.flush()
             return r
 
-        # 1) OPEN — still collecting quotes
-        rfq_open = ensure_rfq("RFQ-0001", "ORS and first-aid kits for outreach", "PROC-MED", "open", "PRJ-HLT", "5500", "2000")
-        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_open.id).first():
-            db.add(ProcurementQuote(
-                company_id=demo.id, rfq_id=rfq_open.id,
-                vendor_id=vmap.get("V-001").id if vmap.get("V-001") else None,
-                vendor_name="MedSupply Co", amount=980000, tax_amount=73500, total_amount=1053500,
-                delivery_days=14, notes="Includes delivery to Kano", system_score=40, status="submitted",
-            ))
-
-        # 2) EVALUATION — quotes scored, not yet awarded
-        rfq_eval = ensure_rfq("RFQ-0002", "Teacher training venue and materials", "PROC-TRN", "evaluation", "PRJ-EDU", "5300", "2000")
-        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_eval.id).first():
-            q1 = ProcurementQuote(
-                company_id=demo.id, rfq_id=rfq_eval.id,
-                vendor_id=vmap.get("V-003").id if vmap.get("V-003") else None,
-                vendor_name="Training Hub Ltd", amount=750000, tax_amount=56250, total_amount=806250,
-                delivery_days=7, system_score=40, committee_score=48, final_score=88, status="scored",
-            )
-            q2 = ProcurementQuote(
-                company_id=demo.id, rfq_id=rfq_eval.id,
-                vendor_name="LearnRight Services", amount=820000, tax_amount=61500, total_amount=881500,
-                delivery_days=10, system_score=32, committee_score=42, final_score=74, status="scored",
-            )
-            db.add_all([q1, q2]); db.flush()
+        # LOT 1 — Family Planning Commodities (Tranche 1 Pilot quantities from TOR Annex 1A)
+        specs_fp = "Implanon 209 ctn; Jadelle 10 ctn; Injectables 30 ctn; IUCD 2 ctn; Microgynon 50 ctn; Male condoms 8 ctn. Remaining shelf life ≥6 months. MAF, SOP recall, storage guidance required."
+        rfq_fp = ensure_rfq("RFQ-FP-LOT1", "LTA Lot 1: Procurement & Supply of Family Planning Commodities (CONTRAconnect Pilot)",
+            "PROC-FP", "technical_eval", "PRJ-HLT", "5500", "2000", lot="Lot 1 FP Commodities", specs=specs_fp, shelf=6)
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_fp.id).first():
+            q_fp1 = ProcurementQuote(company_id=demo.id, rfq_id=rfq_fp.id, vendor_id=vmap["V-FP01"].id,
+                vendor_name="PharmaLink Nigeria Ltd", amount=18500000, tax_amount=1387500, total_amount=19887500,
+                delivery_days=21, lead_time_weeks_larc=12, lead_time_weeks_other=6,
+                preliminary_pass=True, technical_pass=True, technical_score=95,
+                shelf_life_commitment=True, manufacturer_auth=True, mandatory_docs_complete=True,
+                system_score=38, committee_score=55, final_score=93, status="technical", is_demo=True)
+            q_fp2 = ProcurementQuote(company_id=demo.id, rfq_id=rfq_fp.id, vendor_id=vmap["V-FP02"].id,
+                vendor_name="MediCare Distributors", amount=19200000, tax_amount=1440000, total_amount=20640000,
+                delivery_days=28, lead_time_weeks_larc=14, lead_time_weeks_other=8,
+                preliminary_pass=True, technical_pass=True, technical_score=88,
+                shelf_life_commitment=True, manufacturer_auth=True, mandatory_docs_complete=True,
+                system_score=32, committee_score=50, final_score=82, status="technical", is_demo=True)
+            q_fp3 = ProcurementQuote(company_id=demo.id, rfq_id=rfq_fp.id, vendor_name="QuickMed Imports",
+                amount=17000000, tax_amount=1275000, total_amount=18275000, delivery_days=45,
+                preliminary_pass=False, technical_pass=False, mandatory_docs_complete=False,
+                shelf_life_commitment=False, manufacturer_auth=False, status="rejected",
+                notes="Failed preliminary: missing MAF and NAFDAC proof", is_demo=True)
+            db.add_all([q_fp1, q_fp2, q_fp3]); db.flush()
             if members:
                 for m in members:
-                    db.add(QuoteMemberScore(quote_id=q1.id, member_id=m.id, score=48 + (m.id % 3), comment="Good capacity"))
-                    db.add(QuoteMemberScore(quote_id=q2.id, member_id=m.id, score=40 + (m.id % 4), comment="Higher price"))
+                    db.add(QuoteMemberScore(quote_id=q_fp1.id, member_id=m.id, score=54 + (m.id % 3), comment="Strong FP experience & docs"))
+                    db.add(QuoteMemberScore(quote_id=q_fp2.id, member_id=m.id, score=48 + (m.id % 2), comment="Compliant, higher price"))
 
-        # 3) AWARDED + PO pending officer (workflow not completed)
+        # LOT 2 — Medical Consumables (Annex 1 Pilot)
+        specs_med = "Gloves latex/surgical, syringes, needles 21G, pregnancy tests, iodine, xylocaine, ABHR, disinfectant, cotton wool, sharps bins etc. NAFDAC, ISO 13485, PCN for Lot2 pharma. Shelf-life ≥75% or 24 months."
+        rfq_med = ensure_rfq("RFQ-MED-LOT2", "LTA Lot 2: Supply of Medical Consumables & IPC for CONTRAconnect",
+            "PROC-MEDC", "open", "PRJ-HLT", "5500", "2000", lot="Lot 2 Medical Consumables", specs=specs_med, shelf=24)
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_med.id).first():
+            db.add(ProcurementQuote(company_id=demo.id, rfq_id=rfq_med.id, vendor_id=vmap["V-MED01"].id,
+                vendor_name="SafeHealth Consumables Ltd", amount=4200000, tax_amount=315000, total_amount=4515000,
+                delivery_days=10, preliminary_pass=True, technical_pass=False, mandatory_docs_complete=True,
+                shelf_life_commitment=True, manufacturer_auth=True, status="submitted", is_demo=True))
+
+        # Legacy open RFQ retained for compatibility
+        rfq_open = ensure_rfq("RFQ-0001", "ORS and first-aid kits for outreach", "PROC-MEDC", "open", "PRJ-HLT", "5500", "2000")
+        if not db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_open.id).first():
+            db.add(ProcurementQuote(company_id=demo.id, rfq_id=rfq_open.id,
+                vendor_id=vmap.get("V-001").id if vmap.get("V-001") else None,
+                vendor_name="MedSupply Co", amount=980000, tax_amount=73500, total_amount=1053500,
+                delivery_days=14, notes="Includes delivery to Benin City", system_score=40, status="submitted", is_demo=True))
+
+        # Awarded + PO + GRN + Invoice flow to Finance (demo of full cycle)
         rfq_aw = ensure_rfq("RFQ-0003", "Project laptops for field teams", "PROC-IT", "awarded", "PRJ-CAP", "1510", "2000")
         q_win = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_aw.id, ProcurementQuote.status == "winner").first()
         if not q_win:
-            q_win = ProcurementQuote(
-                company_id=demo.id, rfq_id=rfq_aw.id,
+            q_win = ProcurementQuote(company_id=demo.id, rfq_id=rfq_aw.id,
                 vendor_id=vmap.get("V-002").id if vmap.get("V-002") else None,
                 vendor_name="TechMart Nigeria", amount=2400000, tax_amount=180000, total_amount=2580000,
-                delivery_days=21, system_score=40, committee_score=52, final_score=92, status="winner",
-            )
-            q_lose = ProcurementQuote(
-                company_id=demo.id, rfq_id=rfq_aw.id,
-                vendor_name="ByteStore Ltd", amount=2650000, tax_amount=198750, total_amount=2848750,
-                delivery_days=28, system_score=28, committee_score=45, final_score=73, status="rejected",
-            )
+                delivery_days=21, preliminary_pass=True, technical_pass=True, system_score=40, committee_score=52, final_score=92,
+                status="winner", mandatory_docs_complete=True, is_demo=True)
+            q_lose = ProcurementQuote(company_id=demo.id, rfq_id=rfq_aw.id, vendor_name="ByteStore Ltd",
+                amount=2650000, tax_amount=198750, total_amount=2848750, delivery_days=28,
+                preliminary_pass=True, technical_pass=True, system_score=28, committee_score=45, final_score=73,
+                status="rejected", is_demo=True)
             db.add_all([q_win, q_lose]); db.flush()
             if members:
                 for m in members:
                     db.add(QuoteMemberScore(quote_id=q_win.id, member_id=m.id, score=50, comment="Best value"))
         po = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0001").first()
         if not po and q_win:
-            po = PurchaseOrder(
-                company_id=demo.id, po_no="PO-0001", rfq_id=rfq_aw.id, quote_id=q_win.id,
-                vendor_id=q_win.vendor_id, vendor_name=q_win.vendor_name,
-                amount=q_win.total_amount, description=rfq_aw.title,
-                status="pending_officer", requesting_officer_id=program.id,
+            po = PurchaseOrder(company_id=demo.id, po_no="PO-0001", rfq_id=rfq_aw.id, quote_id=q_win.id,
+                vendor_id=q_win.vendor_id, vendor_name=q_win.vendor_name, amount=q_win.total_amount,
+                description=rfq_aw.title, status="pending_officer", requesting_officer_id=program.id,
                 debit_account_id=coa_map.get("1510"), credit_account_id=coa_map.get("2000"),
-                project_code_id=proj_map.get("PRJ-CAP"),
-                approved_at=datetime.utcnow() - _td(days=1), created_by=finance.id,
-            )
-            db.add(po)
+                project_code_id=proj_map.get("PRJ-CAP"), approved_at=datetime.utcnow() - _td(days=1), created_by=finance.id)
+            db.add(po); db.flush()
 
-        # 4) AWARDED + PO already submitted into payment workflow (still in payment approval)
+        # Goods Receipt with all conditions met (demo)
+        if po and not db.query(GoodsReceipt).filter(GoodsReceipt.po_id == po.id).first():
+            grn = GoodsReceipt(company_id=demo.id, po_id=po.id, grn_no="GRN-0001",
+                received_by="Store Officer – Benin City", quantities_ok=True, package_integrity_ok=True,
+                shelf_life_ok=True, regulatory_docs_ok=True, storage_guidance_received=True,
+                all_conditions_met=True, status="accepted", accepted_by_user_id=program.id,
+                accepted_at=datetime.utcnow() - _td(days=1), is_demo=True)
+            db.add(grn); db.flush()
+            # Invoice flows to Finance
+            inv = ProcurementInvoice(company_id=demo.id, po_id=po.id, grn_id=grn.id,
+                invoice_no="INV-TM-88421", amount=2400000, tax_amount=180000, total_amount=2580000,
+                status="approved_for_payment", submitted_to_finance_at=datetime.utcnow() - _td(hours=12), is_demo=True)
+            db.add(inv)
+
+        # Second PO already in payment workflow
         rfq_pay = ensure_rfq("RFQ-0004", "Office furniture top-up", "PROC-IT", "awarded", "PRJ-OPS", "1500", "2000")
         qf = db.query(ProcurementQuote).filter(ProcurementQuote.rfq_id == rfq_pay.id).first()
         if not qf:
-            qf = ProcurementQuote(
-                company_id=demo.id, rfq_id=rfq_pay.id,
-                vendor_name="Property Holdings Ltd", amount=600000, tax_amount=45000, total_amount=645000,
-                delivery_days=14, system_score=40, committee_score=50, final_score=90, status="winner",
-            )
+            qf = ProcurementQuote(company_id=demo.id, rfq_id=rfq_pay.id, vendor_name="Property Holdings Ltd",
+                amount=600000, tax_amount=45000, total_amount=645000, delivery_days=14,
+                preliminary_pass=True, technical_pass=True, system_score=40, committee_score=50, final_score=90,
+                status="winner", mandatory_docs_complete=True, is_demo=True)
             db.add(qf); db.flush()
         po2 = db.query(PurchaseOrder).filter(PurchaseOrder.company_id == demo.id, PurchaseOrder.po_no == "PO-0002").first()
         if not po2:
-            # payment request in program_approved stage from PO
-            npr = db.query(PaymentRequest).filter(PaymentRequest.company_id == demo.id).count() + 1
-            exp = db.query(ExpenseCode).filter(ExpenseCode.company_id == demo.id).first()
-            if not exp:
-                exp = ExpenseCode(company_id=demo.id, code="EXP-FURN", description="Furniture", budget_code_id=bud_map["BUD-OPS-2026"],
-                                  default_debit_account_id=coa_map.get("1500"), default_credit_account_id=coa_map.get("2000"))
-                db.add(exp); db.flush()
-            pr = PaymentRequest(
-                company_id=demo.id, request_no=f"PR-PO-{npr:04d}",
-                requester_id=program.id, budget_code_id=bud_map["BUD-OPS-2026"],
-                expense_code_id=exp.id,
-                project_code_id=proj_map.get("PRJ-OPS"),
-                amount=645000, amount_in_words="Six Hundred and Forty Five Thousand Naira Only",
-                narration="Office furniture top-up from PO-0002", payee_name="Property Holdings Ltd",
-                debit_account_id=coa_map.get("1500"), credit_account_id=coa_map.get("2000"),
-                designated_approver_id=program.id, status="program_approved",
-                program_approved_by=program.id, program_approved_at=datetime.utcnow() - _td(hours=6),
-            )
-            db.add(pr); db.flush()
-            po2 = PurchaseOrder(
-                company_id=demo.id, po_no="PO-0002", rfq_id=rfq_pay.id, quote_id=qf.id,
+            po2 = PurchaseOrder(company_id=demo.id, po_no="PO-0002", rfq_id=rfq_pay.id, quote_id=qf.id,
                 vendor_name=qf.vendor_name, amount=qf.total_amount, description=rfq_pay.title,
                 status="submitted_payment", requesting_officer_id=program.id,
-                payment_request_id=pr.id,
                 debit_account_id=coa_map.get("1500"), credit_account_id=coa_map.get("2000"),
-                project_code_id=proj_map.get("PRJ-OPS"),
-                approved_at=datetime.utcnow() - _td(days=2), created_by=finance.id,
-            )
+                project_code_id=proj_map.get("PRJ-OPS"), created_by=finance.id)
             db.add(po2)
-            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="submit_from_po", comment="From PO-0002"))
-            db.add(PaymentApprovalLog(payment_request_id=pr.id, actor_id=program.id, action="program_approve", comment="Program OK"))
 
-        db.commit()
         print("✅ Demo seeded: projects, inventory postings, procurement (open / evaluation / PO pending / payment in workflow)")
 
         # Second company still pending approval (for superadmin demo)
@@ -685,7 +704,7 @@ def init_defaults(db: Session):
                 username="admin",
                 email="admin@sunrise.ngo",
                 full_name="Sunrise Admin",
-                hashed_password=get_password_hash("Sunrise@Admin1!"),
+                hashed_password=get_password_hash("Sunrise@Admin2026!"),
                 role="company_admin",
                 is_active=True,
                 can_access_finance=True,
@@ -699,7 +718,7 @@ def init_defaults(db: Session):
             db.commit()
             print("✅ Pending sample firm: sunrise-ngo (awaits superadmin approval)")
 
-        print("✅ Demo company approved + licensed | admin / Admin@Knowsoft1!")
+        print("✅ Demo company approved + licensed | admin / Admin@FMSS2026!")
 
 
 
@@ -726,9 +745,9 @@ def ensure_demo_core_finance(db: Session):
     # Ensure users
     users = {}
     for uname, role, pwd, email, perms in [
-        ("admin", "company_admin", "Admin@Knowsoft1!", "admin@demo.local", True),
-        ("finance", "finance", "Finance@Knowsoft1!", "finance@demo.local", True),
-        ("program", "program", "Program@Knowsoft1!", "program@demo.local", True),
+        ("admin", "company_admin", "Admin@FMSS2026!", "admin@demo.local", True),
+        ("finance", "finance", "Finance@FMSS2026!", "finance@demo.local", True),
+        ("program", "program", "Program@FMSS2026!", "program@demo.local", True),
     ]:
         u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
         if not u:
@@ -1169,9 +1188,9 @@ def _app_startup_entry():
             demo = db.query(Company).filter(Company.slug == "demo").first()
             if demo:
                 for uname, pwd in [
-                    ("admin", "Admin@Knowsoft1!"),
-                    ("finance", "Finance@Knowsoft1!"),
-                    ("program", "Program@Knowsoft1!"),
+                    ("admin", "Admin@FMSS2026!"),
+                    ("finance", "Finance@FMSS2026!"),
+                    ("program", "Program@FMSS2026!"),
                 ]:
                     u = db.query(User).filter(User.company_id == demo.id, User.username == uname).first()
                     if u:
@@ -1189,7 +1208,7 @@ def _app_startup_entry():
                     ensure_demo_extended_samples(db)
             sa = db.query(User).filter(User.username == "superadmin", User.company_id.is_(None)).first()
             if sa:
-                sa.hashed_password = get_password_hash("Knowsoft@Super0160!")
+                sa.hashed_password = get_password_hash("SuperAdmin@FMSS2026!")
                 db.add(sa); db.commit()
         except Exception as e:
             import traceback; print("demo refresh:", e); traceback.print_exc()
@@ -4249,6 +4268,251 @@ def pwa_sw():
 @app.head("/manifest.json")
 def pwa_manifest_head():
     return pwa_manifest()
+
+
+
+# ===== Robust procurement: mandatory docs, validation, GRN, invoice → finance =====
+
+MANDATORY_BID_DOCS = {
+    "Lot 1 FP Commodities": ["cac", "tax_clearance", "nafdac", "maf", "shelf_life_commitment", "sop_recall", "technical_proposal", "financial_proposal", "experience_letter"],
+    "Lot 2 Medical Consumables": ["cac", "tax_clearance", "nafdac", "maf", "iso_cert", "pcn_license", "shelf_life_commitment", "technical_proposal", "financial_proposal", "experience_letter", "logistics_proof"],
+    "default": ["cac", "tax_clearance", "technical_proposal", "financial_proposal"],
+}
+
+@app.post("/api/procurement/quotes/{qid}/upload-doc")
+async def upload_bid_document(
+    qid: int,
+    doc_type: str = Form(...),
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Vendor / staff uploads a mandatory PDF for a bid. Only PDF accepted."""
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404, "Quote not found")
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(400, "Only PDF documents are accepted")
+    content = await file.read()
+    if len(content) > 16 * 1024 * 1024:
+        raise HTTPException(400, "File too large (max 16MB)")
+    dest_dir = UPLOADS_DIR / f"company_{current_user.company_id}" / "procurement" / f"quote_{qid}"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    safe = secure_filename(file.filename)
+    stored = dest_dir / f"{doc_type}_{safe}"
+    stored.write_bytes(content)
+    doc = ProcurementDocument(
+        company_id=current_user.company_id, quote_id=qid, vendor_id=q.vendor_id,
+        filename=safe, stored_path=str(stored), content_type="application/pdf",
+        size_bytes=len(content), doc_type=doc_type, is_mandatory=True,
+        uploaded_by=current_user.id,
+    )
+    db.add(doc)
+    db.commit()
+    return {"ok": True, "doc_id": doc.id, "doc_type": doc_type, "filename": safe}
+
+
+@app.get("/api/procurement/quotes/{qid}/docs-checklist")
+def bid_docs_checklist(qid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Return required vs uploaded docs and whether submission is allowed."""
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404)
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == q.rfq_id).first()
+    lot = (rfq.lot if rfq else "") or "default"
+    required = MANDATORY_BID_DOCS.get(lot, MANDATORY_BID_DOCS["default"])
+    uploaded = db.query(ProcurementDocument).filter(ProcurementDocument.quote_id == qid).all()
+    have = {d.doc_type for d in uploaded}
+    missing = [r for r in required if r not in have]
+    complete = len(missing) == 0 and q.shelf_life_commitment and q.manufacturer_auth
+    return {
+        "quote_id": qid, "lot": lot, "required": required, "uploaded": list(have),
+        "missing": missing, "mandatory_docs_complete": complete,
+        "shelf_life_commitment": q.shelf_life_commitment,
+        "manufacturer_auth": q.manufacturer_auth,
+        "can_submit": complete and q.status in ("draft", "submitted"),
+    }
+
+
+@app.post("/api/procurement/quotes/{qid}/submit")
+def submit_bid_with_validation(qid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Hard gate: all mandatory requirements must be met before status becomes submitted."""
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404)
+    check = bid_docs_checklist(qid, current_user, db)
+    if not check["can_submit"]:
+        raise HTTPException(400, detail={
+            "message": "Cannot submit: mandatory requirements incomplete",
+            "missing_docs": check["missing"],
+            "shelf_life_commitment": check["shelf_life_commitment"],
+            "manufacturer_auth": check["manufacturer_auth"],
+        })
+    q.status = "submitted"
+    q.mandatory_docs_complete = True
+    q.submitted_at = datetime.utcnow()
+    q.preliminary_pass = True  # docs gate passed
+    db.commit()
+    return {"ok": True, "status": q.status, "message": "Bid submitted – pending preliminary & technical evaluation"}
+
+
+@app.post("/api/procurement/quotes/{qid}/evaluate-technical")
+def evaluate_technical(
+    qid: int,
+    pass_fail: bool = Form(...),
+    score: float = Form(0),
+    comment: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Committee records technical Pass/Fail (TOR methodology)."""
+    q = db.query(ProcurementQuote).filter(ProcurementQuote.id == qid, ProcurementQuote.company_id == current_user.company_id).first()
+    if not q:
+        raise HTTPException(404)
+    if q.status not in ("submitted", "preliminary", "technical"):
+        raise HTTPException(400, "Quote not in evaluable status")
+    q.technical_pass = pass_fail
+    q.technical_score = score
+    q.status = "technical" if pass_fail else "rejected"
+    if not pass_fail:
+        q.notes = (q.notes or "") + f"\nTechnical reject: {comment}"
+    db.commit()
+    return {"ok": True, "technical_pass": pass_fail, "status": q.status}
+
+
+@app.post("/api/procurement/rfqs/{rid}/rank-financial")
+def rank_financial(rid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Among technical_pass=True quotes, rank by total_amount ascending (lowest price wins)."""
+    rfq = db.query(ProcurementRFQ).filter(ProcurementRFQ.id == rid, ProcurementRFQ.company_id == current_user.company_id).first()
+    if not rfq:
+        raise HTTPException(404)
+    quotes = db.query(ProcurementQuote).filter(
+        ProcurementQuote.rfq_id == rid, ProcurementQuote.technical_pass == True
+    ).order_by(ProcurementQuote.total_amount.asc()).all()
+    for i, q in enumerate(quotes, 1):
+        q.financial_rank = i
+        q.status = "financial"
+        if i == 1:
+            q.final_score = max(q.final_score, 90)
+    rfq.status = "financial_eval"
+    db.commit()
+    return {"ok": True, "ranked": [{"id": q.id, "vendor": q.vendor_name, "total": q.total_amount, "rank": q.financial_rank} for q in quotes]}
+
+
+@app.post("/api/procurement/pos/{poid}/goods-receipt")
+def create_goods_receipt(
+    poid: int,
+    quantities_ok: bool = Form(...),
+    package_integrity_ok: bool = Form(...),
+    shelf_life_ok: bool = Form(...),
+    regulatory_docs_ok: bool = Form(...),
+    storage_guidance_received: bool = Form(...),
+    received_by: str = Form(""),
+    notes: str = Form(""),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Delivery acceptance: ALL conditions must be True for acceptance."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == poid, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404)
+    all_ok = all([quantities_ok, package_integrity_ok, shelf_life_ok, regulatory_docs_ok, storage_guidance_received])
+    n = db.query(GoodsReceipt).filter(GoodsReceipt.company_id == current_user.company_id).count() + 1
+    grn = GoodsReceipt(
+        company_id=current_user.company_id, po_id=poid, grn_no=f"GRN-{n:04d}",
+        received_by=received_by or (current_user.full_name or current_user.username),
+        quantities_ok=quantities_ok, package_integrity_ok=package_integrity_ok,
+        shelf_life_ok=shelf_life_ok, regulatory_docs_ok=regulatory_docs_ok,
+        storage_guidance_received=storage_guidance_received, all_conditions_met=all_ok,
+        status="accepted" if all_ok else "rejected",
+        rejection_reason="" if all_ok else "One or more delivery conditions not met",
+        notes=notes, accepted_by_user_id=current_user.id if all_ok else None,
+        accepted_at=datetime.utcnow() if all_ok else None,
+    )
+    db.add(grn); db.commit(); db.refresh(grn)
+    return {"ok": True, "grn_id": grn.id, "grn_no": grn.grn_no, "all_conditions_met": all_ok, "status": grn.status}
+
+
+@app.post("/api/procurement/invoices")
+def create_procurement_invoice(
+    po_id: int = Form(...),
+    grn_id: int = Form(None),
+    invoice_no: str = Form(...),
+    amount: float = Form(...),
+    tax_amount: float = Form(0),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """Final invoice after accepted GRN – routes to Finance."""
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == po_id, PurchaseOrder.company_id == current_user.company_id).first()
+    if not po:
+        raise HTTPException(404)
+    if grn_id:
+        grn = db.query(GoodsReceipt).filter(GoodsReceipt.id == grn_id, GoodsReceipt.all_conditions_met == True).first()
+        if not grn:
+            raise HTTPException(400, "GRN must exist and have all conditions met before invoice")
+    inv = ProcurementInvoice(
+        company_id=current_user.company_id, po_id=po_id, grn_id=grn_id,
+        invoice_no=invoice_no, amount=amount, tax_amount=tax_amount,
+        total_amount=amount + tax_amount, status="received",
+        submitted_to_finance_at=datetime.utcnow(),
+    )
+    db.add(inv); db.commit(); db.refresh(inv)
+    return {"ok": True, "invoice_id": inv.id, "status": inv.status, "message": "Invoice received and queued for Finance review"}
+
+
+@app.get("/api/procurement/invoices")
+def list_procurement_invoices(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    rows = db.query(ProcurementInvoice).filter(ProcurementInvoice.company_id == current_user.company_id).order_by(ProcurementInvoice.id.desc()).all()
+    return [{"id": r.id, "invoice_no": r.invoice_no, "po_id": r.po_id, "amount": r.total_amount, "status": r.status,
+             "submitted_to_finance_at": r.submitted_to_finance_at.isoformat() if r.submitted_to_finance_at else None} for r in rows]
+
+
+@app.post("/api/procurement/invoices/{iid}/to-finance")
+def invoice_to_finance(iid: int, current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Promote invoice to a Payment Request in Finance module."""
+    inv = db.query(ProcurementInvoice).filter(ProcurementInvoice.id == iid, ProcurementInvoice.company_id == current_user.company_id).first()
+    if not inv:
+        raise HTTPException(404)
+    po = db.query(PurchaseOrder).filter(PurchaseOrder.id == inv.po_id).first()
+    n = db.query(PaymentRequest).filter(PaymentRequest.company_id == current_user.company_id).count() + 1
+    pr = PaymentRequest(
+        company_id=current_user.company_id, request_no=f"PR-INV-{n:04d}",
+        description=f"Payment for procurement invoice {inv.invoice_no} / PO {po.po_no if po else inv.po_id}",
+        amount=inv.total_amount, status="draft",
+        requested_by=current_user.id, debit_account_id=po.debit_account_id if po else None,
+        credit_account_id=po.credit_account_id if po else None, project_code_id=po.project_code_id if po else None,
+    )
+    db.add(pr); db.flush()
+    inv.payment_request_id = pr.id
+    inv.status = "approved_for_payment"
+    if po:
+        po.status = "submitted_payment"
+        po.payment_request_id = pr.id
+    db.commit()
+    return {"ok": True, "payment_request_id": pr.id, "request_no": pr.request_no, "invoice_status": inv.status}
+
+
+@app.delete("/api/procurement/demo-data")
+def delete_demo_procurement(current_user: User = Depends(get_current_active_user), db: Session = Depends(get_db)):
+    """Bulk-delete all is_demo=True procurement records for the company."""
+    if current_user.role not in ("company_admin", "superadmin", "admin"):
+        raise HTTPException(403, "Admin only")
+    cid = current_user.company_id
+    db.query(ProcurementInvoice).filter(ProcurementInvoice.company_id == cid, ProcurementInvoice.is_demo == True).delete(synchronize_session=False)
+    db.query(GoodsReceipt).filter(GoodsReceipt.company_id == cid, GoodsReceipt.is_demo == True).delete(synchronize_session=False)
+    # quotes / rfqs / pos flagged demo
+    qids = [q.id for q in db.query(ProcurementQuote).filter(ProcurementQuote.company_id == cid, ProcurementQuote.is_demo == True).all()]
+    if qids:
+        db.query(QuoteMemberScore).filter(QuoteMemberScore.quote_id.in_(qids)).delete(synchronize_session=False)
+        db.query(ProcurementDocument).filter(ProcurementDocument.quote_id.in_(qids)).delete(synchronize_session=False)
+    db.query(ProcurementQuote).filter(ProcurementQuote.company_id == cid, ProcurementQuote.is_demo == True).delete(synchronize_session=False)
+    db.query(PurchaseOrder).filter(PurchaseOrder.company_id == cid).filter(PurchaseOrder.po_no.in_(["PO-0001", "PO-0002"])).delete(synchronize_session=False)
+    db.query(ProcurementRFQ).filter(ProcurementRFQ.company_id == cid, ProcurementRFQ.is_demo == True).delete(synchronize_session=False)
+    db.query(Vendor).filter(Vendor.company_id == cid, Vendor.is_demo == True).delete(synchronize_session=False)
+    db.commit()
+    return {"ok": True, "message": "Demo procurement data deleted"}
+
 
 
 # ===== SPA (must be last routes) =====

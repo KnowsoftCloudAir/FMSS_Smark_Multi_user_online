@@ -14,3 +14,4 @@ openpyxl>=3.1.5,<3.2
 reportlab>=4.2.5,<5
 pandas>=2.2.0,<2.3
 jinja2>=3.1.4,<3.2
+werkzeug>=3.0.0,<4
