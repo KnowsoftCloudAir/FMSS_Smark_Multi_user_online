@@ -68,6 +68,19 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, 
 from erp_ext import router as erp_router
 app.include_router(erp_router)
 
+# Professional upgrade: General Admin + Project Finance
+try:
+    from general_admin_api import router as ga_router, ensure_general_admin
+    app.include_router(ga_router)
+except Exception as _e:
+    print("general_admin_api not loaded:", _e)
+    ensure_general_admin = None
+try:
+    from project_finance_api import router as project_router
+    app.include_router(project_router)
+except Exception as _e:
+    print("project_finance_api not loaded:", _e)
+
 STATIC_DIR = Path(__file__).parent.parent / "static"
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 IMAGES_DIR = STATIC_DIR / "images"
@@ -1176,6 +1189,11 @@ def _app_startup_entry():
             print("migrate:", e)
         try:
             init_defaults(db)
+            try:
+                if ensure_general_admin:
+                    ensure_general_admin(db)
+            except Exception as _ga:
+                print("ensure_general_admin:", _ga)
             from erp_ext import seed_erp
             seed_erp(db)
         except Exception as e:
@@ -1296,8 +1314,13 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     username = raw
 
     # Platform owner and superadmin (no company)
-    if raw in ("owner", "superadmin") or raw.startswith("owner/") or raw.startswith("superadmin/"):
-        username = "owner" if raw.startswith("owner") else "superadmin"
+    if raw in ("owner", "superadmin", "general_admin") or raw.startswith("owner/") or raw.startswith("superadmin/") or raw.startswith("general_admin/"):
+        if raw.startswith("owner"):
+            username = "owner"
+        elif raw.startswith("general_admin") or raw == "general_admin":
+            username = "general_admin"
+        else:
+            username = "superadmin"
         user = db.query(User).filter(User.username == username, User.company_id.is_(None)).first()
         if not user or not verify_password(password, user.hashed_password):
             raise HTTPException(401, "Incorrect username or password")

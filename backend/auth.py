@@ -90,8 +90,9 @@ async def get_current_active_user(current_user: User = Depends(get_current_user)
     return current_user
 
 async def get_superadmin(current_user: User = Depends(get_current_active_user)):
-    if current_user.role != "superadmin":
-        raise HTTPException(status_code=403, detail="Platform superadmin required")
+    # Accept general_admin (new) and legacy superadmin/owner
+    if current_user.role not in ("superadmin", "general_admin", "owner"):
+        raise HTTPException(status_code=403, detail="Platform General Admin required")
     return current_user
 
 async def get_company_admin(current_user: User = Depends(get_current_active_user)):
@@ -101,7 +102,7 @@ async def get_company_admin(current_user: User = Depends(get_current_active_user
 
 def require_roles(*roles):
     async def _dep(current_user: User = Depends(get_current_active_user)):
-        if current_user.role not in roles and current_user.role != "superadmin":
+        if current_user.role not in roles and current_user.role not in ("superadmin", "general_admin", "owner"):
             raise HTTPException(403, f"Requires one of: {', '.join(roles)}")
         return current_user
     return _dep
@@ -113,7 +114,7 @@ def check_company_license(db: Session, company_id: int):
     if not company:
         raise HTTPException(403, "Company not found")
     if company.status == "pending":
-        raise HTTPException(403, "Company registration is pending superadmin approval")
+        raise HTTPException(403, "Company registration is pending General Admin approval")
     if company.status == "rejected":
         raise HTTPException(403, "Company registration was rejected")
     if company.status == "suspended":

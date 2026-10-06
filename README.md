@@ -21,13 +21,26 @@ Or use **Docker** with the included `Dockerfile`.
 ## Demo logins (seeded on startup)
 
 ```
-demo/program  / Program@FMSS2026!
-demo/finance  / Finance@FMSS2026!
-demo/admin    / Admin@FMSS2026!
-superadmin    / SuperAdmin@FMSS2026!
+demo/program     / Program@FMSS2026!
+demo/finance     / Finance@FMSS2026!
+demo/admin       / Admin@FMSS2026!
+general_admin    / GeneralAdmin@FMSS2026!     ← Platform General Admin (approvals only)
 ```
 
-Company users use `company-slug/username`. Login page shows the program manager demo only.
+Legacy alias still accepted during transition: `superadmin` / `SuperAdmin@FMSS2026!`
+
+**Company users** sign in as `company-slug/username` (e.g. `demo/admin`).
+
+**General Admin** uses the **General Admin** link on the login page (not the company form).
+After login, open **Firm Approvals** to approve/reject registered companies.
+
+### Professional upgrade highlights
+- General Admin role (approvals + technical corrections only — no company finance)
+- Project-based budgets and full project financial analysis with charts
+- 10 currencies (NGN, USD, EUR, GBP, GHS, KES, ZAR, XOF, CAD, CNY)
+- IFRS-oriented COA / reporting language
+- Fixed Owner/General Admin console login + Registered Firms approval table
+- Streamlined company registration (pending → approved by General Admin)
 
 On first start (and when demo COA is empty), the app seeds chart of accounts, budgets, payments, inventory, projects, vendors, and procurement at multiple workflow stages.
 
