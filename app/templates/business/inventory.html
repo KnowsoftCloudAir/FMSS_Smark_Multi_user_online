@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div class="card">
+    <h2 style="margin-top:0;">Inventory stock count</h2>
+    <p style="color:var(--muted);font-size:0.9rem;">Opening · Brought-in · Sold · Balance per product</p>
+    <div style="overflow-x:auto;">
+      <table class="data">
+        <thead>
+          <tr>
+            <th>Product</th><th>SKU</th>
+            <th>Opening</th><th>Brought-in</th><th>Sold</th><th>Balance</th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for r in rows %}
+          <tr>
+            <td>{{ r.name }}</td>
+            <td><code>{{ r.sku }}</code></td>
+            <td>{{ '%.2g'|format(r.opening) }}</td>
+            <td>{{ '%.2g'|format(r.brought_in) }}</td>
+            <td>{{ '%.2g'|format(r.sold) }}</td>
+            <td><strong>{{ '%.2g'|format(r.balance) }}</strong></td>
+          </tr>
+        {% else %}
+          <tr><td colspan="6">No products yet</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:2rem auto;">
+  <h2 style="margin-top:0;">Settings locked</h2>
+  <p style="color:var(--muted);">Enter the shop settings password. First-time default is <code>payme1</code> — change it inside Settings.</p>
+  {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/settings/unlock">
+    <div class="form-group"><label>Settings password</label>
+      <input type="password" name="password" required />
+    </div>
+    <button class="btn btn-block" type="submit">Unlock Settings</button>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div class="card">
+    <h2>Customer orders</h2>
+    <p style="color:var(--muted);font-size:0.9rem;">Open an order to review items, evidence, then accept or reject.</p>
+    <table class="data">
+      <thead><tr><th>#</th><th>Customer</th><th>Amount</th><th>Status</th><th>Date</th><th></th></tr></thead>
+      <tbody>
+      {% for o in rows %}
+        <tr>
+          <td>{{ o.id }}</td>
+          <td>{{ o.customer_name }}<br/><small style="color:var(--muted)">{{ o.customer_phone }}</small></td>
+          <td>₦{{ '%.2f'|format(o.total_amount) }}</td>
+          <td><span class="badge {% if o.status=='confirmed' or o.status=='fulfilled' %}badge-ok{% elif o.status=='rejected' or o.status=='cancelled' %}badge-bad{% else %}badge-warn{% endif %}">{{ o.status }}</span></td>
+          <td style="font-size:0.8rem;">{{ o.created_at }}</td>
+          <td><a class="btn btn-sm" href="/orders/{{ o.id }}">Open / review</a></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6">No orders yet. Share your showcase link.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

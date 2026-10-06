@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div class="card" style="max-width:520px;">
+    <h2>Feedback to Payme admin</h2>
+    {% if sent %}
+    <div class="alert alert-success">Thank you — your message was sent to the platform admin.</div>
+    {% endif %}
+    <form method="post" action="/feedback">
+      <div class="form-group"><label>Your message</label>
+        <textarea name="message" rows="5" required placeholder="Ideas, issues, or requests..."></textarea>
+      </div>
+      <button class="btn" type="submit">Send feedback</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
