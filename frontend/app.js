@@ -318,23 +318,39 @@ function enterApp() {
   const setTxt = (id, val) => { const el = document.getElementById(id); if (el) el.textContent = val || ""; };
   setTxt("current-user-name", currentUser.full_name || currentUser.username);
   setTxt("current-user-role", (currentUser.role || "").replace(/_/g, " ").toUpperCase());
-  setTxt("sidebar-company", currentUser.company_name || currentUser.company_slug || "");
-  setTxt("org-name-display", currentUser.company_name || "");
+  setTxt("sidebar-company", currentUser.company_name || currentUser.company_slug || "Platform");
+  setTxt("org-name-display", currentUser.company_name || "Knowsoft Platform");
 
-  const isAdmin = ["company_admin", "admin", "superadmin"].includes(currentUser.role);
+  const isSuper = ["superadmin", "general_admin", "owner"].includes(currentUser.role);
+  const isAdmin = ["company_admin", "admin", "superadmin", "general_admin"].includes(currentUser.role);
+
   document.querySelectorAll(".admin-only").forEach(el => {
     el.style.display = isAdmin ? "flex" : "none";
   });
+  document.querySelectorAll(".super-only").forEach(el => {
+    el.style.display = isSuper ? "flex" : "none";
+  });
+  const navFA = document.getElementById("nav-firm-approvals") || document.querySelector('.nav-item[data-view="superadmin"]');
+  if (navFA) {
+    navFA.style.display = isSuper ? "flex" : "none";
+    if (isSuper) navFA.innerHTML = '<span class="icon">🛡️</span> Firm Approvals';
+  }
   const ad = document.getElementById("admin-divider");
-  if (ad) ad.style.display = isAdmin ? "block" : "none";
+  if (ad) ad.style.display = (isAdmin || isSuper) ? "block" : "none";
 
   document.querySelectorAll("[data-perm]").forEach(el => {
     const key = "can_access_" + el.dataset.perm;
-    el.style.display = currentUser[key] === false ? "none" : "";
+    el.style.display = currentUser[key] === false && !isSuper ? "none" : "";
   });
 
-  try { loadCompanySettings(); } catch (e) { console.warn(e); }
-  try { showView("dashboard"); } catch (e) { console.warn(e); }
+  try { if (!isSuper) loadCompanySettings(); } catch (e) { console.warn(e); }
+  try { showView(isSuper ? "superadmin" : "dashboard"); } catch (e) { console.warn(e); }
+  if (isSuper && typeof loadCompanies === "function") {
+    try { loadCompanies(); } catch (e) {}
+  }
+  if (isSuper && typeof loadRegisteredFirms === "function") {
+    try { loadRegisteredFirms(); } catch (e) {}
+  }
 }
 
 document.getElementById("logout-btn")?.addEventListener("click", () => logout(true));
@@ -358,7 +374,7 @@ async function loadUsers() {
     try {
       users = await api("/api/admin/users");
     } catch (e1) {
-      if (currentUser && (currentUser.role === "superadmin" || currentUser.role === "owner")) {
+      if (currentUser && (["superadmin", "general_admin", "owner"].includes(currentUser.role))) {
         users = await api("/api/superadmin/users");
       } else throw e1;
     }
@@ -619,8 +635,17 @@ showView = function (name) {
   if (name === "dashboard") loadDashboardCharts();
   if (name === "payments") { loadPaymentFormData(); loadPayments(); }
   if (name === "finance-setup") loadFinanceSetup();
-  if (name === "assets-reg") loadAssets();
-  if (name === "superadmin") loadCompanies();
+  if (name === "assets-reg" || name === "assets") { if (typeof loadAssets === "function") loadAssets(); if (typeof loadAssetDashboard === "function") loadAssetDashboard(); }
+  if (name === "superadmin") { if (typeof loadRegisteredFirms === "function") loadRegisteredFirms(); else loadCompanies(); }
+  if (name === "inventory-full" || name === "inventory") { if (typeof loadInventory === "function") loadInventory(); }
+  if (name === "vendors-full" || name === "vendors") { if (typeof loadVendors === "function") loadVendors(); }
+  if (name === "procurement") { if (typeof loadProcurement === "function") loadProcurement(); if (typeof loadRfqs === "function") loadRfqs(); }
+  if (name === "bank-recon") { if (typeof loadBankRecon === "function") loadBankRecon(); }
+  if (name === "corrections") { if (typeof loadCorrectionsInbox === "function") loadCorrectionsInbox(); }
+  if (name === "currency") { if (typeof loadCurrencyBoard === "function") loadCurrencyBoard(); }
+  if (name === "tasks") { if (typeof loadTasks === "function") loadTasks(); }
+  if (name === "finance") { if (typeof loadPayments === "function") loadPayments(); }
+  if (name === "reports") { /* reports are action buttons */ }
 };
 
 const _origEnterApp = enterApp;
@@ -640,9 +665,9 @@ enterApp = function () {
   document.getElementById("org-name-display").textContent =
     currentUser.company_name || "";
 
-  const isAdmin = ["company_admin", "admin", "superadmin"].includes(currentUser.role);
-  const isSuper = currentUser.role === "superadmin" || currentUser.role === "owner";
-  const isFinance = ["finance", "company_admin", "superadmin"].includes(currentUser.role);
+  const isSuper = ["superadmin", "general_admin", "owner"].includes(currentUser.role);
+  const isAdmin = ["company_admin", "admin", "superadmin", "general_admin"].includes(currentUser.role);
+  const isFinance = ["finance", "company_admin", "superadmin", "general_admin"].includes(currentUser.role);
 
   document.querySelectorAll(".admin-only").forEach(el => {
     el.style.display = isAdmin ? "flex" : "none";
@@ -2891,11 +2916,18 @@ window.downloadPaymentArchive = async function (id, reqNo) {
 
 /* Reseed demo data (superadmin) */
 async function reseedDemoData() {
-  if (!confirm("Reload all sample finance data for the demo company?")) return;
   try {
-    const data = await api("/api/superadmin/reseed-demo", { method: "POST", body: "{}" });
-    alert("Reseeded: " + JSON.stringify(data.counts || data));
+    let data;
+    try {
+      data = await api("/api/demo/load", { method: "POST", body: "{}" });
+    } catch (e1) {
+      data = await api("/api/superadmin/reseed-demo", { method: "POST", body: "{}" });
+    }
+    alert(data.message || "Demo data loaded");
     if (typeof loadCompanies === "function") loadCompanies();
-  } catch (ex) { alert(ex.message); }
+    if (typeof loadRegisteredFirms === "function") loadRegisteredFirms();
+  } catch (ex) {
+    alert(ex.message || "Reseed failed");
+  }
 }
 window.reseedDemoData = reseedDemoData;

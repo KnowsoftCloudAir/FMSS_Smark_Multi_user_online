@@ -92,10 +92,19 @@
 
       // Force General Admin chrome: hide company modules, show approvals only
       applyGeneralAdminChrome(data.user);
-      setTimeout(() => {
+      // Retry visibility several times in case enterApp overwrites display
+      function forceApprovalsVisible() {
+        applyGeneralAdminChrome(data.user);
+        document.querySelectorAll(".super-only, #nav-firm-approvals, .nav-item[data-view='superadmin']").forEach(el => {
+          el.style.display = "flex";
+          el.style.visibility = "visible";
+        });
         if (typeof showView === "function") showView("superadmin");
         loadRegisteredFirms();
-      }, 200);
+      }
+      setTimeout(forceApprovalsVisible, 100);
+      setTimeout(forceApprovalsVisible, 400);
+      setTimeout(forceApprovalsVisible, 900);
     } catch (ex) {
       console.error(ex);
       if (err) {
@@ -116,23 +125,32 @@
       role === "general_admin" ||
       role === "superadmin" ||
       role === "owner" ||
-      user?.is_general_admin;
+      user?.is_general_admin === true;
 
+    // ALWAYS show Firm Approvals for platform admins
     document.querySelectorAll(".super-only").forEach((el) => {
       el.style.display = isGA ? "flex" : "none";
     });
-    // Hide company-only modules for pure platform admin
-    if (isGA && !user.company_id) {
-      document.querySelectorAll(
-        '.nav-item[data-view="finance"], .nav-item[data-view="inventory"], .nav-item[data-view="assets"], .nav-item[data-view="vendors"], .nav-item[data-view="payments"], .nav-item[data-view="users"], .nav-item[data-view="settings"]'
-      ).forEach((el) => {
-        el.style.display = "none";
+    document.querySelectorAll('.nav-item[data-view="superadmin"]').forEach((el) => {
+      el.innerHTML = '<span class="icon">🛡️</span> Firm Approvals';
+      el.style.display = isGA ? "flex" : "none";
+      el.classList.add("super-only");
+    });
+
+    // Hide company modules for pure platform admin (no company_id)
+    if (isGA && (user.company_id == null || user.company_id === undefined)) {
+      const hideViews = ["finance","inventory","assets","vendors","payments","users","settings",
+        "finance-setup","assets-reg","currency","tasks","reports","corrections","bank"];
+      hideViews.forEach(v => {
+        document.querySelectorAll('.nav-item[data-view="'+v+'"]').forEach(el => {
+          el.style.display = "none";
+        });
       });
-      // Rename label
-      document.querySelectorAll('.nav-item[data-view="superadmin"]').forEach((el) => {
-        el.innerHTML = '<span class="icon">🛡️</span> Firm Approvals';
-        el.style.display = "flex";
-      });
+    }
+
+    // Force open the approvals view
+    if (isGA && typeof showView === "function") {
+      try { showView("superadmin"); } catch (e) {}
     }
   }
 

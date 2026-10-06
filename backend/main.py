@@ -80,6 +80,11 @@ try:
     app.include_router(project_router)
 except Exception as _e:
     print("project_finance_api not loaded:", _e)
+try:
+    from demo_control import router as demo_router
+    app.include_router(demo_router)
+except Exception as _e:
+    print("demo_control not loaded:", _e)
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -4561,6 +4566,53 @@ def delete_demo_procurement(current_user: User = Depends(get_current_active_user
 
 
 # ===== SPA (must be last routes) =====
+
+
+
+
+# ---- Knowsoft branded error pages ----
+from fastapi.responses import HTMLResponse
+
+def _knowsoft_error_html(code: int, title: str, message: str) -> str:
+    return f"""<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>{code} — Knowsoft FMSS</title>
+<style>
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0a0e17;color:#e8eef7;}}
+.card{{background:#0f1724;border:1px solid #1e3a5f;border-radius:16px;padding:40px 36px;max-width:440px;text-align:center;}}
+h1{{margin:0 0 8px;font-size:28px;color:#5eb3ff;}}
+p{{margin:0 0 24px;color:#9bb0c9;line-height:1.5;}}
+a.btn{{display:inline-block;padding:12px 28px;border-radius:8px;background:#00b4d8;color:#041018;
+text-decoration:none;font-weight:600;}}
+.logo{{font-size:42px;margin-bottom:12px;}}
+</style></head><body>
+<div class="card">
+  <div class="logo">🛡️</div>
+  <h1>Knowsoft FMSS</h1>
+  <p><strong>{code} — {title}</strong><br/>{message}</p>
+  <a class="btn" href="/">← Back to app</a>
+</div>
+</body></html>"""
+
+@app.exception_handler(404)
+async def knowsoft_404(request, exc):
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        return HTMLResponse(_knowsoft_error_html(404, "Page not found",
+            "This page does not exist or was moved. Use Back to return to Knowsoft FMSS."), status_code=404)
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": "Not found"}, status_code=404)
+
+@app.exception_handler(500)
+async def knowsoft_500(request, exc):
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        return HTMLResponse(_knowsoft_error_html(500, "Something went wrong",
+            "An unexpected error occurred. You can go back and continue working. If it persists, contact Knowsoft support."), status_code=500)
+    from fastapi.responses import JSONResponse
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
 
 
 @app.get("/")

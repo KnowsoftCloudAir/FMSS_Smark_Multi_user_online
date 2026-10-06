@@ -188,7 +188,7 @@
         <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
         <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
-        <a href="#" class="nav-item super-only" data-view="superadmin" style="display:none;"><span class="icon">🛡️</span> Firm Approvals</a>
+        <a href="#" class="nav-item super-only" data-view="superadmin" id="nav-firm-approvals" style="display:none;"><span class="icon">🛡️</span> Firm Approvals</a>
         <a href="#" class="nav-item" data-view="currency"><span class="icon">💱</span> Currencies</a>
         <a href="#" class="nav-item" data-view="tasks"><span class="icon">✅</span> Tasks</a>
 
@@ -477,11 +477,13 @@
             <h3>Demo data</h3>
             <p class="hint">If finance tables are empty, reload sample COA, budgets, payments, inventory and procurement.</p>
             <button type="button" class="btn btn-accent" onclick="reseedDemoData()">Reseed demo company data</button>
+            <button type="button" class="btn btn-outline" onclick="loadDemoData()" style="margin-left:8px;">Load demo data</button>
+            <button type="button" class="btn btn-outline" onclick="clearDemoData()" style="margin-left:8px;">Clear demo data</button>
           </div>
 
           <div class="card">
             <div class="card-header">
-              <h3>Registered Firms</h3>
+              <h3>Firm Approvals — Registered Companies</h3>
               <a class="btn btn-secondary" href="/api/superadmin/backup/all" id="btn-backup-all">Backup All Firms</a>
             </div>
             <div class="table-responsive">
@@ -891,5 +893,6 @@
   <script src="/general_admin.js"></script>
   <script src="/project_charts.js"></script>
   <script src="/registration_clean.js"></script>
+  <script src="/reliability.js"></script>
 </body>
 </html>
