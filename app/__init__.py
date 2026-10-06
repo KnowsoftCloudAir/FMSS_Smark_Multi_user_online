@@ -1,1 +1,0 @@
-# Knowsoft BizPOS
