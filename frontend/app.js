@@ -358,7 +358,7 @@ async function loadUsers() {
     try {
       users = await api("/api/admin/users");
     } catch (e1) {
-      if (currentUser && currentUser.role === "superadmin") {
+      if (currentUser && (currentUser.role === "superadmin" || currentUser.role === "owner")) {
         users = await api("/api/superadmin/users");
       } else throw e1;
     }
@@ -641,7 +641,7 @@ enterApp = function () {
     currentUser.company_name || "";
 
   const isAdmin = ["company_admin", "admin", "superadmin"].includes(currentUser.role);
-  const isSuper = currentUser.role === "superadmin";
+  const isSuper = currentUser.role === "superadmin" || currentUser.role === "owner";
   const isFinance = ["finance", "company_admin", "superadmin"].includes(currentUser.role);
 
   document.querySelectorAll(".admin-only").forEach(el => {

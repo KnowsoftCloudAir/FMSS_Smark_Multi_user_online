@@ -63,8 +63,10 @@ from auth import (
 Base.metadata.create_all(bind=engine)
 _migrate_schema(engine)
 
-app = FastAPI(title="Knowsoft FMSS ERP", version="2.2.0")
+app = FastAPI(title="Knowsoft FMSS ERP", version="2.3.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+from erp_ext import router as erp_router
+app.include_router(erp_router)
 
 STATIC_DIR = Path(__file__).parent.parent / "static"
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -1174,6 +1176,8 @@ def _app_startup_entry():
             print("migrate:", e)
         try:
             init_defaults(db)
+            from erp_ext import seed_erp
+            seed_erp(db)
         except Exception as e:
             import traceback; print("init_defaults:", e); traceback.print_exc()
         try:
@@ -1260,8 +1264,26 @@ def register_company(data: CompanyRegister, db: Session = Depends(get_db)):
     db.add(admin)
     db.commit()
     audit(db, company.id, admin, "REGISTER_COMPANY", f"Pending approval: {company.name}")
+    try:
+        from erp_ext import ErpTask
+        from models import ErpTask as TaskRow
+        import json
+        db.add(TaskRow(
+            company_id=company.id,
+            task_type="company_approval",
+            title=f"Approve {company.name}",
+            status="submitted",
+            assigned_role="owner",
+            payload_json=json.dumps({"slug": company.slug}),
+            idempotency_key=f"approve-{company.slug}",
+            created_by=admin.username,
+        ))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        print("approval task:", exc)
     return {
-        "message": "Registration submitted. Awaiting Knowsoft superadmin approval and annual license.",
+        "message": "Registration submitted. The owner must approve this company before sign-in.",
         "company": {"name": company.name, "slug": company.slug, "status": "pending"},
     }
 
@@ -1273,10 +1295,10 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
     company = None
     username = raw
 
-    # Platform superadmin
-    if raw == "superadmin" or raw.startswith("superadmin/"):
-        username = "superadmin"
-        user = db.query(User).filter(User.username == "superadmin", User.company_id.is_(None)).first()
+    # Platform owner and superadmin (no company)
+    if raw in ("owner", "superadmin") or raw.startswith("owner/") or raw.startswith("superadmin/"):
+        username = "owner" if raw.startswith("owner") else "superadmin"
+        user = db.query(User).filter(User.username == username, User.company_id.is_(None)).first()
         if not user or not verify_password(password, user.hashed_password):
             raise HTTPException(401, "Incorrect username or password")
     else:

@@ -83,26 +83,20 @@
         <!-- LOGIN CARD -->
         <div class="auth-card" id="login-card">
           <h2>Sign In</h2>
-          <p class="auth-hint">Use <code>company-slug/username</code> for firm users</p>
+          <p class="auth-hint">Company users sign in as company-slug/username. Owner approval is a separate backend login.</p>
           <form id="login-form">
             <div class="form-group">
               <label>Company / Username</label>
-              <input type="text" id="username" required placeholder="demo/program" autocomplete="username" />
+              <input type="text" id="username" required placeholder="company/username" autocomplete="username" />
             </div>
             <div class="form-group">
               <label>Password</label>
-              <input type="password" id="password" required placeholder="Enter password" autocomplete="current-password" />
+              <input type="password" id="password" required placeholder="Password" autocomplete="current-password" />
             </div>
             <button type="submit" class="btn btn-accent btn-block" id="login-btn">Sign In</button>
             <div id="login-error" class="error-msg" style="display:none;"></div>
           </form>
-          <div class="demo-credentials">
-            <p class="demo-title">Demo login — Program Manager</p>
-            <p><strong>Username:</strong> <code>demo/program</code><br/>
-               <strong>Password:</strong> <code>Program@Knowsoft1!</code></p>
-            <p class="demo-note">Format: <code>company-slug/username</code> for firm users.</p>
-          </div>
-          <p class="auth-switch">New firm? <a href="#" id="switch-to-register">Register company</a></p>
+          <p class="auth-switch">New firm? <a href="#" id="switch-to-register">Register company</a> · <a href="#" id="switch-to-owner">Owner console</a></p>
         </div>
 
         <!-- REGISTER CARD -->
@@ -145,6 +139,23 @@
           </form>
           <p class="auth-switch">Already registered? <a href="#" id="switch-to-login">Sign in</a></p>
         </div>
+        <div class="auth-card" id="owner-card" style="display:none;">
+          <h2>Owner backend</h2>
+          <p class="auth-hint">Approve newly registered companies. No password is shown on this page.</p>
+          <form id="owner-form">
+            <div class="form-group">
+              <label>Owner username</label>
+              <input type="text" id="owner-username" required autocomplete="username" />
+            </div>
+            <div class="form-group">
+              <label>Password</label>
+              <input type="password" id="owner-password" required autocomplete="current-password" />
+            </div>
+            <button type="submit" class="btn btn-accent btn-block">Open owner console</button>
+            <div id="owner-error" class="error-msg" style="display:none;"></div>
+          </form>
+          <p class="auth-switch"><a href="#" id="switch-owner-login">Company sign in</a></p>
+        </div>
       </div>
     </main>
 
@@ -177,7 +188,9 @@
         <a href="#" class="nav-item" data-view="bank-recon"><span class="icon">🏦</span> Bank Reconciliation</a>
         <a href="#" class="nav-item" data-view="assets" data-perm="assets"><span class="icon">🏢</span> Fixed Assets</a>
         <a href="#" class="nav-item admin-only" data-view="finance-setup" style="display:none;"><span class="icon">📒</span> Finance Setup</a>
-        <a href="#" class="nav-item super-only" data-view="superadmin" style="display:none;"><span class="icon">🛡️</span> Superadmin</a>
+        <a href="#" class="nav-item super-only" data-view="superadmin" style="display:none;"><span class="icon">🛡️</span> Owner approvals</a>
+        <a href="#" class="nav-item" data-view="currency"><span class="icon">💱</span> Currencies</a>
+        <a href="#" class="nav-item" data-view="tasks"><span class="icon">✅</span> Tasks</a>
 
         <a href="#" class="nav-item admin-only" data-view="users" style="display:none;"><span class="icon">👥</span> User Management</a>
         <a href="#" class="nav-item" data-view="security"><span class="icon">🔐</span> Security & Backup</a>
@@ -432,6 +445,20 @@
           </div>
         </section>
 
+        <section id="view-currency" class="view">
+          <div class="card">
+            <h3>Multi-currency</h3>
+            <p class="hint">Base books stay in the company currency. Foreign documents convert with the latest rate.</p>
+            <div id="currency-board"></div>
+          </div>
+        </section>
+        <section id="view-tasks" class="view">
+          <div class="card">
+            <h3>Task control</h3>
+            <p class="hint">Tasks move only along allowed steps. A failed step can be retried. Repeating a finished approval does not post twice.</p>
+            <div id="task-board"></div>
+          </div>
+        </section>
         <section id="view-superadmin" class="view">
           <div class="card" style="margin-bottom:1rem">
             <h3>Demo data</h3>
@@ -837,6 +864,7 @@
   </div>
 
   <script src="/app.js"></script>
+  <script src="/erp.js"></script>
 <script>
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', function () {

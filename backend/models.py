@@ -647,3 +647,43 @@ class ProcurementInvoice(Base):
     submitted_to_finance_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     is_demo = Column(Boolean, default=False)
+
+
+class Currency(Base):
+    __tablename__ = "currencies"
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(10), unique=True, nullable=False, index=True)
+    name = Column(String(80), nullable=False)
+    symbol = Column(String(10), default="")
+    decimal_places = Column(Integer, default=2)
+    is_active = Column(Boolean, default=True)
+    is_base = Column(Boolean, default=False)
+
+
+class ExchangeRate(Base):
+    __tablename__ = "exchange_rates"
+    id = Column(Integer, primary_key=True, index=True)
+    base_code = Column(String(10), nullable=False, index=True)
+    quote_code = Column(String(10), nullable=False, index=True)
+    rate = Column(Float, nullable=False)
+    rate_date = Column(Date, default=date.today, index=True)
+    source = Column(String(40), default="manual")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ErpTask(Base):
+    __tablename__ = "erp_tasks"
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
+    task_type = Column(String(40), nullable=False, index=True)
+    title = Column(String(200), nullable=False)
+    status = Column(String(30), default="draft", index=True)
+    priority = Column(String(20), default="normal")
+    payload_json = Column(Text, default="{}")
+    assigned_role = Column(String(40), default="owner")
+    idempotency_key = Column(String(80), nullable=True, index=True)
+    error = Column(Text, default="")
+    attempts = Column(Integer, default=0)
+    created_by = Column(String(50), default="system")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
