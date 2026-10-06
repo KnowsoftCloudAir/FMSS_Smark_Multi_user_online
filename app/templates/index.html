@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="royal">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <title>Knowsoft Payme</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/app.css" />
+  <link rel="icon" href="/static/logo.png" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#0b1220" />
+  <link rel="apple-touch-icon" href="/static/icons/icon-192.png" />
+  <style>
+    .splash{position:fixed;inset:0;z-index:9999;background:#0b1220;display:flex;flex-direction:column;align-items:center;justify-content:center;transition:opacity .6s,visibility .6s}
+    .splash.hide{opacity:0;visibility:hidden;pointer-events:none}
+    .splash img{width:min(280px,70vw);border-radius:22px;animation:in .8s ease}
+    .splash-bar{width:min(160px,40vw);height:3px;background:rgba(255,255,255,.12);border-radius:99px;margin-top:1.2rem;overflow:hidden}
+    .splash-bar>i{display:block;height:100%;width:0;background:linear-gradient(90deg,#f5c542,#3b82f6);animation:load 1.4s ease forwards}
+    @keyframes load{to{width:100%}} @keyframes in{from{opacity:0;transform:scale(.94)}to{opacity:1;transform:none}}
+    .home-wrap{max-width:420px;margin:0 auto;padding:2rem 1.25rem 3rem;text-align:center;min-height:85vh;display:flex;flex-direction:column;align-items:center;justify-content:center}
+    .home-logo{width:min(300px,78vw);border-radius:24px;box-shadow:0 20px 50px rgba(0,0,0,.45);margin:1.5rem auto 0;display:block}
+    .tagline{font-size:1.15rem;font-weight:700;margin:1rem 0 .25rem;color:#e8eef7}
+    .sub{color:#94a3b8;font-size:.95rem;margin:0 0 1.5rem}
+    .home-actions{display:flex;flex-direction:column;gap:.75rem;margin-bottom:1rem}
+    .home-actions .btn{width:100%;padding:.85rem 1rem;font-size:1rem}
+    #more-block{display:none;text-align:left;margin-top:1.25rem}
+    #more-block.open{display:block}
+    .more-btn{background:transparent;border:1px solid rgba(255,255,255,.15);color:#94a3b8;border-radius:10px;padding:.5rem 1rem;cursor:pointer;font-size:.88rem}
+  </style>
+</head>
+<body>
+  <div class="splash" id="splash">
+    <p style="color:#e8eef7;font-size:1.15rem;font-weight:600;margin:0 0 1rem;letter-spacing:0.02em;">Welcome to</p>
+    <img src="/static/logo.png" alt="Payme" />
+    <p style="color:#f5c542;font-weight:800;margin:1rem 0 0;font-size:1.25rem;">Knowsoft Payme</p>
+    <div class="splash-bar"><i></i></div>
+  </div>
+  <script>setTimeout(function(){var s=document.getElementById('splash');if(s)s.classList.add('hide');},1500);</script>
+
+  <div class="home-wrap">
+    <img class="home-logo" src="/static/logo.png" alt="Knowsoft Payme" />
+    <p class="tagline">Small Business Partner</p>
+    <p class="sub">Scan · Sell · Succeed</p>
+    <div class="home-actions">
+      <a class="btn" href="/register">Register your business</a>
+      <a class="btn btn-secondary" href="/login">Try demo</a>
+    </div>
+    <button type="button" class="more-btn" id="btn-more" onclick="var b=document.getElementById('more-block');b.classList.toggle('open');this.textContent=b.classList.contains('open')?'Show less':'Read more'">Read more</button>
+    <div id="more-block">
+      <ul class="feature-list" style="margin-top:1rem;">
+        <li>Barcode &amp; QR inventory · camera sales</li>
+        <li>POS receipts · cash &amp; credit</li>
+        <li>Expenses, purchases &amp; statements</li>
+        <li>Customer showcase &amp; order links</li>
+        <li>Offline device backup</li>
+      </ul>
+      <div class="demo-box" style="margin-top:1rem;">
+        <strong>Demo shop</strong><br/>
+        Username: <code>demo</code> · Password: <code>Demo@1234</code>
+      </div>
+    </div>
+  </div>
+  <div class="footer">Payme by Knowsoft</div>
+</body>
+</html>

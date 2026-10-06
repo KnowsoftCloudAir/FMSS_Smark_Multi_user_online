@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block title %}Sales — Scan{% endblock %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div>
+    <h2 style="margin-top:0;">Scan &amp; Sell</h2>
+    <p style="color:var(--accent);font-size:0.9rem;">Rep: <strong>{{ sales_rep_name }}</strong> ({{ sales_rep_code }})
+      · <a href="/sales/lock">Switch / lock</a></p>
+    <p style="color:var(--muted);">Scan or enter a code → <strong>Validate</strong> → confirm qty → then <strong>Scan next</strong> for another product.</p>
+    <div class="card">
+      <div id="reader" style="width:100%;max-width:420px;margin:0 auto;border-radius:12px;overflow:hidden;"></div>
+      <p id="cam-status" style="font-size:0.85rem;color:var(--muted);text-align:center;"></p>
+      <div class="form-group" style="margin-top:1rem;">
+        <label>Scanned / SKU code</label>
+        <input id="sku-input" placeholder="Code appears here after scan" style="width:100%;" autocomplete="off" />
+        <p id="scan-hint" style="font-size:0.85rem;color:var(--accent);margin:0.4rem 0 0;"></p>
+      </div>
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.75rem;">
+        <button type="button" class="btn btn-sm" id="btn-validate">Validate &amp; add</button>
+        <button type="button" class="btn btn-sm btn-secondary" id="btn-next">Scan next</button>
+        <button type="button" class="btn btn-sm btn-danger" id="btn-stop">Stop</button>
+      </div>
+      <details style="margin-top:0.75rem;font-size:0.8rem;color:var(--muted);">
+        <summary>Your product codes</summary>
+        <ul id="sku-list" style="margin:0.4rem 0;padding-left:1.1rem;"></ul>
+      </details>
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h3>Cart</h3>
+      <table class="data" id="cart-table">
+        <thead><tr><th>Item</th><th>Qty</th><th>Price</th><th>Total</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <p><strong>Total: ₦<span id="cart-total">0.00</span></strong></p>
+      <div class="form-group"><label>Payment method</label>
+        <select id="pay-method"><option value="cash">Cash</option><option value="credit">Credit</option></select>
+      </div>
+      <button class="btn" id="btn-pay" type="button">Confirm payment &amp; print receipt</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+const CATALOG = {{ catalog_json | safe }};
+const cart = [];
+let scanningEnabled = true;
+let pendingCode = null;
+const skuInput = document.getElementById('sku-input');
+const scanHint = document.getElementById('scan-hint');
+
+(function listSkus(){
+  const ul = document.getElementById('sku-list');
+  if (!CATALOG.length) { ul.innerHTML = '<li>No products — add products first</li>'; return; }
+  CATALOG.forEach(p => {
+    const li = document.createElement('li');
+    li.innerHTML = '<code style="cursor:pointer;color:var(--accent)">' + p.sku_code + '</code> — ' + p.name + ' (stock ' + p.quantity + ')';
+    li.querySelector('code').onclick = () => { skuInput.value = p.sku_code; scanHint.textContent = 'Selected ' + p.sku_code + ' — press Validate & add'; };
+    ul.appendChild(li);
+  });
+})();
+
+function normalizeCode(raw) {
+  if (!raw) return '';
+  let s = String(raw).trim().split(/[\r\n]+/)[0].trim();
+  return s.replace(/^\]C1/, '').replace(/^\]C2/, '').replace(/^\]e0/, '').replace(/^\]d2/, '').trim();
+}
+
+function findInCatalog(code) {
+  const raw = normalizeCode(code);
+  if (!raw) return null;
+  const u = raw.toUpperCase().replace(/\s+/g, '');
+  for (const p of CATALOG) {
+    const sc = (p.sku_code || '').trim();
+    if (!sc) continue;
+    if (sc === raw || sc.toUpperCase() === raw.toUpperCase()) return p;
+    if (sc.toUpperCase().replace(/\s+/g, '') === u) return p;
+  }
+  for (const p of CATALOG) {
+    const sc = (p.sku_code || '').trim();
+    if (sc && (raw.toUpperCase().includes(sc.toUpperCase()) || sc.toUpperCase().includes(raw.toUpperCase()))) return p;
+  }
+  return null;
+}
+
+function renderCart() {
+  const tb = document.querySelector('#cart-table tbody');
+  tb.innerHTML = '';
+  let t = 0;
+  cart.forEach((it, i) => {
+    t += it.quantity * it.selling_price;
+    tb.innerHTML += '<tr><td>' + it.name + '<br/><small style="color:var(--muted)">' + (it.sku_code||'') +
+      '</small></td><td>' + it.quantity + '</td><td>' + it.selling_price.toFixed(2) +
+      '</td><td>' + (it.quantity*it.selling_price).toFixed(2) +
+      '</td><td><button class="btn btn-danger btn-sm" type="button" data-i="' + i + '">×</button></td></tr>';
+  });
+  tb.querySelectorAll('button[data-i]').forEach(btn => {
+    btn.onclick = () => { cart.splice(+btn.getAttribute('data-i'), 1); renderCart(); };
+  });
+  document.getElementById('cart-total').textContent = t.toFixed(2);
+}
+
+async function validateAndAdd() {
+  const sku = normalizeCode(skuInput.value || pendingCode || '');
+  skuInput.value = sku;
+  if (!sku) { alert('Enter or scan a code first'); return; }
+  scanHint.textContent = 'Validating: ' + sku;
+  let p = findInCatalog(sku);
+  if (!p) {
+    try {
+      const r = await fetch('/api/lookup-product?code=' + encodeURIComponent(sku), { credentials: 'same-origin' });
+      if (r.ok) p = await r.json();
+      else {
+        const err = await r.json().catch(() => ({}));
+        alert(err.detail || ('Product not found: ' + sku));
+        scanHint.textContent = 'Not found: ' + sku;
+        return;
+      }
+    } catch (e) {
+      alert(e.message); return;
+    }
+  }
+  const avail = Number(p.quantity) || 0;
+  if (avail <= 0) {
+    alert('Product not available — out of stock. Please replenish.');
+    return;
+  }
+  if (avail <= 5 || p.low_stock) {
+    alert('Low stock (' + avail + ' left). Please replenish.');
+  }
+  const qty = parseFloat(prompt('Validate OK: ' + p.name + '\\nStock: ' + avail + '\\n\\nEnter quantity:', '1'));
+  if (!qty || qty <= 0) { scanHint.textContent = 'Cancelled — no quantity'; return; }
+  if (qty > avail) { alert('Not enough stock (only ' + avail + ' left)'); return; }
+  // Update local catalog stock so next scan sees reduced qty
+  p.quantity = avail - qty;
+  cart.push({
+    product_id: p.id,
+    name: p.name,
+    sku_code: p.sku_code,
+    quantity: qty,
+    selling_price: p.selling_price
+  });
+  renderCart();
+  pendingCode = null;
+  skuInput.value = '';
+  // No limit on cart size — ready for unlimited more items
+  scanHint.textContent = 'Added ' + p.name + ' × ' + qty + ' (cart: ' + cart.length + ' lines). Scan next product anytime, or confirm payment.';
+  scanningEnabled = true;
+  setTimeout(function() {
+    scanningEnabled = true;
+    scanHint.textContent = 'Ready for next product — scan or type SKU (no limit on items per sale).';
+    skuInput.focus();
+  }, 1500);
+}
+
+document.getElementById('btn-validate').onclick = () => validateAndAdd();
+document.getElementById('btn-next').onclick = () => {
+  scanningEnabled = true;
+  pendingCode = null;
+  skuInput.value = '';
+  scanHint.textContent = 'Ready — scan a different product barcode/QR, then Validate & add';
+  skuInput.focus();
+};
+document.getElementById('btn-stop').onclick = () => {
+  scanningEnabled = false;
+  pendingCode = null;
+  scanHint.textContent = 'Scanning stopped. Confirm payment when ready.';
+};
+skuInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); validateAndAdd(); }
+});
+
+document.getElementById('btn-pay').onclick = async () => {
+  if (!cart.length) { alert('Cart empty'); return; }
+  const res = await fetch('/api/sales/complete', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: cart, payment_method: document.getElementById('pay-method').value, sales_rep_code: '{{ sales_rep_code }}' })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) { alert(data.detail || 'Failed'); return; }
+  cart.length = 0; renderCart();
+  location.href = '/sales/receipt/' + data.sale_id;
+};
+
+(async function startCam() {
+  const status = document.getElementById('cam-status');
+  if (!window.Html5Qrcode) {
+    status.textContent = 'No scanner library — type SKU and press Validate & add.';
+    return;
+  }
+  try {
+    const cams = await Html5Qrcode.getCameras();
+    if (!cams || !cams.length) {
+      status.textContent = 'No camera — type SKU or tap a product code.';
+      return;
+    }
+    let cam = cams.find(c => /back|rear|environment/i.test(c.label || '')) || cams[cams.length - 1];
+    const scanner = new Html5Qrcode('reader');
+    await scanner.start(
+      { deviceId: { exact: cam.id } },
+      { fps: 8, qrbox: { width: 260, height: 140 }, experimentalFeatures: { useBarCodeDetectorIfSupported: true } },
+      (decodedText) => {
+        if (!scanningEnabled) return;
+        const cleaned = normalizeCode(decodedText);
+        pendingCode = cleaned;
+        skuInput.value = cleaned;
+        scanHint.textContent = 'Scanned: ' + cleaned + ' — press Validate & add';
+        scanningEnabled = false; // wait for validate / scan next
+      },
+      () => {}
+    );
+    status.textContent = 'Camera on — scan code, then Validate & add. Use Scan next for another item.';
+  } catch (e) {
+    status.textContent = 'Camera unavailable. Type SKU and Validate & add.';
+  }
+})();
+</script>
+{% endblock %}
