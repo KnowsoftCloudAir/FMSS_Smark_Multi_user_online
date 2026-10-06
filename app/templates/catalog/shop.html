@@ -1,0 +1,59 @@
+{% extends "catalog/public_base.html" %}
+{% block title %}{{ biz.name }} — Order{% endblock %}
+{% block content %}
+<div class="card">
+  <h2>{{ biz.name }} — Order</h2>
+  <p style="color:var(--muted);">Link expires 12 hours after creation.</p>
+  {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+  {% if biz.payment_instructions %}
+  <div class="alert alert-info"><strong>Pay to seller:</strong><br/>{{ biz.payment_instructions }}</div>
+  {% else %}
+  <div class="alert alert-info">Bank: {{ biz.bank_name or '—' }} · {{ biz.account_number or '—' }} · {{ biz.account_name or '' }}</div>
+  {% endif %}
+  <form method="post" action="/c/{{ token }}/order" enctype="multipart/form-data">
+    <div class="grid-2">
+      <div class="form-group"><label>Your name</label><input name="customer_name" required /></div>
+      <div class="form-group"><label>Phone</label><input name="customer_phone" required /></div>
+    </div>
+    <div class="form-group"><label>Delivery address</label><textarea name="customer_address" rows="2" required></textarea></div>
+    <table class="data">
+      <thead><tr><th>Product</th><th>Price</th><th>Qty</th><th>Line total</th></tr></thead>
+      <tbody>
+      {% for p in products %}
+        <tr>
+          <td>{{ p.name }}
+            {% if p.image_url %}<br/><a href="{{ p.image_url }}" target="_blank" rel="noopener">View picture / video</a>{% endif %}
+          </td>
+          <td>₦{{ '%.2f'|format(p.selling_price) }}</td>
+          <td><input type="number" class="qty-input" name="qty_{{ p.id }}" min="0" step="1" value="0" data-price="{{ p.selling_price }}" data-id="{{ p.id }}" style="width:80px;" /></td>
+          <td>₦<span class="line-total" data-id="{{ p.id }}">0.00</span></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    <p style="font-weight:800;margin-top:0.75rem;">Grand total: ₦<span id="grand-total">0.00</span></p>
+    <div class="form-group" style="margin-top:1rem;"><label>Payment evidence (optional, expires in 30 min)</label>
+      <input type="file" name="evidence" accept="image/*,.pdf" />
+    </div>
+    <div class="form-group">
+      <label><input type="checkbox" name="payment_consent" value="1" required /> I consent to share my details and payment evidence with this seller.</label>
+    </div>
+    <button class="btn" type="submit">Place order</button>
+  </form>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+function recalc(){
+  let g=0;
+  document.querySelectorAll('.qty-input').forEach(inp=>{
+    const q=parseFloat(inp.value)||0, pr=parseFloat(inp.dataset.price)||0, line=q*pr;
+    g+=line;
+    const el=document.querySelector('.line-total[data-id="'+inp.dataset.id+'"]');
+    if(el) el.textContent=line.toFixed(2);
+  });
+  document.getElementById('grand-total').textContent=g.toFixed(2);
+}
+document.querySelectorAll('.qty-input').forEach(i=>i.addEventListener('input',recalc));
+</script>
+{% endblock %}

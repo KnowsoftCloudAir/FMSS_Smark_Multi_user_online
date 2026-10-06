@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Payme</title>
+<link rel="stylesheet" href="/static/css/app.css"/>
+</head>
+<body>
+<div class="container" style="max-width:420px;margin:3rem auto;text-align:center;">
+  <img src="{{ logo or '/static/logo.png' }}" alt="" style="height:72px;border-radius:14px;margin-bottom:1rem;"/>
+  <div class="card">
+    <h2 style="margin-top:0;">Please try again</h2>
+    <p style="color:var(--muted);">{{ message or 'Something went wrong. Your data is safe.' }}</p>
+    <button type="button" class="btn" onclick="history.back()">Back</button>
+    <a class="btn btn-ghost" href="/" style="margin-left:.5rem;">Home</a>
+  </div>
+</div>
+</body></html>

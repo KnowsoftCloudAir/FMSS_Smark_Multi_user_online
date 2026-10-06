@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Register Business — Payme{% endblock %}
+{% block content %}
+<div class="card" style="max-width:640px;margin:1.5rem auto;">
+  <h2>Register your business</h2>
+  <p style="color:var(--muted);font-size:0.9rem;">Submit for approval. You will receive a one-time login code by SMS/email after approval.</p>
+  {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
+  <form method="post" action="/register">
+    <div class="form-group"><label>Business name *</label><input name="name" required /></div>
+    <div class="grid-2">
+      <div class="form-group"><label>Business type</label>
+        <select name="business_type">
+          <option>Retail</option><option>Wholesale</option><option>Services</option><option>Manufacturing</option><option>Other</option>
+        </select>
+      </div>
+      <div class="form-group"><label>CAC number (optional)</label><input name="cac_number" /></div>
+    </div>
+    <div class="grid-2">
+      <div class="form-group"><label>Email *</label><input type="email" name="email" required /></div>
+      <div class="form-group"><label>Phone *</label><input name="phone" required placeholder="080..." /></div>
+    </div>
+    <h3 style="font-size:1rem;margin:1rem 0 0.5rem;">Payment account (optional)</h3>
+    <div class="grid-2">
+      <div class="form-group"><label>Bank name</label><input name="bank_name" /></div>
+      <div class="form-group"><label>Account number</label><input name="account_number" /></div>
+    </div>
+    <div class="form-group"><label>Account name</label><input name="account_name" /></div>
+    <div class="form-group"><label>Product types</label>
+      <div class="checkbox-grid">
+        {% for t in product_types %}
+        <label><input type="checkbox" name="product_types" value="{{ t }}" /> {{ t }}</label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="form-group">
+      <label>Business currency *</label>
+      <select name="currency" required>
+        {% for code, name, sym in currencies %}
+        <option value="{{ code }}" {% if code == 'USD' %}selected{% endif %}>{{ code }} — {{ name }} ({{ sym }})</option>
+        {% endfor %}
+      </select>
+      <p style="font-size:0.8rem;color:var(--muted);margin:0.35rem 0 0;">Prices, sales and statements will use this currency.</p>
+    </div>
+    <div class="form-group">
+      <label><input type="checkbox" name="consent" value="1" required /> I confirm the details are correct and consent to Knowsoft processing this registration.</label>
+    </div>
+    <button class="btn btn-block" type="submit">Register</button>
+  </form>
+</div>
+{% endblock %}

@@ -1,0 +1,20 @@
+{% extends "catalog/public_base.html" %}
+{% block content %}
+<div class="card" style="max-width:420px;margin:2rem auto;text-align:center;">
+  <h2>Order received</h2>
+  <p>Total <strong>₦{{ '%.2f'|format(total) }}</strong>. The seller will contact you.</p>
+  <hr style="border-color:var(--card-border);margin:1.25rem 0;"/>
+  <p style="color:var(--muted);font-size:0.9rem;">Download and try</p>
+  {% if app_url %}
+  <a href="{{ app_url }}" target="_blank" rel="noopener">
+    <img src="/static/logo.png" alt="Payme by Knowsoft" style="height:80px;border-radius:14px;"/>
+  </a>
+  <p style="margin-top:0.5rem;font-weight:700;">Payme by Knowsoft</p>
+  <p style="font-size:0.85rem;"><a class="btn btn-sm" href="{{ app_url }}" target="_blank" rel="noopener">Download app</a></p>
+  {% else %}
+  <img src="/static/logo.png" alt="Payme by Knowsoft" style="height:80px;border-radius:14px;opacity:0.9;"/>
+  <p style="margin-top:0.5rem;font-weight:700;">Payme by Knowsoft</p>
+  <p style="color:var(--muted);font-size:0.9rem;">No link</p>
+  {% endif %}
+</div>
+{% endblock %}

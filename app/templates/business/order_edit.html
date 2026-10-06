@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div class="card" style="max-width:560px;">
+    <h2>Edit order #{{ order.id }} &amp; send reorder link</h2>
+    <p style="color:var(--muted);font-size:0.9rem;">Explain why the order needs changes. A <strong>new unique link</strong> is created for the customer to place a corrected order.</p>
+    <p><strong>Current customer:</strong> {{ order.customer_name }} · {{ order.customer_phone }}</p>
+    <p><strong>Current total:</strong> ₦{{ '%.2f'|format(order.total_amount) }}</p>
+    <h3>Items on original order</h3>
+    <ul>
+      {% for it in items %}
+      <li>{{ it.name }} × {{ it.qty }} @ ₦{{ it.price }} = ₦{{ it.line }}</li>
+      {% else %}
+      <li><code>{{ order.items_json }}</code></li>
+      {% endfor %}
+    </ul>
+    <form method="post" action="/orders/{{ order.id }}/edit">
+      <div class="form-group">
+        <label>Reason for customer (required)</label>
+        <textarea name="edit_reason" rows="4" required placeholder="e.g. Item out of stock — please choose another, or wrong quantity..."></textarea>
+      </div>
+      <div class="form-group"><label>Customer name (optional update)</label>
+        <input name="customer_name" value="{{ order.customer_name }}" /></div>
+      <div class="form-group"><label>Phone</label>
+        <input name="customer_phone" value="{{ order.customer_phone }}" /></div>
+      <div class="form-group"><label>Address</label>
+        <textarea name="customer_address" rows="2">{{ order.customer_address or '' }}</textarea></div>
+      <button class="btn" type="submit">Save &amp; generate unique reorder link</button>
+      <a class="btn btn-ghost" href="/orders/{{ order.id }}">Cancel</a>
+    </form>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div class="card">
+    <h2>Register goods</h2>
+    <form method="post" action="/products/new" enctype="multipart/form-data">
+      <div class="form-group"><label>Name *</label><input name="name" required /></div>
+      <div class="form-group"><label>Unique code (SKU)</label><input name="sku_code" value="{{ sku }}" required /></div>
+      <div class="form-group"><label>Quality / description</label><textarea name="description" rows="2"></textarea></div>
+      <div class="form-group"><label>Product photo (max 100 KB)</label>
+        <input type="file" name="image_file" accept="image/*" />
+      </div>
+      <div class="form-group"><label>Or image / Google Drive link</label>
+        <input name="image_url" placeholder="https://..." />
+      </div>
+      <div class="grid-2">
+        <div class="form-group"><label>Quantity</label><input type="number" step="any" name="quantity" id="qty" value="1" / inputmode="decimal" step="any" min="0" required></div>
+        <div class="form-group"><label>Cost (₦)</label><input type="number" step="0.01" name="cost_price" id="cost" value="0" required / inputmode="decimal" step="any" min="0" required></div>
+      </div>
+      <div class="form-group"><label>Profit margin %</label><input type="number" step="0.1" name="profit_margin_pct" id="margin" value="20" / inputmode="decimal" step="any" min="0" required></div>
+      <div class="alert alert-info">Sell price: <strong id="sell">₦0.00</strong> · Stock value: <strong id="total">₦0.00</strong></div>
+      <div class="form-group"><label>Category</label><input name="category" value="General" /></div>
+      <button class="btn" type="submit">Save &amp; generate scan code</button>
+    </form>
+  </div>
+</div>
+<script>
+function recalc(){const c=+document.getElementById('cost').value||0,m=+document.getElementById('margin').value||0,q=+document.getElementById('qty').value||0,sp=c*(1+m/100);
+document.getElementById('sell').textContent='₦'+sp.toFixed(2);document.getElementById('total').textContent='₦'+(sp*q).toFixed(2);}
+['cost','margin','qty'].forEach(id=>document.getElementById(id).addEventListener('input',recalc));recalc();
+</script>
+{% endblock %}

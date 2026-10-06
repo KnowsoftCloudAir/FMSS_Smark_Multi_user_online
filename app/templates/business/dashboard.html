@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Payme{% endblock %}
+{% block content %}
+{% if trial_banner %}
+<div class="alert alert-info">Demo trial — free for 1 hour{% if trial_expires %} (until {{ trial_expires }}){% endif %}. <a href="/subscription">Subscribe</a> to continue after the trial.</div>
+{% endif %}
+
+<div class="dash-hero">
+  <div>
+    <h1 style="margin:0;font-size:1.45rem;">{{ biz.name }}</h1>
+    <p style="color:var(--muted);margin:0.25rem 0 0;font-size:0.9rem;">Welcome back{% if user %} · {{ user.full_name or user.username }}{% endif %}</p>
+  </div>
+</div>
+
+<div class="icon-grid">
+  <a class="icon-tile icon-gold" href="/sales">
+    <div class="icon-3d">📷</div>
+    <span class="icon-label">Scan &amp; Sell</span>
+    <span class="icon-sub">Camera POS</span>
+  </a>
+  <a class="icon-tile icon-blue" href="/products">
+    <div class="icon-3d">📦</div>
+    <span class="icon-label">My Goods</span>
+    <span class="icon-sub">{{ product_count }} items</span>
+  </a>
+  <a class="icon-tile icon-green" href="/receipts">
+    <div class="icon-3d">🧾</div>
+    <span class="icon-label">My Receipts</span>
+    <span class="icon-sub">Sales history</span>
+  </a>
+  <a class="icon-tile icon-purple" href="/orders">
+    <div class="icon-3d">🛒</div>
+    <span class="icon-label">Customer Orders</span>
+    {% if open_orders and open_orders > 0 %}
+    <span class="icon-badge">{{ open_orders }} new</span>
+    <span class="icon-sub">You have pending orders</span>
+    {% else %}
+    <span class="icon-sub">No open orders</span>
+    {% endif %}
+  </a>
+</div>
+
+<div class="grid-3" style="margin-top:1.25rem;">
+  <div class="kpi"><div class="label">Cash sales</div><div class="value">₦{{ '%.0f'|format(cash_sales) }}</div></div>
+  <div class="kpi"><div class="label">Credit sales</div><div class="value">₦{{ '%.0f'|format(credit_sales) }}</div></div>
+  <div class="kpi"><div class="label">Stock value</div><div class="value">₦{{ '%.0f'|format(stock_value) }}</div></div>
+  <div class="kpi"><div class="label">COGS</div><div class="value">₦{{ '%.0f'|format(cogs) }}</div></div>
+  <div class="kpi"><div class="label">Expenses</div><div class="value">₦{{ '%.0f'|format(other_exp) }}</div></div>
+  <div class="kpi">
+    <div class="label">Best product (qty sold)</div>
+    <div class="value" style="font-size:1rem;">{{ best_name }}</div>
+    <div class="label">{{ best_qty|default(0) }} units · ₦{{ '%.0f'|format(best_amt) }}</div>
+  </div>
+</div>
+
+{# Only two charts — upright 3D #}
+<div class="grid-2 dash-charts" style="margin-top:1.25rem;">
+  <div class="card chart-lift">
+    <h3 class="chart-title">Sales mix</h3>
+    <p class="chart-sub">Cash · Credit · COGS · Expenses</p>
+    <div class="chart-stage chart-stage-3d">
+      <canvas id="chartSales"></canvas>
+    </div>
+  </div>
+  <div class="card chart-lift">
+    <h3 class="chart-title">Top 4 products — sold vs stock on hand</h3>
+    <p class="chart-sub">Two bars per product: units sold (all time) and inventory balance</p>
+    <div class="chart-stage chart-stage-3d">
+      <canvas id="chartDual"></canvas>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+const chart = {{ chart | tojson }};
+const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#f5c542';
+const cash = chart.cash_sales || chart.cash || 0;
+const credit = chart.credit_sales || chart.credit || 0;
+const cogs = chart.cogs || 0;
+const exp = chart.other_exp || chart.expenses || 0;
+const dualLabels = chart.dual_labels || [];
+const dualSold = chart.dual_sold_qty || [];
+const dualStock = chart.dual_stock_qty || [];
+
+const liftPlugin = {
+  id: 'barLift',
+  beforeDatasetsDraw(c) {
+    const { ctx } = c;
+    ctx.save();
+    ctx.shadowColor = 'rgba(0,0,0,0.45)';
+    ctx.shadowBlur = 18;
+    ctx.shadowOffsetX = 6;
+    ctx.shadowOffsetY = 12;
+  },
+  afterDatasetsDraw(c) { c.ctx.restore(); }
+};
+
+new Chart(document.getElementById('chartSales'), {
+  type: 'doughnut',
+  data: {
+    labels: ['Cash sales', 'Credit sales', 'COGS', 'Other expenses'],
+    datasets: [{
+      data: [cash, credit, cogs, exp],
+      backgroundColor: [
+        accent,
+        '#3b82f6',
+        '#f97316',
+        '#64748b'
+      ],
+      borderWidth: 6,
+      borderColor: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim() || '#0b1220',
+      hoverOffset: 22,
+      borderRadius: 6,
+      spacing: 3
+    }]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    layout: { padding: 12 },
+    animation: {
+      animateRotate: true,
+      animateScale: true,
+      duration: 2000,
+      easing: 'easeOutElastic'
+    },
+    plugins: {
+      legend: {
+        position: 'bottom',
+        labels: { color: '#e8eef7', font: { weight: '700', size: 12 }, padding: 14, usePointStyle: true }
+      },
+      tooltip: {
+        callbacks: {
+          label: (x) => ' ₦' + Number(x.raw).toLocaleString(undefined, { maximumFractionDigits: 0 })
+        }
+      }
+    },
+    cutout: '58%'
+  },
+  plugins: [liftPlugin]
+});
+
+new Chart(document.getElementById('chartDual'), {
+  type: 'bar',
+  data: {
+    labels: dualLabels.length ? dualLabels : ['—'],
+    datasets: [
+      {
+        label: 'Qty sold (all time)',
+        data: dualSold.length ? dualSold : [0],
+        backgroundColor: accent,
+        borderColor: 'rgba(0,0,0,0.25)',
+        borderWidth: 1,
+        borderRadius: 10,
+        borderSkipped: false,
+        barPercentage: 0.75,
+        categoryPercentage: 0.7
+      },
+      {
+        label: 'Stock on hand',
+        data: dualStock.length ? dualStock : [0],
+        backgroundColor: '#3b82f6',
+        borderColor: 'rgba(0,0,0,0.25)',
+        borderWidth: 1,
+        borderRadius: 10,
+        borderSkipped: false,
+        barPercentage: 0.75,
+        categoryPercentage: 0.7
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    indexAxis: 'x',
+    layout: { padding: { top: 8, bottom: 4 } },
+    animation: { duration: 1800, easing: 'easeOutQuart' },
+    plugins: {
+      legend: {
+        position: 'bottom',
+        labels: { color: '#e8eef7', font: { weight: '700', size: 12 }, padding: 16, usePointStyle: true }
+      },
+      tooltip: {
+        callbacks: {
+          label: (x) => ' ' + x.dataset.label + ': ' + x.raw + ' units'
+        }
+      }
+    },
+    scales: {
+      x: {
+        ticks: { color: '#e8eef7', font: { weight: '700', size: 11 } },
+        grid: { display: false }
+      },
+      y: {
+        beginAtZero: true,
+        ticks: {
+          color: '#e8eef7',
+          font: { weight: '700' },
+          precision: 0
+        },
+        grid: { color: 'rgba(255,255,255,0.08)' },
+        title: {
+          display: true,
+          text: 'Units',
+          color: accent,
+          font: { weight: 'bold', size: 13 }
+        }
+      }
+    }
+  },
+  plugins: [liftPlugin]
+});
+</script>
+{% endblock %}

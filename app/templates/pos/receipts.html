@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div class="card">
+    <h2>Issued receipts</h2>
+    <table class="data">
+      <thead><tr><th>No</th><th>Date</th><th>Pay</th><th>Amount</th><th></th></tr></thead>
+      <tbody>
+      {% for s in sales %}
+        <tr>
+          <td>{{ s.receipt_no }}</td>
+          <td>{{ s.created_at }}</td>
+          <td>{{ s.payment_method }}</td>
+          <td>₦{{ '%.2f'|format(s.total_amount) }}</td>
+          <td>
+            <a class="btn btn-sm btn-ghost" href="/sales/receipt/{{ s.id }}">View</a>
+            <a class="btn btn-sm btn-secondary" href="/sales/receipt/{{ s.id }}/pdf">PDF</a>
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="5">No receipts yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

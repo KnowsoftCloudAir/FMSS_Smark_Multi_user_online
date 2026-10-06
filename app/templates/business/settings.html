@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="sidebar-layout">
+  {% include "business/_nav.html" %}
+  <div>
+
+    {% if request.query_params.get('pwd') == 'ok' %}
+    <div class="alert alert-success">Settings password updated.</div>
+    {% endif %}
+    {% if request.query_params.get('err') %}
+    <div class="alert alert-error">Could not change password — check current password / match.</div>
+    {% endif %}
+    <div class="card">
+      <h2>Sales Rep codes</h2>
+      <p style="color:var(--muted);font-size:0.85rem;">Only these codes can unlock Scan &amp; Sell. Demo codes: REP001, REP002.</p>
+      <form method="post" action="/settings/sales-rep" style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:end;">
+        <div class="form-group" style="margin:0;"><label>Code</label><input name="code" required placeholder="REP003" style="text-transform:uppercase;"/></div>
+        <div class="form-group" style="margin:0;"><label>Name</label><input name="name" placeholder="Cashier name"/></div>
+        <button class="btn btn-sm" type="submit">Add code</button>
+      </form>
+      <table class="data" style="margin-top:0.75rem;">
+        <thead><tr><th>Code</th><th>Name</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        {% for r in reps or [] %}
+          <tr>
+            <td><code>{{ r.code }}</code></td>
+            <td>{{ r.name }}</td>
+            <td>{% if r.is_active %}<span class="badge badge-ok">Active</span>{% else %}<span class="badge badge-bad">Off</span>{% endif %}</td>
+            <td>
+              <form method="post" action="/settings/sales-rep/{{ r.id }}/toggle" style="display:inline;">
+                <button class="btn btn-sm btn-ghost" type="submit">{% if r.is_active %}Disable{% else %}Enable{% endif %}</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="4">No codes yet</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h2>Change settings password</h2>
+      <p style="color:var(--muted);font-size:0.85rem;">First-time default was <code>payme1</code>.</p>
+      <form method="post" action="/settings/password">
+        <div class="form-group"><label>Current password</label><input type="password" name="current" required/></div>
+        <div class="form-group"><label>New password</label><input type="password" name="new_password" required minlength="4"/></div>
+        <div class="form-group"><label>Confirm</label><input type="password" name="confirm" required/></div>
+        <button class="btn btn-sm" type="submit">Update settings password</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Theme &amp; background</h2>
+      <p style="color:var(--muted);font-size:0.85rem;">Standard colours or full background mixes (mix1–mix4).</p>
+      <form method="post" action="/settings/theme" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+        {% for t in ['royal','emerald','sunset','midnight','ocean','rose','mix1','mix2','mix3','mix4'] %}
+        <button class="btn btn-sm {% if biz.theme!=t %}btn-ghost{% endif %}" name="theme" value="{{ t }}">{{ t }}</button>
+        {% endfor %}
+      </form>
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h2>Receipt style</h2>
+      <form method="post" action="/settings/receipt-style" style="display:flex;gap:0.5rem;flex-wrap:wrap;">
+        {% for s,label in [('classic','Classic'),('bold','Bold'),('minimal','Minimal'),('branded','Branded')] %}
+        <button class="btn btn-sm {% if (biz.receipt_style or 'classic')!=s %}btn-ghost{% endif %}" name="receipt_style" value="{{ s }}">{{ label }}</button>
+        {% endfor %}
+      </form>
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h2>Business logo</h2>
+      {% if biz.logo_path %}<img src="{{ biz.logo_path }}" style="max-height:64px;margin-bottom:0.5rem;" />{% endif %}
+      <form method="post" action="/settings/logo" enctype="multipart/form-data">
+        <input type="file" name="file" accept="image/*" required />
+        <button class="btn btn-sm" type="submit">Upload</button>
+      </form>
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h2>Seller payment details (for buyers)</h2>
+      <p style="color:var(--muted);font-size:0.85rem;">Shown on showcase / order pages (bank name, account, instructions).</p>
+      <form method="post" action="/settings/payment-info">
+        <div class="form-group"><textarea name="payment_instructions" rows="4" placeholder="Bank: ... Account: ... Name: ...">{{ biz.payment_instructions or '' }}</textarea></div>
+        <button class="btn btn-sm" type="submit">Save payment info</button>
+      </form>
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h2>Share products</h2>
+      <p><a class="btn btn-secondary btn-sm" href="/showcase/{{ biz.id }}" target="_blank">Open showcase</a>
+         <code style="margin-left:0.4rem;font-size:0.8rem;">/showcase/{{ biz.id }}</code></p>
+      <form method="post" action="/catalog/create-link" style="margin-top:0.75rem;"><button class="btn" type="submit">Create 12-hour order link</button></form>
+      {% if request.query_params.get('link') %}
+      <div class="alert alert-success" style="margin-top:0.75rem;">
+        <code id="clink">{{ request.base_url|string|trim('/') }}{{ request.query_params.get('link') }}</code>
+        <button class="btn btn-sm btn-ghost" type="button" onclick="navigator.clipboard.writeText(document.getElementById('clink').textContent)">Copy</button>
+      </div>
+      {% endif %}
+    </div>
+    <div class="card" style="margin-top:1rem;">
+      <h2>Offline backup</h2>
+      <button class="btn btn-secondary" type="button" onclick="syncToDevice()">Sync to device</button>
+      <span id="sync-status" style="margin-left:0.5rem;font-size:0.85rem;color:var(--muted);"></span>
+    </div>
+  </div>
+</div>
+{% endblock %}
